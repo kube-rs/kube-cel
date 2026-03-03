@@ -72,6 +72,9 @@ pub mod quantity;
 #[cfg(feature = "jsonpatch")]
 pub mod jsonpatch;
 
+#[cfg(feature = "named_format")]
+pub mod named_format;
+
 #[cfg(feature = "validation")]
 pub mod escaping;
 
@@ -117,6 +120,9 @@ pub fn register_all(ctx: &mut cel::Context<'_>) {
 
     #[cfg(feature = "jsonpatch")]
     jsonpatch::register(ctx);
+
+    #[cfg(feature = "named_format")]
+    named_format::register(ctx);
 
     // Must be last: overwrites single-type registrations with unified dispatch
     dispatch::register(ctx);
