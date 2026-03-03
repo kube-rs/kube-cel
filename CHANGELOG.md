@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.1] - 2026-03-03
+
+### Changed
+
+- CI feature-check now covers `math` and `encoders` features
+- Renamed `tests/validation_spike.rs` → `tests/cel_evaluation.rs`
+- Updated `examples/basic.rs` to showcase all new 0.4.0 features (math, base64, reverse, sort, range, flatten, CIDR.ip, IP version helpers, named format)
+
 ## [0.4.0] - 2026-03-03
 
 ### Changed

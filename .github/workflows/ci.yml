@@ -46,7 +46,7 @@ jobs:
 
       - name: check each feature independently
         run: |
-          for feature in strings lists sets regex_funcs urls ip semver_funcs format quantity; do
+          for feature in strings lists sets regex_funcs urls ip semver_funcs format quantity jsonpatch named_format math encoders; do
             echo "--- checking feature: $feature ---"
             cargo check --no-default-features --features "$feature"
           done
