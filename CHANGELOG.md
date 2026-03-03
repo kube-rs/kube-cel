@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.4.0] - 2026-03-03
+
+### Changed
+
+- **BREAKING**: `compile_rule()`, `compile_schema_validations()`, `SchemaFormat::from_schema()`, `parse_go_duration()` are now `pub(crate)` (no longer part of the public API)
+- **BREAKING**: `ValidationError` now has a `kind: ErrorKind` field
+- `ValidationError` now derives `PartialEq` and `Eq`
+- `Validator` now derives `Clone` and `Debug`
+- Added `#[must_use]` to `validate()`, `validate_compiled()`, `compile_schema()`, `json_to_cel()`, `json_to_cel_with_schema()`, `json_to_cel_with_compiled()`, `escape_field_name()`
+
+### Added
+
+- `ErrorKind` enum — classifies errors as `CompilationFailure`, `InvalidRule`, `ValidationFailure`, `InvalidResult`, or `EvaluationError`
+- `CompiledSchema::compilation_errors()` and `CompiledSchema::has_errors()` convenience methods
+- Rule `fieldPath` is now applied to override auto-generated error paths
+- Thread safety and key escaping documentation
+
+### Fixed
+
+- Rule `fieldPath` was parsed but unused — now correctly overrides the error path
+- CEL context is now reused per validation run instead of re-created per rule (performance improvement)
+
 ## [0.3.1] - 2026-03-03
 
 ### Added
