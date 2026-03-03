@@ -69,6 +69,9 @@ pub mod format;
 #[cfg(feature = "quantity")]
 pub mod quantity;
 
+#[cfg(feature = "jsonpatch")]
+pub mod jsonpatch;
+
 #[cfg(feature = "validation")]
 pub mod escaping;
 
@@ -111,6 +114,9 @@ pub fn register_all(ctx: &mut cel::Context<'_>) {
 
     #[cfg(feature = "quantity")]
     quantity::register(ctx);
+
+    #[cfg(feature = "jsonpatch")]
+    jsonpatch::register(ctx);
 
     // Must be last: overwrites single-type registrations with unified dispatch
     dispatch::register(ctx);

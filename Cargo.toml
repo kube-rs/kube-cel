@@ -23,7 +23,7 @@ chrono = { version = "0.4", default-features = false, features = ["alloc"], opti
 unsafe_code = "forbid"
 
 [features]
-default = ["strings", "lists", "sets", "regex_funcs", "urls", "ip", "semver_funcs", "format", "quantity"]
+default = ["strings", "lists", "sets", "regex_funcs", "urls", "ip", "semver_funcs", "format", "quantity", "jsonpatch"]
 strings = []
 lists = []
 sets = []
@@ -33,6 +33,7 @@ ip = ["dep:ipnet"]
 semver_funcs = ["dep:semver"]
 format = []
 quantity = []
+jsonpatch = []
 validation = ["dep:serde_json", "dep:serde", "dep:chrono"]
 
 [[example]]
