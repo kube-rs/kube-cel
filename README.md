@@ -11,7 +11,7 @@ Implements the Kubernetes-specific CEL libraries defined in [`k8s.io/apiserver/p
 
 ```toml
 [dependencies]
-kube-cel = "0.4"
+kube-cel = "0.5"
 cel = "0.12"
 ```
 
@@ -43,7 +43,7 @@ With the `validation` feature, you can compile and evaluate `x-kubernetes-valida
 
 ```toml
 [dependencies]
-kube-cel = { version = "0.4", features = ["validation"] }
+kube-cel = { version = "0.5", features = ["validation"] }
 ```
 
 ```rust
@@ -117,10 +117,10 @@ JSON field names that are CEL reserved words or contain special characters are a
 ## Supported Functions
 
 ### Strings
-`charAt`, `indexOf`, `lastIndexOf`, `lowerAscii`, `upperAscii`, `replace`, `split`, `substring`, `trim`, `join`, `strings.quote`
+`charAt`, `indexOf`, `lastIndexOf`, `lowerAscii`, `upperAscii`, `replace`, `split`, `substring`, `trim`, `join`, `reverse`, `strings.quote`
 
 ### Lists
-`isSorted`, `sum`, `min`, `max`, `indexOf`, `lastIndexOf`, `slice`, `flatten`, `reverse`, `distinct`
+`isSorted`, `sum`, `min`, `max`, `indexOf`, `lastIndexOf`, `slice`, `sort`, `flatten`, `reverse`, `distinct`, `lists.range`
 
 ### Sets
 `sets.contains`, `sets.equivalent`, `sets.intersects`
@@ -132,7 +132,7 @@ JSON field names that are CEL reserved words or contain special characters are a
 `url`, `isURL`, `getScheme`, `getHost`, `getHostname`, `getPort`, `getEscapedPath`, `getQuery`
 
 ### IP / CIDR
-`ip`, `isIP`, `ip.isCanonical`, `family`, `isLoopback`, `isUnspecified`, `isLinkLocalMulticast`, `isLinkLocalUnicast`, `isGlobalUnicast`, `cidr`, `isCIDR`, `containsIP`, `containsCIDR`, `prefixLength`, `masked`
+`ip`, `isIP`, `isIPv4`, `isIPv6`, `ip.isCanonical`, `family`, `isLoopback`, `isUnspecified`, `isLinkLocalMulticast`, `isLinkLocalUnicast`, `isGlobalUnicast`, `cidr`, `isCIDR`, `isCIDRv4`, `isCIDRv6`, `containsIP`, `containsCIDR`, `prefixLength`, `masked`, `<CIDR>.ip()`
 
 ### Semver
 `semver`, `isSemver`, `major`, `minor`, `patch`, `isGreaterThan`, `isLessThan`, `compareTo`
@@ -144,7 +144,7 @@ JSON field names that are CEL reserved words or contain special characters are a
 `<string>.format(<list>)` with verbs: `%s`, `%d`, `%f`, `%e`, `%b`, `%o`, `%x`, `%X`
 
 ### Named Format Validation
-`format.dns1123Label`, `format.dns1123Subdomain`, `format.dns1035Label`, `format.dns1123LabelPrefix`, `format.dns1123SubdomainPrefix`, `format.qualifiedName`, `format.labelValue`, `format.uri`, `format.uuid`, `format.byte`, `format.date`, `format.datetime`, `format.named`, `validate`
+`format.dns1123Label`, `format.dns1123Subdomain`, `format.dns1035Label`, `format.dns1035LabelPrefix`, `format.dns1123LabelPrefix`, `format.dns1123SubdomainPrefix`, `format.qualifiedName`, `format.labelValue`, `format.uri`, `format.uuid`, `format.byte`, `format.date`, `format.datetime`, `format.named`, `validate`
 
 ```rust
 // Returns optional: none = valid, of([...errors]) = invalid
@@ -158,6 +158,12 @@ let result = Program::compile("!format.named('uuid').validate('550e8400-e29b-41d
     .unwrap().execute(&ctx).unwrap();
 // Value::Bool(true)
 ```
+
+### Math
+`math.ceil`, `math.floor`, `math.round`, `math.trunc`, `math.abs`, `math.sign`, `math.isInf`, `math.isNaN`, `math.isFinite`, `math.bitAnd`, `math.bitOr`, `math.bitXor`, `math.bitNot`, `math.bitShiftLeft`, `math.bitShiftRight`, `math.greatest`, `math.least`
+
+### Encoders
+`base64.decode`, `base64.encode`
 
 ### JSONPatch
 `jsonpatch.escapeKey`
@@ -186,7 +192,18 @@ All features are enabled by default. Disable with `default-features = false` and
 | `quantity` | - | Kubernetes resource quantities |
 | `jsonpatch` | - | JSONPatch key escaping (RFC 6901) |
 | `named_format` | - | Named format validation (`format.dns1123Label()`, etc.) |
+| `math` | - | Math functions (`math.ceil`, `math.abs`, bitwise, etc.) |
+| `encoders` | `base64` | Base64 encode/decode |
 | `validation` | `serde_json`, `serde`, `chrono` | CRD validation pipeline (compile + evaluate `x-kubernetes-validations`, `format: date-time/duration`) |
+
+## Known Limitations
+
+| Feature | Reason |
+|---------|--------|
+| `cel.bind(var, init, expr)` | CEL compiler macro — requires `cel` crate support |
+| `<list>.sortBy(var, expr)` | Lambda evaluation — requires `cel` crate support |
+| TwoVarComprehensions (`all(i,v,...)`, `transformList`, etc.) | CEL compiler macro — K8s 1.33+ |
+| Authz library | Requires API server connection — outside client library scope |
 
 ## Related
 

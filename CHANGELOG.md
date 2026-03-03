@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.5.0] - 2026-03-03
+
+### Added
+
+- **Math extension library** (`math` feature) — 17 functions
+  - Rounding: `math.ceil`, `math.floor`, `math.round`, `math.trunc`
+  - Numeric: `math.abs`, `math.sign` (int/uint/double polymorphic)
+  - Inspection: `math.isInf`, `math.isNaN`, `math.isFinite`
+  - Bitwise: `math.bitAnd`, `math.bitOr`, `math.bitXor`, `math.bitNot`, `math.bitShiftLeft`, `math.bitShiftRight`
+  - Variadic: `math.greatest`, `math.least`
+- **Base64 encode/decode** (`encoders` feature)
+  - `base64.decode(<string>) -> bytes`
+  - `base64.encode(<bytes>) -> string`
+- **CIDR.ip()** — extract network address from CIDR: `cidr('192.168.0.0/24').ip()`
+- **IP/CIDR version helpers** — `isIPv4`, `isIPv6`, `isCIDRv4`, `isCIDRv6`
+- **String reverse** — `<string>.reverse()`
+- **List sort** — `<list>.sort()` returns sorted list
+- **lists.range(n)** — generates integer sequence `[0, n)`
+- **Flatten with depth** — `<list>.flatten(<depth>)` supports optional depth parameter
+- **dns1035LabelPrefix** named format — `format.dns1035LabelPrefix()` (like dns1035Label but trailing hyphen and empty string allowed)
+
+### Known Limitations
+
+| Feature | Reason |
+|---------|--------|
+| `cel.bind(var, init, expr)` | CEL compiler macro — requires `cel` crate support |
+| `<list>.sortBy(var, expr)` | Lambda evaluation — requires `cel` crate support |
+| TwoVarComprehensions | CEL compiler macro — K8s 1.33+ |
+| Authz library | Requires API server connection — outside client library scope |
+
 ## [0.4.0] - 2026-03-03
 
 ### Changed

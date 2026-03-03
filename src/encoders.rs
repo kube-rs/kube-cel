@@ -76,9 +76,6 @@ mod tests {
 
     #[test]
     fn test_base64_decode_empty() {
-        assert_eq!(
-            eval("base64.decode('')"),
-            Value::Bytes(Arc::new(vec![]))
-        );
+        assert_eq!(eval("base64.decode('')"), Value::Bytes(Arc::new(vec![])));
     }
 }

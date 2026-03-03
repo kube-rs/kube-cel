@@ -456,14 +456,8 @@ mod tests {
             eval("'hello'.reverse()"),
             Value::String(Arc::new("olleh".into()))
         );
-        assert_eq!(
-            eval("''.reverse()"),
-            Value::String(Arc::new("".into()))
-        );
-        assert_eq!(
-            eval("'a'.reverse()"),
-            Value::String(Arc::new("a".into()))
-        );
+        assert_eq!(eval("''.reverse()"), Value::String(Arc::new("".into())));
+        assert_eq!(eval("'a'.reverse()"), Value::String(Arc::new("a".into())));
     }
 
     #[test]

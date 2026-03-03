@@ -152,7 +152,7 @@ fn math_bit_not(v: i64) -> ResolveResult {
 
 /// `math.bitShiftLeft(int, int) -> int`
 fn math_bit_shift_left(v: i64, shift: i64) -> ResolveResult {
-    if shift < 0 || shift > 63 {
+    if !(0..=63).contains(&shift) {
         return Err(ExecutionError::function_error(
             "math.bitShiftLeft",
             "shift amount must be between 0 and 63",
@@ -163,7 +163,7 @@ fn math_bit_shift_left(v: i64, shift: i64) -> ResolveResult {
 
 /// `math.bitShiftRight(int, int) -> int`
 fn math_bit_shift_right(v: i64, shift: i64) -> ResolveResult {
-    if shift < 0 || shift > 63 {
+    if !(0..=63).contains(&shift) {
         return Err(ExecutionError::function_error(
             "math.bitShiftRight",
             "shift amount must be between 0 and 63",

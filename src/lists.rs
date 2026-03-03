@@ -545,11 +545,7 @@ mod tests {
     fn test_flatten_depth_two() {
         assert_eq!(
             eval("[[1, [2]], [3]].flatten(2)"),
-            Value::List(Arc::new(vec![
-                Value::Int(1),
-                Value::Int(2),
-                Value::Int(3),
-            ]))
+            Value::List(Arc::new(vec![Value::Int(1), Value::Int(2), Value::Int(3),]))
         );
     }
 

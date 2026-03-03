@@ -291,28 +291,28 @@ pub(crate) fn cidr_ip(This(this): This<Value>) -> ResolveResult {
 /// `isIPv4(<string>) -> bool`
 fn is_ipv4(s: Arc<String>) -> ResolveResult {
     Ok(Value::Bool(
-        parse_ip_addr(&s).map_or(false, |addr| addr.is_ipv4()),
+        parse_ip_addr(&s).is_ok_and(|addr| addr.is_ipv4()),
     ))
 }
 
 /// `isIPv6(<string>) -> bool`
 fn is_ipv6(s: Arc<String>) -> ResolveResult {
     Ok(Value::Bool(
-        parse_ip_addr(&s).map_or(false, |addr| addr.is_ipv6()),
+        parse_ip_addr(&s).is_ok_and(|addr| addr.is_ipv6()),
     ))
 }
 
 /// `isCIDRv4(<string>) -> bool`
 fn is_cidr_v4(s: Arc<String>) -> ResolveResult {
     Ok(Value::Bool(
-        parse_cidr_net(&s).map_or(false, |net| net.addr().is_ipv4()),
+        parse_cidr_net(&s).is_ok_and(|net| net.addr().is_ipv4()),
     ))
 }
 
 /// `isCIDRv6(<string>) -> bool`
 fn is_cidr_v6(s: Arc<String>) -> ResolveResult {
     Ok(Value::Bool(
-        parse_cidr_net(&s).map_or(false, |net| net.addr().is_ipv6()),
+        parse_cidr_net(&s).is_ok_and(|net| net.addr().is_ipv6()),
     ))
 }
 
