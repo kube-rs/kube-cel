@@ -903,7 +903,7 @@ fn compiled_schema_matches_schema_validation() {
 
 #[test]
 fn kube_core_rule_json_compatibility() {
-    use kube_cel::compilation::compile_schema_validations;
+    use kube_cel::compilation::compile_schema;
 
     // JSON format matching kube-core's Rule serialization output
     let schema = json!({
@@ -925,7 +925,8 @@ fn kube_core_rule_json_compatibility() {
         ]
     });
 
-    let results = compile_schema_validations(&schema);
+    let compiled = compile_schema(&schema);
+    let results = &compiled.validations;
     assert_eq!(results.len(), 3);
 
     // First rule: all fields populated
@@ -954,7 +955,7 @@ fn kube_core_rule_json_compatibility() {
 
 #[test]
 fn kube_core_reason_values() {
-    use kube_cel::compilation::compile_schema_validations;
+    use kube_cel::compilation::compile_schema;
 
     // All Reason variants from kube-core
     let schema = json!({
@@ -966,7 +967,8 @@ fn kube_core_reason_values() {
         ]
     });
 
-    let results = compile_schema_validations(&schema);
+    let compiled = compile_schema(&schema);
+    let results = &compiled.validations;
     assert_eq!(results.len(), 4);
     assert_eq!(
         results[0].as_ref().unwrap().rule.reason.as_deref(),

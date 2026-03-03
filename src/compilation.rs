@@ -81,7 +81,7 @@ impl std::error::Error for CompilationError {
 /// Compile a single [`Rule`] into a [`CompilationResult`].
 ///
 /// Returns [`CompilationError::Parse`] if the CEL expression is invalid.
-pub fn compile_rule(rule: &Rule) -> Result<CompilationResult, CompilationError> {
+pub(crate) fn compile_rule(rule: &Rule) -> Result<CompilationResult, CompilationError> {
     let program = Program::compile(&rule.rule).map_err(|e| CompilationError::Parse {
         rule: rule.rule.clone(),
         source: e,
@@ -107,7 +107,7 @@ pub fn compile_rule(rule: &Rule) -> Result<CompilationResult, CompilationError> 
 /// If the schema has no `x-kubernetes-validations` key or it is not an array,
 /// returns an empty `Vec`. Each rule is compiled independently — failures in one
 /// rule do not prevent others from compiling.
-pub fn compile_schema_validations(
+pub(crate) fn compile_schema_validations(
     schema: &serde_json::Value,
 ) -> Vec<Result<CompilationResult, CompilationError>> {
     let rules = match schema.get("x-kubernetes-validations") {
@@ -162,6 +162,7 @@ impl CompiledSchema {
 ///
 /// Returns a [`CompiledSchema`] that can be reused across multiple validation
 /// calls, avoiding repeated compilation.
+#[must_use]
 pub fn compile_schema(schema: &serde_json::Value) -> CompiledSchema {
     let validations = compile_schema_validations(schema);
 

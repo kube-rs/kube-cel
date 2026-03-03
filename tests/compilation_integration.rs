@@ -6,20 +6,20 @@
 //! rule extraction, compilation, and evaluation.
 
 use cel::{Context, Value};
-use kube_cel::compilation::{CompilationError, compile_schema_validations};
+use kube_cel::compilation::{CompilationError, compile_schema};
 use kube_cel::values::json_to_cel;
 use serde_json::json;
 
 /// Helper: compile rules from a schema, bind `self` from JSON, and evaluate
 /// the first successfully compiled program.
 fn compile_and_eval_first(schema: serde_json::Value, self_val: serde_json::Value) -> Value {
-    let results = compile_schema_validations(&schema);
-    let compiled = results.into_iter().next().unwrap().unwrap();
+    let compiled = compile_schema(&schema);
+    let cr = compiled.validations.into_iter().next().unwrap().unwrap();
 
     let mut ctx = Context::default();
     kube_cel::register_all(&mut ctx);
     ctx.add_variable_from_value("self", json_to_cel(&self_val));
-    compiled.program.execute(&ctx).unwrap()
+    cr.program.execute(&ctx).unwrap()
 }
 
 #[test]
@@ -47,9 +47,14 @@ fn crd_schema_end_to_end() {
     let spec_schema = &schema["properties"]["spec"];
     let self_val = json!({"replicas": 5, "minReplicas": 2});
 
-    let results = compile_schema_validations(spec_schema);
-    assert_eq!(results.len(), 1);
-    let compiled = results.into_iter().next().unwrap().unwrap();
+    let spec_compiled = compile_schema(spec_schema);
+    assert_eq!(spec_compiled.validations.len(), 1);
+    let compiled = spec_compiled
+        .validations
+        .into_iter()
+        .next()
+        .unwrap()
+        .unwrap();
 
     assert!(!compiled.is_transition_rule);
     assert_eq!(
@@ -86,8 +91,13 @@ fn transition_rule_compile_and_eval() {
         ]
     });
 
-    let results = compile_schema_validations(&schema);
-    let compiled = results.into_iter().next().unwrap().unwrap();
+    let compiled_schema = compile_schema(&schema);
+    let compiled = compiled_schema
+        .validations
+        .into_iter()
+        .next()
+        .unwrap()
+        .unwrap();
 
     assert!(compiled.is_transition_rule);
     assert_eq!(compiled.rule.message.as_deref(), Some("cannot scale down"));
@@ -122,8 +132,13 @@ fn message_and_reason_preserved() {
         ]
     });
 
-    let results = compile_schema_validations(&schema);
-    let compiled = results.into_iter().next().unwrap().unwrap();
+    let compiled_schema = compile_schema(&schema);
+    let compiled = compiled_schema
+        .validations
+        .into_iter()
+        .next()
+        .unwrap()
+        .unwrap();
 
     assert_eq!(compiled.rule.message.as_deref(), Some("x must be positive"));
     assert_eq!(
@@ -144,24 +159,24 @@ fn multiple_rules_mixed_results() {
         ]
     });
 
-    let results = compile_schema_validations(&schema);
-    assert_eq!(results.len(), 3);
+    let compiled = compile_schema(&schema);
+    assert_eq!(compiled.validations.len(), 3);
 
     // First rule: valid, evaluate it
-    let compiled = results[0].as_ref().unwrap();
+    let cr = compiled.validations[0].as_ref().unwrap();
     let mut ctx = Context::default();
     kube_cel::register_all(&mut ctx);
     ctx.add_variable_from_value("self", json_to_cel(&json!({"a": 5})));
-    assert_eq!(compiled.program.execute(&ctx).unwrap(), Value::Bool(true));
+    assert_eq!(cr.program.execute(&ctx).unwrap(), Value::Bool(true));
 
     // Second rule: parse error
     assert!(matches!(
-        results[1].as_ref().unwrap_err(),
+        compiled.validations[1].as_ref().unwrap_err(),
         CompilationError::Parse { .. }
     ));
 
     // Third rule: valid
-    assert!(results[2].is_ok());
+    assert!(compiled.validations[2].is_ok());
 }
 
 #[test]
@@ -192,9 +207,14 @@ fn realistic_crd_with_multiple_validation_levels() {
     });
 
     // Compile spec-level rules
-    let spec_results = compile_schema_validations(&crd_schema["properties"]["spec"]);
-    assert_eq!(spec_results.len(), 1);
-    let spec_compiled = spec_results.into_iter().next().unwrap().unwrap();
+    let spec_compiled = compile_schema(&crd_schema["properties"]["spec"]);
+    assert_eq!(spec_compiled.validations.len(), 1);
+    let spec_cr = spec_compiled
+        .validations
+        .into_iter()
+        .next()
+        .unwrap()
+        .unwrap();
 
     let mut ctx = Context::default();
     kube_cel::register_all(&mut ctx);
@@ -202,33 +222,28 @@ fn realistic_crd_with_multiple_validation_levels() {
         "self",
         json_to_cel(&json!({"replicas": 3, "template": {"name": "web"}})),
     );
-    assert_eq!(
-        spec_compiled.program.execute(&ctx).unwrap(),
-        Value::Bool(true)
-    );
+    assert_eq!(spec_cr.program.execute(&ctx).unwrap(), Value::Bool(true));
 
     // Compile template-level rules
-    let tmpl_results =
-        compile_schema_validations(&crd_schema["properties"]["spec"]["properties"]["template"]);
-    assert_eq!(tmpl_results.len(), 1);
-    let tmpl_compiled = tmpl_results.into_iter().next().unwrap().unwrap();
+    let tmpl_compiled = compile_schema(&crd_schema["properties"]["spec"]["properties"]["template"]);
+    assert_eq!(tmpl_compiled.validations.len(), 1);
+    let tmpl_cr = tmpl_compiled
+        .validations
+        .into_iter()
+        .next()
+        .unwrap()
+        .unwrap();
 
     let mut ctx2 = Context::default();
     kube_cel::register_all(&mut ctx2);
     ctx2.add_variable_from_value("self", json_to_cel(&json!({"name": "web"})));
-    assert_eq!(
-        tmpl_compiled.program.execute(&ctx2).unwrap(),
-        Value::Bool(true)
-    );
+    assert_eq!(tmpl_cr.program.execute(&ctx2).unwrap(), Value::Bool(true));
 
     // Empty name should fail
     let mut ctx3 = Context::default();
     kube_cel::register_all(&mut ctx3);
     ctx3.add_variable_from_value("self", json_to_cel(&json!({"name": ""})));
-    assert_eq!(
-        tmpl_compiled.program.execute(&ctx3).unwrap(),
-        Value::Bool(false)
-    );
+    assert_eq!(tmpl_cr.program.execute(&ctx3).unwrap(), Value::Bool(false));
 }
 
 #[test]

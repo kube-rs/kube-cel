@@ -59,6 +59,7 @@ impl std::error::Error for ValidationError {}
 ///
 /// For repeated validation against the same schema, use [`compile_schema`](crate::compilation::compile_schema) +
 /// [`validate_compiled`](Validator::validate_compiled) to avoid re-compilation.
+#[derive(Clone, Debug)]
 pub struct Validator {
     _private: (),
 }
@@ -73,6 +74,7 @@ impl Validator {
     ///
     /// Compiles rules on each call. For repeated validation against the same
     /// schema, prefer [`compile_schema`](crate::compilation::compile_schema) + [`validate_compiled`](Self::validate_compiled).
+    #[must_use]
     pub fn validate(
         &self,
         schema: &serde_json::Value,
@@ -97,6 +99,7 @@ impl Validator {
     ///
     /// Use [`compile_schema`](crate::compilation::compile_schema) to build the [`CompiledSchema`], then call this
     /// method for each object to validate — rules are compiled only once.
+    #[must_use]
     pub fn validate_compiled(
         &self,
         compiled: &CompiledSchema,
@@ -410,6 +413,7 @@ impl Default for Validator {
 /// Convenience function to validate without creating a [`Validator`] instance.
 ///
 /// See [`Validator::validate`] for details.
+#[must_use]
 pub fn validate(
     schema: &serde_json::Value,
     object: &serde_json::Value,
@@ -421,6 +425,7 @@ pub fn validate(
 /// Convenience function to validate using a pre-compiled schema.
 ///
 /// See [`Validator::validate_compiled`] for details.
+#[must_use]
 pub fn validate_compiled(
     compiled: &CompiledSchema,
     object: &serde_json::Value,

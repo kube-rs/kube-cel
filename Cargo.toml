@@ -38,6 +38,9 @@ named_format = []
 validation = ["dep:serde_json", "dep:serde", "dep:chrono"]
 
 [[example]]
+name = "basic"
+
+[[example]]
 name = "validate_crd"
 required-features = ["validation"]
 

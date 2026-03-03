@@ -32,7 +32,7 @@ pub enum SchemaFormat {
 
 impl SchemaFormat {
     /// Extract a `SchemaFormat` from a raw JSON schema node.
-    pub fn from_schema(schema: &serde_json::Value) -> Self {
+    pub(crate) fn from_schema(schema: &serde_json::Value) -> Self {
         match schema.get("format").and_then(|f| f.as_str()) {
             Some("date-time") => SchemaFormat::DateTime,
             Some("duration") => SchemaFormat::Duration,
@@ -49,6 +49,7 @@ impl SchemaFormat {
 /// 1. `i64` — if the number fits in a signed 64-bit integer
 /// 2. `u64` — if the number fits in an unsigned 64-bit integer (but not `i64`)
 /// 3. `f64` — for all other numeric values (floating-point)
+#[must_use]
 pub fn json_to_cel(value: &serde_json::Value) -> Value {
     match value {
         serde_json::Value::Null => Value::Null,
@@ -86,6 +87,7 @@ fn convert_number(n: &serde_json::Number) -> Value {
 /// values whose schema specifies a recognized format, the string is parsed into
 /// the corresponding CEL type (`Timestamp` or `Duration`). On parse failure,
 /// the value falls back to `Value::String`.
+#[must_use]
 pub fn json_to_cel_with_schema(value: &serde_json::Value, schema: &serde_json::Value) -> Value {
     let format = SchemaFormat::from_schema(schema);
     match value {
@@ -127,6 +129,7 @@ pub fn json_to_cel_with_schema(value: &serde_json::Value, schema: &serde_json::V
 ///
 /// Behaves like [`json_to_cel_with_schema`] but uses the format metadata stored
 /// in the compiled schema tree instead of parsing the raw JSON schema.
+#[must_use]
 pub fn json_to_cel_with_compiled(value: &serde_json::Value, compiled: &CompiledSchema) -> Value {
     match value {
         serde_json::Value::Null => Value::Null,
@@ -187,7 +190,7 @@ fn convert_string_with_format(s: &str, format: &SchemaFormat) -> Value {
 /// The bare string `"0"` is treated as zero duration.
 ///
 /// Returns `None` if the string cannot be parsed.
-pub fn parse_go_duration(input: &str) -> Option<chrono::Duration> {
+pub(crate) fn parse_go_duration(input: &str) -> Option<chrono::Duration> {
     let (input, negative) = if let Some(rest) = input.strip_prefix('-') {
         (rest, true)
     } else {
