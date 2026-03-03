@@ -215,67 +215,42 @@ fn to_f64(v: &Value) -> Result<f64, ExecutionError> {
 /// `math.greatest(T, T...) -> T`
 ///
 /// Returns the greatest of all arguments. Supports int, uint, and double.
-/// If all arguments are the same type, the result type is preserved.
 fn math_greatest(Arguments(args): Arguments) -> ResolveResult {
-    if args.is_empty() {
-        return Err(ExecutionError::function_error(
-            "math.greatest",
-            "at least one argument required",
-        ));
-    }
-    // If single list argument, use it as the args
-    let effective_args: &[Value] = if args.len() == 1 {
-        if let Value::List(list) = &args[0] {
-            if list.is_empty() {
-                return Err(ExecutionError::function_error(
-                    "math.greatest",
-                    "at least one argument required",
-                ));
-            }
-            list.as_ref()
-        } else {
-            &args
-        }
-    } else {
-        &args
-    };
-    let mut result = effective_args[0].clone();
-    for item in &effective_args[1..] {
-        if numeric_cmp(item, &result)? == std::cmp::Ordering::Greater {
-            result = item.clone();
-        }
-    }
-    Ok(result)
+    math_extremum(&args, "math.greatest", std::cmp::Ordering::Greater)
 }
 
 /// `math.least(T, T...) -> T`
 ///
 /// Returns the least of all arguments. Supports int, uint, and double.
 fn math_least(Arguments(args): Arguments) -> ResolveResult {
+    math_extremum(&args, "math.least", std::cmp::Ordering::Less)
+}
+
+fn math_extremum(args: &[Value], name: &str, target_ord: std::cmp::Ordering) -> ResolveResult {
     if args.is_empty() {
         return Err(ExecutionError::function_error(
-            "math.least",
+            name,
             "at least one argument required",
         ));
     }
-    let effective_args: &[Value] = if args.len() == 1 {
+    let effective: &[Value] = if args.len() == 1 {
         if let Value::List(list) = &args[0] {
             if list.is_empty() {
                 return Err(ExecutionError::function_error(
-                    "math.least",
+                    name,
                     "at least one argument required",
                 ));
             }
             list.as_ref()
         } else {
-            &args
+            args
         }
     } else {
-        &args
+        args
     };
-    let mut result = effective_args[0].clone();
-    for item in &effective_args[1..] {
-        if numeric_cmp(item, &result)? == std::cmp::Ordering::Less {
+    let mut result = effective[0].clone();
+    for item in &effective[1..] {
+        if numeric_cmp(item, &result)? == target_ord {
             result = item.clone();
         }
     }

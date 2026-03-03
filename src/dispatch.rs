@@ -22,8 +22,8 @@ pub fn register(ctx: &mut Context<'_>) {
 
     #[cfg(feature = "quantity")]
     {
-        ctx.add_function("add", add);
-        ctx.add_function("sub", sub);
+        ctx.add_function("add", crate::quantity::cel_add);
+        ctx.add_function("sub", crate::quantity::cel_sub);
     }
 
     // ip: string → parse IP, CIDR → extract network address
@@ -79,97 +79,54 @@ fn last_index_of(This(this): This<Value>, Arguments(args): Arguments) -> Resolve
 // isGreaterThan / isLessThan / compareTo
 // ---------------------------------------------------------------------------
 
-#[allow(unused_variables)]
-fn is_greater_than(This(this): This<Value>, Arguments(args): Arguments) -> ResolveResult {
-    let arg = args
-        .first()
-        .cloned()
-        .ok_or_else(|| ExecutionError::function_error("isGreaterThan", "missing argument"))?;
-
-    match &this {
-        #[cfg(feature = "semver_funcs")]
-        Value::Opaque(o)
-            if o.downcast_ref::<crate::semver_funcs::KubeSemver>()
-                .is_some() =>
-        {
-            crate::semver_funcs::semver_is_greater_than(This(this), arg)
+/// Generate a dispatch function that routes to semver or quantity based on opaque type.
+macro_rules! opaque_comparison_dispatch {
+    ($fn_name:ident, $name:literal, $semver_fn:path, $quantity_fn:path) => {
+        #[allow(unused_variables)]
+        fn $fn_name(This(this): This<Value>, Arguments(args): Arguments) -> ResolveResult {
+            let arg = args
+                .first()
+                .cloned()
+                .ok_or_else(|| ExecutionError::function_error($name, "missing argument"))?;
+            match &this {
+                #[cfg(feature = "semver_funcs")]
+                Value::Opaque(o)
+                    if o.downcast_ref::<crate::semver_funcs::KubeSemver>()
+                        .is_some() =>
+                {
+                    $semver_fn(This(this), arg)
+                }
+                #[cfg(feature = "quantity")]
+                Value::Opaque(o) if o.downcast_ref::<crate::quantity::KubeQuantity>().is_some() => {
+                    $quantity_fn(This(this), arg)
+                }
+                _ => Err(ExecutionError::function_error(
+                    $name,
+                    format!("{} not supported on type {:?}", $name, this.type_of()),
+                )),
+            }
         }
-        #[cfg(feature = "quantity")]
-        Value::Opaque(o) if o.downcast_ref::<crate::quantity::KubeQuantity>().is_some() => {
-            crate::quantity::cel_is_greater_than(This(this), arg)
-        }
-        _ => Err(ExecutionError::function_error(
-            "isGreaterThan",
-            format!("isGreaterThan not supported on type {:?}", this.type_of()),
-        )),
-    }
+    };
 }
 
-#[allow(unused_variables)]
-fn is_less_than(This(this): This<Value>, Arguments(args): Arguments) -> ResolveResult {
-    let arg = args
-        .first()
-        .cloned()
-        .ok_or_else(|| ExecutionError::function_error("isLessThan", "missing argument"))?;
-
-    match &this {
-        #[cfg(feature = "semver_funcs")]
-        Value::Opaque(o)
-            if o.downcast_ref::<crate::semver_funcs::KubeSemver>()
-                .is_some() =>
-        {
-            crate::semver_funcs::semver_is_less_than(This(this), arg)
-        }
-        #[cfg(feature = "quantity")]
-        Value::Opaque(o) if o.downcast_ref::<crate::quantity::KubeQuantity>().is_some() => {
-            crate::quantity::cel_is_less_than(This(this), arg)
-        }
-        _ => Err(ExecutionError::function_error(
-            "isLessThan",
-            format!("isLessThan not supported on type {:?}", this.type_of()),
-        )),
-    }
-}
-
-#[allow(unused_variables)]
-fn compare_to(This(this): This<Value>, Arguments(args): Arguments) -> ResolveResult {
-    let arg = args
-        .first()
-        .cloned()
-        .ok_or_else(|| ExecutionError::function_error("compareTo", "missing argument"))?;
-
-    match &this {
-        #[cfg(feature = "semver_funcs")]
-        Value::Opaque(o)
-            if o.downcast_ref::<crate::semver_funcs::KubeSemver>()
-                .is_some() =>
-        {
-            crate::semver_funcs::semver_compare_to(This(this), arg)
-        }
-        #[cfg(feature = "quantity")]
-        Value::Opaque(o) if o.downcast_ref::<crate::quantity::KubeQuantity>().is_some() => {
-            crate::quantity::cel_compare_to(This(this), arg)
-        }
-        _ => Err(ExecutionError::function_error(
-            "compareTo",
-            format!("compareTo not supported on type {:?}", this.type_of()),
-        )),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// add / sub (quantity only, but accepts Quantity or int)
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "quantity")]
-fn add(This(this): This<Value>, Arguments(args): Arguments) -> ResolveResult {
-    crate::quantity::cel_add(This(this), Arguments(args))
-}
-
-#[cfg(feature = "quantity")]
-fn sub(This(this): This<Value>, Arguments(args): Arguments) -> ResolveResult {
-    crate::quantity::cel_sub(This(this), Arguments(args))
-}
+opaque_comparison_dispatch!(
+    is_greater_than,
+    "isGreaterThan",
+    crate::semver_funcs::semver_is_greater_than,
+    crate::quantity::cel_is_greater_than
+);
+opaque_comparison_dispatch!(
+    is_less_than,
+    "isLessThan",
+    crate::semver_funcs::semver_is_less_than,
+    crate::quantity::cel_is_less_than
+);
+opaque_comparison_dispatch!(
+    compare_to,
+    "compareTo",
+    crate::semver_funcs::semver_compare_to,
+    crate::quantity::cel_compare_to
+);
 
 // ---------------------------------------------------------------------------
 // ip (string → parse IP, CIDR → extract network address)

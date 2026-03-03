@@ -342,14 +342,20 @@ impl Validator {
         }
 
         // optionalOldSelf: true + no old object → child scope with oldSelf = null
-        let result = if cel_old.is_none() && cr.rule.optional_old_self == Some(true) {
-            let mut scope = node_ctx.new_inner_scope();
-            scope.add_variable_from_value("oldSelf", cel::Value::Null);
-            cr.program.execute(&scope)
+        let use_null_old_self = cel_old.is_none() && cr.rule.optional_old_self == Some(true);
+        let null_scope;
+        let effective_ctx: &Context<'_> = if use_null_old_self {
+            null_scope = {
+                let mut s = node_ctx.new_inner_scope();
+                s.add_variable_from_value("oldSelf", cel::Value::Null);
+                s
+            };
+            &null_scope
         } else {
-            cr.program.execute(node_ctx)
+            node_ctx
         };
 
+        let result = cr.program.execute(effective_ctx);
         let error_path = effective_path(path, cr.rule.field_path.as_deref());
 
         match result {
@@ -357,13 +363,7 @@ impl Validator {
                 // Validation passed
             }
             Ok(cel::Value::Bool(false)) => {
-                let message = if cel_old.is_none() && cr.rule.optional_old_self == Some(true) {
-                    let mut scope = node_ctx.new_inner_scope();
-                    scope.add_variable_from_value("oldSelf", cel::Value::Null);
-                    self.resolve_message(cr, &scope)
-                } else {
-                    self.resolve_message(cr, node_ctx)
-                };
+                let message = self.resolve_message(cr, effective_ctx);
                 errors.push(ValidationError {
                     rule: cr.rule.rule.clone(),
                     message,

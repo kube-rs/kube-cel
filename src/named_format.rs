@@ -103,71 +103,27 @@ pub fn register(ctx: &mut Context<'_>) {
 // Factory functions
 // ---------------------------------------------------------------------------
 
-fn format_dns1123_label() -> ResolveResult {
-    Ok(Value::Opaque(Arc::new(KubeFormat(
-        FormatKind::Dns1123Label,
-    ))))
+macro_rules! format_factory {
+    ($fn_name:ident, $kind:ident) => {
+        fn $fn_name() -> ResolveResult {
+            Ok(Value::Opaque(Arc::new(KubeFormat(FormatKind::$kind))))
+        }
+    };
 }
 
-fn format_dns1123_subdomain() -> ResolveResult {
-    Ok(Value::Opaque(Arc::new(KubeFormat(
-        FormatKind::Dns1123Subdomain,
-    ))))
-}
-
-fn format_dns1035_label() -> ResolveResult {
-    Ok(Value::Opaque(Arc::new(KubeFormat(
-        FormatKind::Dns1035Label,
-    ))))
-}
-
-fn format_dns1035_label_prefix() -> ResolveResult {
-    Ok(Value::Opaque(Arc::new(KubeFormat(
-        FormatKind::Dns1035LabelPrefix,
-    ))))
-}
-
-fn format_dns1123_label_prefix() -> ResolveResult {
-    Ok(Value::Opaque(Arc::new(KubeFormat(
-        FormatKind::Dns1123LabelPrefix,
-    ))))
-}
-
-fn format_dns1123_subdomain_prefix() -> ResolveResult {
-    Ok(Value::Opaque(Arc::new(KubeFormat(
-        FormatKind::Dns1123SubdomainPrefix,
-    ))))
-}
-
-fn format_qualified_name() -> ResolveResult {
-    Ok(Value::Opaque(Arc::new(KubeFormat(
-        FormatKind::QualifiedName,
-    ))))
-}
-
-fn format_label_value() -> ResolveResult {
-    Ok(Value::Opaque(Arc::new(KubeFormat(FormatKind::LabelValue))))
-}
-
-fn format_uri() -> ResolveResult {
-    Ok(Value::Opaque(Arc::new(KubeFormat(FormatKind::Uri))))
-}
-
-fn format_uuid() -> ResolveResult {
-    Ok(Value::Opaque(Arc::new(KubeFormat(FormatKind::Uuid))))
-}
-
-fn format_byte() -> ResolveResult {
-    Ok(Value::Opaque(Arc::new(KubeFormat(FormatKind::Byte))))
-}
-
-fn format_date() -> ResolveResult {
-    Ok(Value::Opaque(Arc::new(KubeFormat(FormatKind::Date))))
-}
-
-fn format_datetime() -> ResolveResult {
-    Ok(Value::Opaque(Arc::new(KubeFormat(FormatKind::DateTime))))
-}
+format_factory!(format_dns1123_label, Dns1123Label);
+format_factory!(format_dns1123_subdomain, Dns1123Subdomain);
+format_factory!(format_dns1035_label, Dns1035Label);
+format_factory!(format_dns1035_label_prefix, Dns1035LabelPrefix);
+format_factory!(format_dns1123_label_prefix, Dns1123LabelPrefix);
+format_factory!(format_dns1123_subdomain_prefix, Dns1123SubdomainPrefix);
+format_factory!(format_qualified_name, QualifiedName);
+format_factory!(format_label_value, LabelValue);
+format_factory!(format_uri, Uri);
+format_factory!(format_uuid, Uuid);
+format_factory!(format_byte, Byte);
+format_factory!(format_date, Date);
+format_factory!(format_datetime, DateTime);
 
 // ---------------------------------------------------------------------------
 // format.named(string)
