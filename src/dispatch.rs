@@ -253,20 +253,20 @@ fn string_dispatch(This(this): This<Value>) -> ResolveResult {
                 let mins = (u % NS_HOUR) / NS_MINUTE;
                 let secs = (u % NS_MINUTE) / NS_SECOND;
                 let frac = u % NS_SECOND;
+                // Match Go's time.Duration.String(): always write seconds,
+                // write minutes when total_minutes > 0, write hours when > 0.
                 if hours > 0 {
                     result.push_str(&format!("{hours}h"));
                 }
-                if mins > 0 {
+                if hours > 0 || mins > 0 {
                     result.push_str(&format!("{mins}m"));
                 }
-                if secs > 0 || frac > 0 {
-                    if frac > 0 {
-                        let frac_s = format!("{frac:09}");
-                        let frac_s = frac_s.trim_end_matches('0');
-                        result.push_str(&format!("{secs}.{frac_s}s"));
-                    } else {
-                        result.push_str(&format!("{secs}s"));
-                    }
+                if frac > 0 {
+                    let frac_s = format!("{frac:09}");
+                    let frac_s = frac_s.trim_end_matches('0');
+                    result.push_str(&format!("{secs}.{frac_s}s"));
+                } else {
+                    result.push_str(&format!("{secs}s"));
                 }
             } else {
                 const NS_MILLISECOND: u64 = 1_000_000;
