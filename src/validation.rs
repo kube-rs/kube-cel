@@ -62,8 +62,17 @@ impl Validator {
         object: &serde_json::Value,
         old_object: Option<&serde_json::Value>,
     ) -> Vec<ValidationError> {
+        let mut base_ctx = Context::default();
+        crate::register_all(&mut base_ctx);
         let mut errors = Vec::new();
-        self.walk_schema(schema, object, old_object, String::new(), &mut errors);
+        self.walk_schema(
+            schema,
+            object,
+            old_object,
+            String::new(),
+            &mut errors,
+            &base_ctx,
+        );
         errors
     }
 
@@ -77,8 +86,17 @@ impl Validator {
         object: &serde_json::Value,
         old_object: Option<&serde_json::Value>,
     ) -> Vec<ValidationError> {
+        let mut base_ctx = Context::default();
+        crate::register_all(&mut base_ctx);
         let mut errors = Vec::new();
-        self.walk_compiled(compiled, object, old_object, String::new(), &mut errors);
+        self.walk_compiled(
+            compiled,
+            object,
+            old_object,
+            String::new(),
+            &mut errors,
+            &base_ctx,
+        );
         errors
     }
 
@@ -91,10 +109,18 @@ impl Validator {
         old_value: Option<&serde_json::Value>,
         path: String,
         errors: &mut Vec<ValidationError>,
+        base_ctx: &Context<'_>,
     ) {
         let cel_value = json_to_cel_with_schema(value, schema);
         let cel_old = old_value.map(|o| json_to_cel_with_schema(o, schema));
-        self.evaluate_validations(schema, &cel_value, cel_old.as_ref(), &path, errors);
+        self.evaluate_validations(
+            schema,
+            &cel_value,
+            cel_old.as_ref(),
+            &path,
+            errors,
+            base_ctx,
+        );
 
         if let (Some(properties), Some(obj)) = (
             schema.get("properties").and_then(|p| p.as_object()),
@@ -104,7 +130,14 @@ impl Validator {
                 if let Some(child_value) = obj.get(prop_name) {
                     let child_old = old_value.and_then(|o| o.get(prop_name));
                     let child_path = join_path(&path, prop_name);
-                    self.walk_schema(prop_schema, child_value, child_old, child_path, errors);
+                    self.walk_schema(
+                        prop_schema,
+                        child_value,
+                        child_old,
+                        child_path,
+                        errors,
+                        base_ctx,
+                    );
                 }
             }
         }
@@ -113,7 +146,7 @@ impl Validator {
             for (i, item) in arr.iter().enumerate() {
                 let old_item = old_value.and_then(|o| o.as_array()).and_then(|a| a.get(i));
                 let item_path = join_path_index(&path, i);
-                self.walk_schema(items_schema, item, old_item, item_path, errors);
+                self.walk_schema(items_schema, item, old_item, item_path, errors, base_ctx);
             }
         }
 
@@ -133,7 +166,14 @@ impl Validator {
                 }
                 let old_val = old_value.and_then(|o| o.get(key));
                 let child_path = join_path(&path, key);
-                self.walk_schema(additional_schema, val, old_val, child_path, errors);
+                self.walk_schema(
+                    additional_schema,
+                    val,
+                    old_val,
+                    child_path,
+                    errors,
+                    base_ctx,
+                );
             }
         }
     }
@@ -145,9 +185,10 @@ impl Validator {
         cel_old: Option<&cel::Value>,
         path: &str,
         errors: &mut Vec<ValidationError>,
+        base_ctx: &Context<'_>,
     ) {
         let compiled = compile_schema_validations(schema);
-        self.evaluate_compiled_results(&compiled, cel_value, cel_old, path, errors);
+        self.evaluate_compiled_results(&compiled, cel_value, cel_old, path, errors, base_ctx);
     }
 
     // ── CompiledSchema-based walking ────────────────────────────────
@@ -159,6 +200,7 @@ impl Validator {
         old_value: Option<&serde_json::Value>,
         path: String,
         errors: &mut Vec<ValidationError>,
+        base_ctx: &Context<'_>,
     ) {
         let cel_value = json_to_cel_with_compiled(value, compiled);
         let cel_old = old_value.map(|o| json_to_cel_with_compiled(o, compiled));
@@ -168,6 +210,7 @@ impl Validator {
             cel_old.as_ref(),
             &path,
             errors,
+            base_ctx,
         );
 
         if let Some(obj) = value.as_object() {
@@ -175,7 +218,14 @@ impl Validator {
                 if let Some(child_value) = obj.get(prop_name) {
                     let child_old = old_value.and_then(|o| o.get(prop_name));
                     let child_path = join_path(&path, prop_name);
-                    self.walk_compiled(child_compiled, child_value, child_old, child_path, errors);
+                    self.walk_compiled(
+                        child_compiled,
+                        child_value,
+                        child_old,
+                        child_path,
+                        errors,
+                        base_ctx,
+                    );
                 }
             }
         }
@@ -184,7 +234,7 @@ impl Validator {
             for (i, item) in arr.iter().enumerate() {
                 let old_item = old_value.and_then(|o| o.as_array()).and_then(|a| a.get(i));
                 let item_path = join_path_index(&path, i);
-                self.walk_compiled(items_compiled, item, old_item, item_path, errors);
+                self.walk_compiled(items_compiled, item, old_item, item_path, errors, base_ctx);
             }
         }
 
@@ -197,7 +247,14 @@ impl Validator {
                 }
                 let old_val = old_value.and_then(|o| o.get(key));
                 let child_path = join_path(&path, key);
-                self.walk_compiled(additional_compiled, val, old_val, child_path, errors);
+                self.walk_compiled(
+                    additional_compiled,
+                    val,
+                    old_val,
+                    child_path,
+                    errors,
+                    base_ctx,
+                );
             }
         }
     }
@@ -211,11 +268,19 @@ impl Validator {
         cel_old: Option<&cel::Value>,
         path: &str,
         errors: &mut Vec<ValidationError>,
+        base_ctx: &Context<'_>,
     ) {
+        // Create a node-level scope once with self/oldSelf bound
+        let mut node_ctx = base_ctx.new_inner_scope();
+        node_ctx.add_variable_from_value("self", cel_value.clone());
+        if let Some(old) = cel_old {
+            node_ctx.add_variable_from_value("oldSelf", old.clone());
+        }
+
         for result in results {
             match result {
                 Ok(cr) => {
-                    self.evaluate_rule(cr, cel_value, cel_old, path, errors);
+                    self.evaluate_rule(cr, &node_ctx, cel_old, path, errors);
                 }
                 Err(CompilationError::Parse { rule, source }) => {
                     errors.push(ValidationError {
@@ -240,7 +305,7 @@ impl Validator {
     fn evaluate_rule(
         &self,
         cr: &CompilationResult,
-        cel_value: &cel::Value,
+        node_ctx: &Context<'_>,
         cel_old: Option<&cel::Value>,
         path: &str,
         errors: &mut Vec<ValidationError>,
@@ -250,25 +315,30 @@ impl Validator {
             return; // skip transition rule without old value
         }
 
-        let mut ctx = Context::default();
-        crate::register_all(&mut ctx);
-        ctx.add_variable_from_value("self", cel_value.clone());
+        // optionalOldSelf: true + no old object → child scope with oldSelf = null
+        let result = if cel_old.is_none() && cr.rule.optional_old_self == Some(true) {
+            let mut scope = node_ctx.new_inner_scope();
+            scope.add_variable_from_value("oldSelf", cel::Value::Null);
+            cr.program.execute(&scope)
+        } else {
+            cr.program.execute(node_ctx)
+        };
 
-        if let Some(old) = cel_old {
-            ctx.add_variable_from_value("oldSelf", old.clone());
-        } else if cr.rule.optional_old_self == Some(true) {
-            ctx.add_variable_from_value("oldSelf", cel::Value::Null);
-        }
-
-        match cr.program.execute(&ctx) {
+        match result {
             Ok(cel::Value::Bool(true)) => {
                 // Validation passed
             }
             Ok(cel::Value::Bool(false)) => {
-                let message = self.resolve_message(cr, &ctx);
+                let ctx_for_msg = if cel_old.is_none() && cr.rule.optional_old_self == Some(true) {
+                    let mut scope = node_ctx.new_inner_scope();
+                    scope.add_variable_from_value("oldSelf", cel::Value::Null);
+                    self.resolve_message(cr, &scope)
+                } else {
+                    self.resolve_message(cr, node_ctx)
+                };
                 errors.push(ValidationError {
                     rule: cr.rule.rule.clone(),
-                    message,
+                    message: ctx_for_msg,
                     field_path: path.to_string(),
                     reason: cr.rule.reason.clone(),
                 });
