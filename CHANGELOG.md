@@ -1,6 +1,14 @@
 # Changelog
 
-## [0.5.0] - 2026-03-03
+## [0.4.0] - 2026-03-03
+
+### Changed
+
+- **BREAKING**: `compile_rule()`, `compile_schema_validations()`, `SchemaFormat::from_schema()`, `parse_go_duration()` are now `pub(crate)` (no longer part of the public API)
+- **BREAKING**: `ValidationError` now has a `kind: ErrorKind` field
+- `ValidationError` now derives `PartialEq` and `Eq`
+- `Validator` now derives `Clone` and `Debug`
+- Added `#[must_use]` to `validate()`, `validate_compiled()`, `compile_schema()`, `json_to_cel()`, `json_to_cel_with_schema()`, `json_to_cel_with_compiled()`, `escape_field_name()`
 
 ### Added
 
@@ -20,28 +28,6 @@
 - **lists.range(n)** — generates integer sequence `[0, n)`
 - **Flatten with depth** — `<list>.flatten(<depth>)` supports optional depth parameter
 - **dns1035LabelPrefix** named format — `format.dns1035LabelPrefix()` (like dns1035Label but trailing hyphen and empty string allowed)
-
-### Known Limitations
-
-| Feature | Reason |
-|---------|--------|
-| `cel.bind(var, init, expr)` | CEL compiler macro — requires `cel` crate support |
-| `<list>.sortBy(var, expr)` | Lambda evaluation — requires `cel` crate support |
-| TwoVarComprehensions | CEL compiler macro — K8s 1.33+ |
-| Authz library | Requires API server connection — outside client library scope |
-
-## [0.4.0] - 2026-03-03
-
-### Changed
-
-- **BREAKING**: `compile_rule()`, `compile_schema_validations()`, `SchemaFormat::from_schema()`, `parse_go_duration()` are now `pub(crate)` (no longer part of the public API)
-- **BREAKING**: `ValidationError` now has a `kind: ErrorKind` field
-- `ValidationError` now derives `PartialEq` and `Eq`
-- `Validator` now derives `Clone` and `Debug`
-- Added `#[must_use]` to `validate()`, `validate_compiled()`, `compile_schema()`, `json_to_cel()`, `json_to_cel_with_schema()`, `json_to_cel_with_compiled()`, `escape_field_name()`
-
-### Added
-
 - `ErrorKind` enum — classifies errors as `CompilationFailure`, `InvalidRule`, `ValidationFailure`, `InvalidResult`, or `EvaluationError`
 - `CompiledSchema::compilation_errors()` and `CompiledSchema::has_errors()` convenience methods
 - Rule `fieldPath` is now applied to override auto-generated error paths
@@ -51,6 +37,15 @@
 
 - Rule `fieldPath` was parsed but unused — now correctly overrides the error path
 - CEL context is now reused per validation run instead of re-created per rule (performance improvement)
+
+### Known Limitations
+
+| Feature | Reason |
+|---------|--------|
+| `cel.bind(var, init, expr)` | CEL compiler macro — requires `cel` crate support |
+| `<list>.sortBy(var, expr)` | Lambda evaluation — requires `cel` crate support |
+| TwoVarComprehensions | CEL compiler macro — K8s 1.33+ |
+| Authz library | Requires API server connection — outside client library scope |
 
 ## [0.3.1] - 2026-03-03
 
