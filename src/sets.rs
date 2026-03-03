@@ -7,6 +7,8 @@ use cel::objects::Value;
 use cel::{Context, ResolveResult};
 use std::sync::Arc;
 
+use crate::value_ops::val_eq;
+
 /// Register all set extension functions.
 pub fn register(ctx: &mut Context<'_>) {
     ctx.add_function("sets.contains", sets_contains);
@@ -55,17 +57,6 @@ fn sets_intersects(a: Arc<Vec<Value>>, b: Arc<Vec<Value>>) -> ResolveResult {
         }
     }
     Ok(Value::Bool(false))
-}
-
-fn val_eq(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Int(a), Value::Int(b)) => a == b,
-        (Value::UInt(a), Value::UInt(b)) => a == b,
-        (Value::Float(a), Value::Float(b)) => a == b,
-        (Value::String(a), Value::String(b)) => a == b,
-        (Value::Bool(a), Value::Bool(b)) => a == b,
-        _ => false,
-    }
 }
 
 #[cfg(test)]

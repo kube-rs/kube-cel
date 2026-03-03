@@ -9,6 +9,8 @@ use cel::{Context, ExecutionError, ResolveResult};
 use std::cmp::Ordering;
 use std::sync::Arc;
 
+use crate::value_ops::{compare_values, val_add, val_eq, val_le, val_lt};
+
 /// Register all list extension functions.
 pub fn register(ctx: &mut Context<'_>) {
     ctx.add_function("isSorted", is_sorted);
@@ -254,72 +256,13 @@ fn list_last(This(this): This<Arc<Vec<Value>>>) -> ResolveResult {
 ///
 /// Returns a new list with duplicate elements removed, preserving order.
 fn distinct(This(this): This<Arc<Vec<Value>>>) -> ResolveResult {
-    let mut seen = Vec::new();
     let mut result = Vec::new();
     for item in this.iter() {
-        if !seen.iter().any(|s| val_eq(s, item)) {
-            seen.push(item.clone());
+        if !result.iter().any(|s| val_eq(s, item)) {
             result.push(item.clone());
         }
     }
     Ok(Value::List(Arc::new(result)))
-}
-
-// --- Helper functions for value comparison and arithmetic ---
-
-fn compare_values(a: &Value, b: &Value) -> Result<Ordering, ExecutionError> {
-    match (a, b) {
-        (Value::Int(a), Value::Int(b)) => Ok(a.cmp(b)),
-        (Value::UInt(a), Value::UInt(b)) => Ok(a.cmp(b)),
-        (Value::Float(a), Value::Float(b)) => Ok(a.partial_cmp(b).unwrap_or(Ordering::Equal)),
-        (Value::String(a), Value::String(b)) => Ok(a.cmp(b)),
-        (Value::Bool(a), Value::Bool(b)) => Ok(a.cmp(b)),
-        _ => Err(ExecutionError::function_error(
-            "sort",
-            "cannot compare values of different types",
-        )),
-    }
-}
-
-fn val_eq(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Int(a), Value::Int(b)) => a == b,
-        (Value::UInt(a), Value::UInt(b)) => a == b,
-        (Value::Float(a), Value::Float(b)) => a == b,
-        (Value::String(a), Value::String(b)) => a == b,
-        (Value::Bool(a), Value::Bool(b)) => a == b,
-        _ => false,
-    }
-}
-
-fn val_lt(a: &Value, b: &Value) -> Result<bool, cel::ExecutionError> {
-    match (a, b) {
-        (Value::Int(a), Value::Int(b)) => Ok(a < b),
-        (Value::UInt(a), Value::UInt(b)) => Ok(a < b),
-        (Value::Float(a), Value::Float(b)) => Ok(a < b),
-        (Value::String(a), Value::String(b)) => Ok(a < b),
-        (Value::Bool(a), Value::Bool(b)) => Ok(!a & b),
-        _ => Err(cel::ExecutionError::function_error(
-            "compare",
-            "cannot compare values of different types",
-        )),
-    }
-}
-
-fn val_le(a: &Value, b: &Value) -> Result<bool, cel::ExecutionError> {
-    Ok(val_eq(a, b) || val_lt(a, b)?)
-}
-
-fn val_add(a: &Value, b: &Value) -> Result<Value, cel::ExecutionError> {
-    match (a, b) {
-        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
-        (Value::UInt(a), Value::UInt(b)) => Ok(Value::UInt(a + b)),
-        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
-        _ => Err(cel::ExecutionError::function_error(
-            "sum",
-            "cannot sum values of this type",
-        )),
-    }
 }
 
 #[cfg(test)]

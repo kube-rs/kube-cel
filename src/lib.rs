@@ -94,6 +94,7 @@ pub mod compilation;
 pub mod validation;
 
 mod dispatch;
+mod value_ops;
 
 /// Register all available Kubernetes CEL extension functions into the given context.
 pub fn register_all(ctx: &mut cel::Context<'_>) {
