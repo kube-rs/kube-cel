@@ -451,6 +451,22 @@ mod tests {
     }
 
     #[test]
+    fn test_string_reverse() {
+        assert_eq!(
+            eval("'hello'.reverse()"),
+            Value::String(Arc::new("olleh".into()))
+        );
+        assert_eq!(
+            eval("''.reverse()"),
+            Value::String(Arc::new("".into()))
+        );
+        assert_eq!(
+            eval("'a'.reverse()"),
+            Value::String(Arc::new("a".into()))
+        );
+    }
+
+    #[test]
     fn test_strings_quote_escapes() {
         assert_eq!(
             eval("strings.quote('a\\nb')"),

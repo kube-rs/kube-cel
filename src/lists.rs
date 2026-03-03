@@ -3,9 +3,10 @@
 //! Provides list functions available in Kubernetes CEL expressions,
 //! matching the behavior of `k8s.io/apiserver/pkg/cel/library/lists.go`.
 
-use cel::extractors::This;
+use cel::extractors::{Arguments, This};
 use cel::objects::Value;
 use cel::{Context, ExecutionError, ResolveResult};
+use std::cmp::Ordering;
 use std::sync::Arc;
 
 /// Register all list extension functions.
@@ -19,9 +20,11 @@ pub fn register(ctx: &mut Context<'_>) {
     // indexOf/lastIndexOf are registered via dispatch module to handle
     // name collision between string and list versions.
     ctx.add_function("slice", slice);
+    ctx.add_function("sort", sort);
     ctx.add_function("flatten", flatten);
     ctx.add_function("reverse", list_reverse);
     ctx.add_function("distinct", distinct);
+    ctx.add_function("lists.range", lists_range);
 }
 
 /// `<list>.isSorted() -> bool`
@@ -135,18 +138,80 @@ fn slice(This(this): This<Arc<Vec<Value>>>, start: i64, end: i64) -> ResolveResu
     Ok(Value::List(Arc::new(result)))
 }
 
-/// `<list>.flatten() -> list`
+/// `<list>.sort() -> list`
 ///
-/// Flattens a list of lists by one level.
-fn flatten(This(this): This<Arc<Vec<Value>>>) -> ResolveResult {
+/// Returns a new list with elements in sorted (ascending) order.
+fn sort(This(this): This<Arc<Vec<Value>>>) -> ResolveResult {
+    let mut items: Vec<Value> = this.iter().cloned().collect();
+    let mut err: Option<ExecutionError> = None;
+    items.sort_by(|a, b| match compare_values(a, b) {
+        Ok(ord) => ord,
+        Err(e) => {
+            err = Some(e);
+            Ordering::Equal
+        }
+    });
+    if let Some(e) = err {
+        return Err(e);
+    }
+    Ok(Value::List(Arc::new(items)))
+}
+
+/// `<list>.flatten() -> list`
+/// `<list>.flatten(<int>) -> list`
+///
+/// Flattens a list. Without arguments, flattens one level.
+/// With a depth argument, flattens up to that many levels.
+fn flatten(This(this): This<Arc<Vec<Value>>>, Arguments(args): Arguments) -> ResolveResult {
+    let depth = match args.first() {
+        Some(Value::Int(d)) => {
+            if *d < 0 {
+                return Err(ExecutionError::function_error(
+                    "flatten",
+                    "depth must be non-negative",
+                ));
+            }
+            *d as usize
+        }
+        None => 1,
+        _ => {
+            return Err(ExecutionError::function_error(
+                "flatten",
+                "expected int argument for depth",
+            ));
+        }
+    };
+    Ok(Value::List(Arc::new(flatten_recursive(&this, depth))))
+}
+
+fn flatten_recursive(items: &[Value], depth: usize) -> Vec<Value> {
+    if depth == 0 {
+        return items.to_vec();
+    }
     let mut result = Vec::new();
-    for item in this.iter() {
+    for item in items {
         match item {
-            Value::List(inner) => result.extend(inner.iter().cloned()),
+            Value::List(inner) => {
+                result.extend(flatten_recursive(inner, depth - 1));
+            }
             other => result.push(other.clone()),
         }
     }
-    Ok(Value::List(Arc::new(result)))
+    result
+}
+
+/// `lists.range(n) -> list`
+///
+/// Returns a list of integers from 0 to n-1.
+fn lists_range(n: i64) -> ResolveResult {
+    if n < 0 {
+        return Err(ExecutionError::function_error(
+            "lists.range",
+            "range argument must be non-negative",
+        ));
+    }
+    let items: Vec<Value> = (0..n).map(Value::Int).collect();
+    Ok(Value::List(Arc::new(items)))
 }
 
 /// `<list>.reverse() -> list`
@@ -179,6 +244,20 @@ fn distinct(This(this): This<Arc<Vec<Value>>>) -> ResolveResult {
 }
 
 // --- Helper functions for value comparison and arithmetic ---
+
+fn compare_values(a: &Value, b: &Value) -> Result<Ordering, ExecutionError> {
+    match (a, b) {
+        (Value::Int(a), Value::Int(b)) => Ok(a.cmp(b)),
+        (Value::UInt(a), Value::UInt(b)) => Ok(a.cmp(b)),
+        (Value::Float(a), Value::Float(b)) => Ok(a.partial_cmp(b).unwrap_or(Ordering::Equal)),
+        (Value::String(a), Value::String(b)) => Ok(a.cmp(b)),
+        (Value::Bool(a), Value::Bool(b)) => Ok(a.cmp(b)),
+        _ => Err(ExecutionError::function_error(
+            "sort",
+            "cannot compare values of different types",
+        )),
+    }
+}
 
 fn val_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
@@ -397,5 +476,92 @@ mod tests {
     #[test]
     fn test_reverse_empty() {
         assert_eq!(eval("[].reverse()"), Value::List(Arc::new(vec![])));
+    }
+
+    // --- sort tests ---
+
+    #[test]
+    fn test_sort_ints() {
+        assert_eq!(
+            eval("[3, 1, 2].sort()"),
+            Value::List(Arc::new(vec![Value::Int(1), Value::Int(2), Value::Int(3)]))
+        );
+    }
+
+    #[test]
+    fn test_sort_strings() {
+        assert_eq!(
+            eval("['c', 'a', 'b'].sort()"),
+            Value::List(Arc::new(vec![
+                Value::String(Arc::new("a".into())),
+                Value::String(Arc::new("b".into())),
+                Value::String(Arc::new("c".into())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_sort_empty() {
+        assert_eq!(eval("[].sort()"), Value::List(Arc::new(vec![])));
+    }
+
+    #[test]
+    fn test_sort_already_sorted() {
+        assert_eq!(
+            eval("[1, 2, 3].sort()"),
+            Value::List(Arc::new(vec![Value::Int(1), Value::Int(2), Value::Int(3)]))
+        );
+    }
+
+    // --- lists.range tests ---
+
+    #[test]
+    fn test_lists_range() {
+        assert_eq!(
+            eval("lists.range(5)"),
+            Value::List(Arc::new(vec![
+                Value::Int(0),
+                Value::Int(1),
+                Value::Int(2),
+                Value::Int(3),
+                Value::Int(4),
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_lists_range_zero() {
+        assert_eq!(eval("lists.range(0)"), Value::List(Arc::new(vec![])));
+    }
+
+    #[test]
+    fn test_lists_range_negative() {
+        eval_err("lists.range(-1)");
+    }
+
+    // --- flatten with depth tests ---
+
+    #[test]
+    fn test_flatten_depth_two() {
+        assert_eq!(
+            eval("[[1, [2]], [3]].flatten(2)"),
+            Value::List(Arc::new(vec![
+                Value::Int(1),
+                Value::Int(2),
+                Value::Int(3),
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_flatten_depth_zero() {
+        // depth 0 = no flattening
+        assert_eq!(
+            eval("[[1, 2]].flatten(0)"),
+            Value::List(Arc::new(vec![Value::List(Arc::new(vec![
+                Value::Int(1),
+                Value::Int(2),
+            ]))]))
+        );
     }
 }
