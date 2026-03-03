@@ -111,10 +111,7 @@ mod tests {
 
     #[test]
     fn mixed_special_characters() {
-        assert_eq!(
-            escape_field_name("a-b_c.d"),
-            "a__dash__b__c__dot__d"
-        );
+        assert_eq!(escape_field_name("a-b_c.d"), "a__dash__b__c__dot__d");
     }
 
     #[test]
@@ -137,10 +134,7 @@ mod tests {
 
     #[test]
     fn multiple_dashes() {
-        assert_eq!(
-            escape_field_name("a-b-c"),
-            "a__dash__b__dash__c"
-        );
+        assert_eq!(escape_field_name("a-b-c"), "a__dash__b__dash__c");
     }
 
     #[test]

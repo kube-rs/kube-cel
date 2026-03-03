@@ -1363,5 +1363,9 @@ fn escaped_field_with_compiled_schema() {
     let errors = validate_compiled(&compiled, &fail, None);
     assert_eq!(errors.len(), 2);
     assert!(errors.iter().any(|e| e.message == "namespace required"));
-    assert!(errors.iter().any(|e| e.message == "my-value must be non-negative"));
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message == "my-value must be non-negative")
+    );
 }
