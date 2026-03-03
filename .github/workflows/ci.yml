@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -21,32 +21,22 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v2
 
       - name: fmt
-        run: cargo +nightly fmt --check
+        run: just fmt
 
       - name: clippy
-        run: cargo clippy --all-features -- -D warnings
+        run: just clippy
 
       - name: test (all features)
-        run: cargo test --all-features
+        run: just test-all
 
       - name: test (no default features)
-        run: cargo test --no-default-features
+        run: just test-no-default
 
       - name: doc
-        run: cargo doc --no-deps --all-features
+        run: just doc
 
-  feature-check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
-
-      - name: check each feature independently
-        run: |
-          for feature in strings lists sets regex_funcs urls ip semver_funcs format quantity jsonpatch named_format math encoders; do
-            echo "--- checking feature: $feature ---"
-            cargo check --no-default-features --features "$feature"
-          done
+      - name: feature-check
+        run: just feature-check

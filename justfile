@@ -1,0 +1,68 @@
+[private]
+default:
+    @just --list
+
+# --- CI / pre-publish checks (single source of truth) ---
+
+# Run all checks — CI runs this, you should too before push
+check: fmt clippy test-all test-no-default doc feature-check
+
+# Format check (nightly required for latest rustfmt)
+fmt:
+    cargo +nightly fmt --check
+
+# Clippy with all features
+clippy:
+    cargo clippy --all-features -- -D warnings
+
+# Test with all features (catches cross-feature issues)
+test-all:
+    cargo test --all-features
+
+# Test with no default features
+test-no-default:
+    cargo test --no-default-features
+
+# Check each feature compiles independently
+feature-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for feature in strings lists sets regex_funcs urls ip semver_funcs format quantity jsonpatch named_format math encoders; do
+        echo "--- checking feature: $feature ---"
+        cargo check --no-default-features --features "$feature"
+    done
+
+# Build docs (warnings = errors)
+doc:
+    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+
+# --- Development helpers ---
+
+# Format fix
+fmt-fix:
+    cargo +nightly fmt
+
+# Test default features only
+test:
+    cargo test
+
+# Bump version and add changelog template (e.g., just bump 0.5.0)
+bump version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    old=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+    sed -i '' 's/^version = ".*"/version = "{{version}}"/' Cargo.toml
+    # Add changelog entry after "# Changelog" line
+    date=$(date +%Y-%m-%d)
+    entry="\n## [{{version}}] - ${date}\n\n### Added\n\n### Fixed\n\n### Changed\n"
+    sed -i '' "s/^# Changelog$/# Changelog\n${entry}/" CHANGELOG.md
+    echo "Bumped ${old} → {{version}}"
+    echo "Edit CHANGELOG.md to fill in release notes"
+
+# Publish to crates.io (runs full check first)
+publish: check
+    cargo publish
+
+# Dry-run publish
+publish-dry: check
+    cargo publish --dry-run
