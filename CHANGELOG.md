@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.2] - 2026-03-03
+
+### Added
+
+- `math.sqrt(double)` — square root function (errors on negative input)
+- `<IP>.string()` / `<CIDR>.string()` — convert IP/CIDR opaque types back to string
+- `<list>.first()` — returns `optional.of(first_element)` or `optional.none()` for empty list
+- `<list>.last()` — returns `optional.of(last_element)` or `optional.none()` for empty list
+
 ## [0.4.1] - 2026-03-03
 
 ### Changed

@@ -30,6 +30,10 @@ pub fn register(ctx: &mut Context<'_>) {
     #[cfg(feature = "ip")]
     ctx.add_function("ip", ip_dispatch);
 
+    // string: IP/CIDR → string representation
+    #[cfg(feature = "ip")]
+    ctx.add_function("string", string_dispatch);
+
     // reverse: string → reversed string, list → reversed list
     #[cfg(any(feature = "strings", feature = "lists"))]
     ctx.add_function("reverse", reverse);
@@ -197,6 +201,26 @@ fn ip_dispatch(This(this): This<Value>, Arguments(args): Arguments) -> ResolveRe
                 addr,
             ))))
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// string (IP → string, CIDR → string)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "ip")]
+fn string_dispatch(This(this): This<Value>) -> ResolveResult {
+    match &this {
+        Value::Opaque(o) if o.downcast_ref::<crate::ip::KubeIP>().is_some() => {
+            crate::ip::ip_string(This(this))
+        }
+        Value::Opaque(o) if o.downcast_ref::<crate::ip::KubeCIDR>().is_some() => {
+            crate::ip::cidr_string(This(this))
+        }
+        _ => Err(ExecutionError::function_error(
+            "string",
+            format!("string not supported on type {:?}", this.type_of()),
+        )),
     }
 }
 

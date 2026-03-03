@@ -32,6 +32,9 @@ pub fn register(ctx: &mut Context<'_>) {
     ctx.add_function("math.bitShiftLeft", math_bit_shift_left);
     ctx.add_function("math.bitShiftRight", math_bit_shift_right);
 
+    // Square root
+    ctx.add_function("math.sqrt", math_sqrt);
+
     // Variadic min/max
     ctx.add_function("math.greatest", math_greatest);
     ctx.add_function("math.least", math_least);
@@ -170,6 +173,21 @@ fn math_bit_shift_right(v: i64, shift: i64) -> ResolveResult {
         ));
     }
     Ok(Value::Int(v >> shift))
+}
+
+// ---------------------------------------------------------------------------
+// Square root
+// ---------------------------------------------------------------------------
+
+/// `math.sqrt(double) -> double`
+fn math_sqrt(v: f64) -> ResolveResult {
+    if v < 0.0 {
+        return Err(ExecutionError::function_error(
+            "math.sqrt",
+            "cannot calculate square root of negative number",
+        ));
+    }
+    Ok(Value::Float(v.sqrt()))
 }
 
 // ---------------------------------------------------------------------------
@@ -405,6 +423,23 @@ mod tests {
         eval_err("math.bitShiftLeft(1, -1)");
         eval_err("math.bitShiftLeft(1, 64)");
         eval_err("math.bitShiftRight(1, -1)");
+    }
+
+    // -- Square root --
+
+    #[test]
+    fn test_sqrt() {
+        assert_eq!(eval("math.sqrt(4.0)"), Value::Float(2.0));
+        assert_eq!(eval("math.sqrt(0.0)"), Value::Float(0.0));
+        assert_eq!(
+            eval("math.sqrt(2.0)"),
+            Value::Float(std::f64::consts::SQRT_2)
+        );
+    }
+
+    #[test]
+    fn test_sqrt_negative() {
+        eval_err("math.sqrt(-1.0)");
     }
 
     // -- Variadic --

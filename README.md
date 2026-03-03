@@ -120,7 +120,7 @@ JSON field names that are CEL reserved words or contain special characters are a
 `charAt`, `indexOf`, `lastIndexOf`, `lowerAscii`, `upperAscii`, `replace`, `split`, `substring`, `trim`, `join`, `reverse`, `strings.quote`
 
 ### Lists
-`isSorted`, `sum`, `min`, `max`, `indexOf`, `lastIndexOf`, `slice`, `sort`, `flatten`, `reverse`, `distinct`, `lists.range`
+`isSorted`, `sum`, `min`, `max`, `indexOf`, `lastIndexOf`, `slice`, `sort`, `flatten`, `reverse`, `distinct`, `first`, `last`, `lists.range`
 
 ### Sets
 `sets.contains`, `sets.equivalent`, `sets.intersects`
@@ -132,7 +132,7 @@ JSON field names that are CEL reserved words or contain special characters are a
 `url`, `isURL`, `getScheme`, `getHost`, `getHostname`, `getPort`, `getEscapedPath`, `getQuery`
 
 ### IP / CIDR
-`ip`, `isIP`, `isIPv4`, `isIPv6`, `ip.isCanonical`, `family`, `isLoopback`, `isUnspecified`, `isLinkLocalMulticast`, `isLinkLocalUnicast`, `isGlobalUnicast`, `cidr`, `isCIDR`, `isCIDRv4`, `isCIDRv6`, `containsIP`, `containsCIDR`, `prefixLength`, `masked`, `<CIDR>.ip()`
+`ip`, `isIP`, `isIPv4`, `isIPv6`, `ip.isCanonical`, `family`, `isLoopback`, `isUnspecified`, `isLinkLocalMulticast`, `isLinkLocalUnicast`, `isGlobalUnicast`, `<IP>.string()`, `cidr`, `isCIDR`, `isCIDRv4`, `isCIDRv6`, `containsIP`, `containsCIDR`, `prefixLength`, `masked`, `<CIDR>.ip()`, `<CIDR>.string()`
 
 ### Semver
 `semver`, `isSemver`, `major`, `minor`, `patch`, `isGreaterThan`, `isLessThan`, `compareTo`
@@ -160,7 +160,7 @@ let result = Program::compile("!format.named('uuid').validate('550e8400-e29b-41d
 ```
 
 ### Math
-`math.ceil`, `math.floor`, `math.round`, `math.trunc`, `math.abs`, `math.sign`, `math.isInf`, `math.isNaN`, `math.isFinite`, `math.bitAnd`, `math.bitOr`, `math.bitXor`, `math.bitNot`, `math.bitShiftLeft`, `math.bitShiftRight`, `math.greatest`, `math.least`
+`math.ceil`, `math.floor`, `math.round`, `math.trunc`, `math.abs`, `math.sign`, `math.sqrt`, `math.isInf`, `math.isNaN`, `math.isFinite`, `math.bitAnd`, `math.bitOr`, `math.bitXor`, `math.bitNot`, `math.bitShiftLeft`, `math.bitShiftRight`, `math.greatest`, `math.least`
 
 ### Encoders
 `base64.decode`, `base64.encode`

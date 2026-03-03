@@ -286,6 +286,24 @@ pub(crate) fn cidr_ip(This(this): This<Value>) -> ResolveResult {
     Ok(Value::Opaque(Arc::new(KubeIP(cidr.0.addr()))))
 }
 
+// --- IP/CIDR string conversion ---
+
+/// `<IP>.string() -> string`
+///
+/// Returns the string representation of the IP address.
+pub(crate) fn ip_string(This(this): This<Value>) -> ResolveResult {
+    let ip = extract_ip(&this)?;
+    Ok(Value::String(std::sync::Arc::new(ip.0.to_string())))
+}
+
+/// `<CIDR>.string() -> string`
+///
+/// Returns the string representation of the CIDR.
+pub(crate) fn cidr_string(This(this): This<Value>) -> ResolveResult {
+    let cidr = extract_cidr(&this)?;
+    Ok(Value::String(std::sync::Arc::new(cidr.0.to_string())))
+}
+
 // --- IP/CIDR version convenience functions ---
 
 /// `isIPv4(<string>) -> bool`
@@ -538,6 +556,44 @@ mod tests {
         );
         // Canonical form
         assert_eq!(eval("ip.isCanonical('::1')"), Value::Bool(true));
+    }
+
+    // --- IP/CIDR string tests ---
+
+    #[test]
+    fn test_ip_string() {
+        let mut ctx = Context::default();
+        register(&mut ctx);
+        crate::dispatch::register(&mut ctx);
+        let result = Program::compile("ip('192.168.1.1').string()")
+            .unwrap()
+            .execute(&ctx)
+            .unwrap();
+        assert_eq!(result, Value::String(Arc::new("192.168.1.1".into())));
+    }
+
+    #[test]
+    fn test_ip_string_v6() {
+        let mut ctx = Context::default();
+        register(&mut ctx);
+        crate::dispatch::register(&mut ctx);
+        let result = Program::compile("ip('::1').string()")
+            .unwrap()
+            .execute(&ctx)
+            .unwrap();
+        assert_eq!(result, Value::String(Arc::new("::1".into())));
+    }
+
+    #[test]
+    fn test_cidr_string() {
+        let mut ctx = Context::default();
+        register(&mut ctx);
+        crate::dispatch::register(&mut ctx);
+        let result = Program::compile("cidr('192.168.0.0/24').string()")
+            .unwrap()
+            .execute(&ctx)
+            .unwrap();
+        assert_eq!(result, Value::String(Arc::new("192.168.0.0/24".into())));
     }
 
     // --- CIDR.ip() tests ---

@@ -4,7 +4,7 @@
 //! matching the behavior of `k8s.io/apiserver/pkg/cel/library/lists.go`.
 
 use cel::extractors::{Arguments, This};
-use cel::objects::Value;
+use cel::objects::{OptionalValue, Value};
 use cel::{Context, ExecutionError, ResolveResult};
 use std::cmp::Ordering;
 use std::sync::Arc;
@@ -24,6 +24,8 @@ pub fn register(ctx: &mut Context<'_>) {
     ctx.add_function("flatten", flatten);
     ctx.add_function("reverse", list_reverse);
     ctx.add_function("distinct", distinct);
+    ctx.add_function("first", list_first);
+    ctx.add_function("last", list_last);
     ctx.add_function("lists.range", lists_range);
 }
 
@@ -228,6 +230,26 @@ pub(crate) fn list_reverse_value(This(this): This<Arc<Vec<Value>>>) -> ResolveRe
     Ok(Value::List(Arc::new(result)))
 }
 
+/// `<list>.first() -> optional<T>`
+///
+/// Returns `optional.of(first_element)` if non-empty, `optional.none()` if empty.
+fn list_first(This(this): This<Arc<Vec<Value>>>) -> ResolveResult {
+    match this.first() {
+        Some(v) => Ok(Value::Opaque(Arc::new(OptionalValue::of(v.clone())))),
+        None => Ok(Value::Opaque(Arc::new(OptionalValue::none()))),
+    }
+}
+
+/// `<list>.last() -> optional<T>`
+///
+/// Returns `optional.of(last_element)` if non-empty, `optional.none()` if empty.
+fn list_last(This(this): This<Arc<Vec<Value>>>) -> ResolveResult {
+    match this.last() {
+        Some(v) => Ok(Value::Opaque(Arc::new(OptionalValue::of(v.clone())))),
+        None => Ok(Value::Opaque(Arc::new(OptionalValue::none()))),
+    }
+}
+
 /// `<list>.distinct() -> list`
 ///
 /// Returns a new list with duplicate elements removed, preserving order.
@@ -379,6 +401,30 @@ mod tests {
             eval("[1, 2, 2, 3, 1].distinct()"),
             Value::List(Arc::new(vec![Value::Int(1), Value::Int(2), Value::Int(3)]))
         );
+    }
+
+    // --- first / last ---
+
+    #[test]
+    fn test_first() {
+        assert_eq!(eval("[1, 2, 3].first().hasValue()"), Value::Bool(true));
+        assert_eq!(eval("[1, 2, 3].first().value()"), Value::Int(1));
+    }
+
+    #[test]
+    fn test_first_empty() {
+        assert_eq!(eval("[].first().hasValue()"), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_last() {
+        assert_eq!(eval("[1, 2, 3].last().hasValue()"), Value::Bool(true));
+        assert_eq!(eval("[1, 2, 3].last().value()"), Value::Int(3));
+    }
+
+    #[test]
+    fn test_last_empty() {
+        assert_eq!(eval("[].last().hasValue()"), Value::Bool(false));
     }
 
     // --- Error & edge case tests ---
