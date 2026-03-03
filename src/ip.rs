@@ -652,4 +652,91 @@ mod tests {
         assert_eq!(eval("isCIDRv6('10.0.0.0/8')"), Value::Bool(false));
         assert_eq!(eval("isCIDRv6('not-a-cidr')"), Value::Bool(false));
     }
+
+    // --- cel-go parity tests ---
+
+    #[test]
+    fn test_cidr_contains_slash32() {
+        let mut ctx = Context::default();
+        register(&mut ctx);
+        crate::dispatch::register(&mut ctx);
+        assert_eq!(
+            Program::compile("cidr('192.168.0.0/24').containsCIDR(cidr('192.168.0.1/32'))")
+                .unwrap()
+                .execute(&ctx)
+                .unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            Program::compile("cidr('192.168.0.0/24').containsCIDR(cidr('192.169.0.1/32'))")
+                .unwrap()
+                .execute(&ctx)
+                .unwrap(),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn test_cidr_ipv6_containment() {
+        let mut ctx = Context::default();
+        register(&mut ctx);
+        crate::dispatch::register(&mut ctx);
+        assert_eq!(
+            Program::compile("cidr('2001:db8::/32').containsCIDR(cidr('2001:db8::/33'))")
+                .unwrap()
+                .execute(&ctx)
+                .unwrap(),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn test_cidr_masked_non_network() {
+        // masking 192.168.1.5/24 should give 192.168.1.0/24
+        let mut ctx = Context::default();
+        register(&mut ctx);
+        crate::dispatch::register(&mut ctx);
+        assert_eq!(
+            Program::compile("cidr('192.168.1.5/24').masked().containsIP('192.168.1.0')")
+                .unwrap()
+                .execute(&ctx)
+                .unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            Program::compile("cidr('192.168.1.5/24').masked().containsIP('192.168.2.0')")
+                .unwrap()
+                .execute(&ctx)
+                .unwrap(),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn test_ip_broadcast_not_global_unicast() {
+        assert_eq!(
+            eval("ip('255.255.255.255').isGlobalUnicast()"),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn test_ip_fd00_not_link_local_multicast() {
+        assert_eq!(
+            eval("ip('fd00::1').isLinkLocalMulticast()"),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn test_cidr_string_v6() {
+        let mut ctx = Context::default();
+        register(&mut ctx);
+        crate::dispatch::register(&mut ctx);
+        let result = Program::compile("cidr('fd00::/8').string()")
+            .unwrap()
+            .execute(&ctx)
+            .unwrap();
+        assert_eq!(result, Value::String(Arc::new("fd00::/8".into())));
+    }
 }

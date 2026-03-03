@@ -134,4 +134,43 @@ mod tests {
             Value::Bool(true)
         );
     }
+
+    // --- cel-go parity tests ---
+
+    #[test]
+    fn test_contains_negated() {
+        assert_eq!(eval("!sets.contains([1], [2])"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_equivalent_negated() {
+        assert_eq!(eval("!sets.equivalent([2, 1], [1])"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_intersects_negated() {
+        assert_eq!(eval("!sets.intersects([], [])"), Value::Bool(true));
+        assert_eq!(eval("!sets.intersects([1], [2])"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_contains_empty_superset() {
+        assert_eq!(eval("sets.contains([], [])"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_contains_with_duplicates() {
+        assert_eq!(
+            eval("sets.contains([1, 1, 2, 2, 3], [1, 2])"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn test_equivalent_with_duplicates() {
+        assert_eq!(
+            eval("sets.equivalent([1, 1, 2], [2, 2, 1])"),
+            Value::Bool(true)
+        );
+    }
 }

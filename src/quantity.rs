@@ -724,4 +724,54 @@ mod tests {
             Value::Int(1)
         );
     }
+
+    // --- cel-go parity tests ---
+
+    #[test]
+    fn test_cross_suffix_equality() {
+        // 200M == 0.2G
+        assert_eq!(
+            eval("quantity('200M').compareTo(quantity('0.2G'))"),
+            Value::Int(0)
+        );
+        // 2000k == 2M
+        assert_eq!(
+            eval("quantity('2000k').compareTo(quantity('2M'))"),
+            Value::Int(0)
+        );
+    }
+
+    #[test]
+    fn test_chained_arithmetic() {
+        // 50k + 20 - 100k = -49980
+        assert_eq!(
+            eval("quantity('50k').add(20).sub(quantity('100k')).asInteger()"),
+            Value::Int(-49980)
+        );
+    }
+
+    #[test]
+    fn test_chained_arithmetic_negative_sub() {
+        // 50k + 20 - 100k - (-50000) = 20
+        assert_eq!(
+            eval("quantity('50k').add(20).sub(quantity('100k')).sub(-50000).asInteger()"),
+            Value::Int(20)
+        );
+    }
+
+    #[test]
+    fn test_millicores_float() {
+        assert_eq!(
+            eval("quantity('50703m').asApproximateFloat()"),
+            Value::Float(50.703)
+        );
+    }
+
+    #[test]
+    fn test_quantity_zero_equality() {
+        assert_eq!(
+            eval("quantity('0').compareTo(quantity('0M'))"),
+            Value::Int(0)
+        );
+    }
 }

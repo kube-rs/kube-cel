@@ -265,4 +265,39 @@ mod tests {
             Value::Bool(true)
         );
     }
+
+    // --- cel-go parity tests ---
+
+    #[test]
+    fn test_is_semver_empty() {
+        assert_eq!(eval("isSemver('')"), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_semver_equal_self() {
+        assert_eq!(
+            eval("semver('1.0.0').compareTo(semver('1.0.0'))"),
+            Value::Int(0)
+        );
+    }
+
+    #[test]
+    fn test_semver_minor_comparison() {
+        assert_eq!(
+            eval("semver('1.1.0').isGreaterThan(semver('1.0.0'))"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            eval("semver('1.0.0').isLessThan(semver('1.1.0'))"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn test_semver_patch_comparison() {
+        assert_eq!(
+            eval("semver('1.0.1').isGreaterThan(semver('1.0.0'))"),
+            Value::Bool(true)
+        );
+    }
 }

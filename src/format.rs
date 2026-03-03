@@ -208,12 +208,12 @@ fn format_e(val: &Value, precision: usize, out: &mut String) -> Result<(), Execu
     Ok(())
 }
 
-/// %b — binary representation for int/uint, or "true"/"false" for bool.
+/// %b — binary representation for int/uint, or "1"/"0" for bool (matching cel-go).
 fn format_b(val: &Value, out: &mut String) -> Result<(), ExecutionError> {
     match val {
         Value::Int(n) => out.push_str(&format!("{n:b}")),
         Value::UInt(n) => out.push_str(&format!("{n:b}")),
-        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Bool(b) => out.push_str(if *b { "1" } else { "0" }),
         _ => {
             return Err(ExecutionError::function_error(
                 "format",
@@ -348,7 +348,7 @@ mod tests {
     #[test]
     fn test_format_b() {
         assert_eq!(eval_str("'bin: %b'.format([10])"), "bin: 1010");
-        assert_eq!(eval_str("'val: %b'.format([true])"), "val: true");
+        assert_eq!(eval_str("'val: %b'.format([true])"), "val: 1");
     }
 
     #[test]
@@ -468,5 +468,51 @@ mod tests {
     fn test_format_extra_args_ignored() {
         // Extra arguments beyond what's needed should be silently ignored
         assert_eq!(eval_str("'%s'.format(['a', 'b'])"), "a");
+    }
+
+    // --- cel-go parity tests ---
+
+    #[test]
+    fn test_format_percent_around_substitution() {
+        assert_eq!(eval_str("'%%%s%%'.format(['text'])"), "%text%");
+        assert_eq!(
+            eval_str("'%%%s'.format(['percent on the left'])"),
+            "%percent on the left"
+        );
+        assert_eq!(
+            eval_str("'%s%%'.format(['percent on the right'])"),
+            "percent on the right%"
+        );
+    }
+
+    #[test]
+    fn test_format_b_bool_false() {
+        assert_eq!(eval_str("'%b'.format([false])"), "0");
+    }
+
+    #[test]
+    fn test_format_b_negative_int() {
+        // Rust outputs two's complement for negative i64
+        assert_eq!(eval_str("'%b'.format([-5])"), format!("{:b}", -5i64));
+    }
+
+    #[test]
+    fn test_format_hex_bytes() {
+        // Bytes hex encoding with leading zeros preserved
+        let mut ctx = Context::default();
+        register(&mut ctx);
+        let result = Program::compile("'%x'.format([b'\\x00\\x00AB'])")
+            .unwrap()
+            .execute(&ctx)
+            .unwrap();
+        assert_eq!(result, Value::String(Arc::new("00004142".into())));
+    }
+
+    #[test]
+    fn test_format_x_uppercase_full() {
+        assert_eq!(
+            eval_str("'%X'.format(['Hello world!'])"),
+            "48656C6C6F20776F726C6421"
+        );
     }
 }

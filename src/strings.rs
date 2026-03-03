@@ -24,9 +24,12 @@ pub fn register(ctx: &mut Context<'_>) {
 }
 
 /// `<string>.charAt(<int>) -> <string>`
+///
+/// Returns the character at the given index as a single-character string.
+/// If `idx == len`, returns `""` (matching cel-go behavior).
 fn char_at(This(this): This<Arc<String>>, idx: i64) -> ResolveResult {
     let chars: Vec<char> = this.chars().collect();
-    if idx < 0 || idx as usize >= chars.len() {
+    if idx < 0 || idx as usize > chars.len() {
         return Err(ExecutionError::function_error(
             "charAt",
             format!(
@@ -34,6 +37,9 @@ fn char_at(This(this): This<Arc<String>>, idx: i64) -> ResolveResult {
                 chars.len()
             ),
         ));
+    }
+    if idx as usize == chars.len() {
+        return Ok(Value::String(Arc::new(String::new())));
     }
     Ok(Value::String(Arc::new(chars[idx as usize].to_string())))
 }
@@ -165,8 +171,13 @@ fn string_split(This(this): This<Arc<String>>, Arguments(args): Arguments) -> Re
     };
 
     let parts: Vec<Value> = match args.get(1) {
+        Some(Value::Int(n)) if *n == 0 => vec![],
+        Some(Value::Int(n)) if *n < 0 => this
+            .split(separator.as_str())
+            .map(|s| Value::String(Arc::new(s.to_string())))
+            .collect(),
         Some(Value::Int(n)) => this
-            .splitn((*n).max(1) as usize, separator.as_str())
+            .splitn(*n as usize, separator.as_str())
             .map(|s| Value::String(Arc::new(s.to_string())))
             .collect(),
         _ => this
@@ -254,9 +265,13 @@ fn strings_quote(s: Arc<String>) -> ResolveResult {
     let escaped = s
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
+        .replace('\x07', "\\a")
+        .replace('\x08', "\\b")
+        .replace('\x0C', "\\f")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
-        .replace('\t', "\\t");
+        .replace('\t', "\\t")
+        .replace('\x0B', "\\v");
     Ok(Value::String(Arc::new(format!("\"{escaped}\""))))
 }
 
@@ -374,7 +389,20 @@ mod tests {
     #[test]
     fn test_char_at_out_of_bounds() {
         eval_err("'hello'.charAt(-1)");
-        eval_err("'hello'.charAt(5)");
+        eval_err("'hello'.charAt(6)");
+    }
+
+    #[test]
+    fn test_char_at_at_length() {
+        // charAt(len) returns empty string (cel-go behavior)
+        assert_eq!(
+            eval("'hello'.charAt(5)"),
+            Value::String(Arc::new("".into()))
+        );
+        assert_eq!(
+            eval("'tacocat'.charAt(7)"),
+            Value::String(Arc::new("".into()))
+        );
     }
 
     #[test]
@@ -469,6 +497,156 @@ mod tests {
         assert_eq!(
             eval("strings.quote('a\\tb')"),
             Value::String(Arc::new("\"a\\tb\"".into()))
+        );
+    }
+
+    // --- cel-go parity tests ---
+
+    #[test]
+    fn test_char_at_unicode_multi() {
+        assert_eq!(eval("'©αT'.charAt(0)"), Value::String(Arc::new("©".into())));
+        assert_eq!(eval("'©αT'.charAt(1)"), Value::String(Arc::new("α".into())));
+        assert_eq!(eval("'©αT'.charAt(2)"), Value::String(Arc::new("T".into())));
+    }
+
+    #[test]
+    fn test_index_of_unicode() {
+        assert_eq!(eval("'ta©o©αT'.indexOf('©')"), Value::Int(2));
+        assert_eq!(eval("'ta©o©αT'.indexOf('©', 3)"), Value::Int(4));
+        assert_eq!(eval("'ta©o©αT'.indexOf('©αT', 3)"), Value::Int(4));
+    }
+
+    #[test]
+    fn test_index_of_full_match() {
+        assert_eq!(eval("'hello wello'.indexOf('hello wello')"), Value::Int(0));
+    }
+
+    #[test]
+    fn test_index_of_not_found_longer() {
+        assert_eq!(
+            eval("'hello wello'.indexOf('elbo room!!!')"),
+            Value::Int(-1)
+        );
+    }
+
+    #[test]
+    fn test_last_index_of_unicode() {
+        assert_eq!(eval("'ta©o©αT'.lastIndexOf('©')"), Value::Int(4));
+        assert_eq!(eval("'ta©o©αT'.lastIndexOf('©', 3)"), Value::Int(2));
+    }
+
+    #[test]
+    fn test_last_index_of_empty_string() {
+        assert_eq!(eval("''.lastIndexOf('@@')"), Value::Int(-1));
+        assert_eq!(eval("'tacocat'.lastIndexOf('')"), Value::Int(7));
+    }
+
+    #[test]
+    fn test_last_index_of_full_match() {
+        assert_eq!(
+            eval("'hello wello'.lastIndexOf('hello wello')"),
+            Value::Int(0)
+        );
+    }
+
+    #[test]
+    fn test_last_index_of_overlapping() {
+        // lastIndexOf with offset limits search to positions [0, offset)
+        assert_eq!(eval("'bananananana'.lastIndexOf('nana', 7)"), Value::Int(2));
+        assert_eq!(eval("'bananananana'.lastIndexOf('nana')"), Value::Int(8));
+    }
+
+    #[test]
+    fn test_replace_empty_pattern() {
+        assert_eq!(
+            eval("'hello hello'.replace('', '_')"),
+            Value::String(Arc::new("_h_e_l_l_o_ _h_e_l_l_o_".into()))
+        );
+    }
+
+    #[test]
+    fn test_split_limit_zero() {
+        // limit 0 returns empty list (cel-go behavior)
+        assert_eq!(eval("'a,b,c'.split(',', 0)"), Value::List(Arc::new(vec![])));
+    }
+
+    #[test]
+    fn test_split_negative_limit() {
+        // negative limit returns all splits (cel-go behavior)
+        assert_eq!(
+            eval("'o©o©o©o'.split('©', -1)"),
+            Value::List(Arc::new(vec![
+                Value::String(Arc::new("o".into())),
+                Value::String(Arc::new("o".into())),
+                Value::String(Arc::new("o".into())),
+                Value::String(Arc::new("o".into())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_substring_unicode() {
+        assert_eq!(
+            eval("'ta©o©αT'.substring(2, 6)"),
+            Value::String(Arc::new("©o©α".into()))
+        );
+    }
+
+    #[test]
+    fn test_substring_at_end() {
+        assert_eq!(
+            eval("'ta©o©αT'.substring(7, 7)"),
+            Value::String(Arc::new("".into()))
+        );
+    }
+
+    #[test]
+    fn test_lower_ascii_non_ascii_preserved() {
+        // Non-ASCII characters should not be lowercased
+        assert_eq!(
+            eval("'TacoCÆt'.lowerAscii()"),
+            Value::String(Arc::new("tacocÆt".into()))
+        );
+    }
+
+    #[test]
+    fn test_upper_ascii_non_ascii_preserved() {
+        // Non-ASCII characters should not be uppercased
+        assert_eq!(
+            eval("'tacoCαt'.upperAscii()"),
+            Value::String(Arc::new("TACOCαT".into()))
+        );
+    }
+
+    #[test]
+    fn test_strings_quote_special_escapes() {
+        // \a (bell)
+        let result = strings_quote(Arc::new("\x07".into())).unwrap();
+        assert_eq!(result, Value::String(Arc::new("\"\\a\"".into())));
+        // \b (backspace)
+        let result = strings_quote(Arc::new("\x08".into())).unwrap();
+        assert_eq!(result, Value::String(Arc::new("\"\\b\"".into())));
+        // \f (form feed)
+        let result = strings_quote(Arc::new("\x0C".into())).unwrap();
+        assert_eq!(result, Value::String(Arc::new("\"\\f\"".into())));
+        // \v (vertical tab)
+        let result = strings_quote(Arc::new("\x0B".into())).unwrap();
+        assert_eq!(result, Value::String(Arc::new("\"\\v\"".into())));
+    }
+
+    #[test]
+    fn test_strings_quote_unicode_passthrough() {
+        // Unicode and emoji should pass through unescaped
+        let result = strings_quote(Arc::new("завтра".into())).unwrap();
+        assert_eq!(result, Value::String(Arc::new("\"завтра\"".into())));
+    }
+
+    #[test]
+    fn test_strings_quote_embedded_quote() {
+        let result = strings_quote(Arc::new("mid string \" quote".into())).unwrap();
+        assert_eq!(
+            result,
+            Value::String(Arc::new("\"mid string \\\" quote\"".into()))
         );
     }
 }

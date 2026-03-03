@@ -180,13 +180,9 @@ fn math_bit_shift_right(v: i64, shift: i64) -> ResolveResult {
 // ---------------------------------------------------------------------------
 
 /// `math.sqrt(double) -> double`
+///
+/// Returns NaN for negative input (matching cel-go behavior).
 fn math_sqrt(v: f64) -> ResolveResult {
-    if v < 0.0 {
-        return Err(ExecutionError::function_error(
-            "math.sqrt",
-            "cannot calculate square root of negative number",
-        ));
-    }
     Ok(Value::Float(v.sqrt()))
 }
 
@@ -435,11 +431,31 @@ mod tests {
             eval("math.sqrt(2.0)"),
             Value::Float(std::f64::consts::SQRT_2)
         );
+        assert_eq!(eval("math.sqrt(49.0)"), Value::Float(7.0));
     }
 
     #[test]
-    fn test_sqrt_negative() {
-        eval_err("math.sqrt(-1.0)");
+    fn test_sqrt_negative_returns_nan() {
+        // cel-go returns NaN for negative input
+        let result = eval("math.sqrt(-1.0)");
+        match result {
+            Value::Float(f) => assert!(f.is_nan()),
+            other => panic!("expected Float(NaN), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sqrt_nan_check() {
+        // math.isNaN(math.sqrt(-15.34)) == true
+        assert_eq!(eval("math.isNaN(math.sqrt(-15.34))"), Value::Bool(true));
+    }
+
+    // -- abs overflow --
+
+    #[test]
+    fn test_abs_overflow() {
+        // i64::MIN has no positive counterpart
+        eval_err("math.abs(-9223372036854775808)");
     }
 
     // -- Variadic --
@@ -464,5 +480,28 @@ mod tests {
     #[test]
     fn test_least_single() {
         assert_eq!(eval("math.least(42)"), Value::Int(42));
+    }
+
+    #[test]
+    fn test_greatest_single_float() {
+        assert_eq!(eval("math.greatest(-0.5)"), Value::Float(-0.5));
+    }
+
+    #[test]
+    fn test_least_single_float() {
+        assert_eq!(eval("math.least(-0.5)"), Value::Float(-0.5));
+    }
+
+    // -- Inspection negated forms --
+
+    #[test]
+    fn test_is_nan_negated() {
+        assert_eq!(eval("!math.isNaN(1.0)"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_is_inf_negated() {
+        assert_eq!(eval("!math.isInf(1.0)"), Value::Bool(true));
+        assert_eq!(eval("!math.isFinite(1.0 / 0.0)"), Value::Bool(true));
     }
 }

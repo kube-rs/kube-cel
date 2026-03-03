@@ -4,10 +4,17 @@
 //! `cel-go/ext/encoders.go`.
 
 use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
+use base64::engine::DecodePaddingMode;
+use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STANDARD};
 use cel::objects::Value;
 use cel::{Context, ExecutionError, ResolveResult};
 use std::sync::Arc;
+
+/// Base64 decoder that accepts both padded and unpadded input (matching cel-go).
+const STANDARD_INDIFFERENT: GeneralPurpose = GeneralPurpose::new(
+    &base64::alphabet::STANDARD,
+    GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
+);
 
 /// Register all encoder extension functions.
 pub fn register(ctx: &mut Context<'_>) {
@@ -16,8 +23,10 @@ pub fn register(ctx: &mut Context<'_>) {
 }
 
 /// `base64.decode(<string>) -> bytes`
+///
+/// Accepts both padded and unpadded input (matching cel-go behavior).
 fn base64_decode(s: Arc<String>) -> ResolveResult {
-    let bytes = STANDARD
+    let bytes = STANDARD_INDIFFERENT
         .decode(s.as_bytes())
         .map_err(|e| ExecutionError::function_error("base64.decode", e.to_string()))?;
     Ok(Value::Bytes(Arc::new(bytes)))
@@ -77,5 +86,14 @@ mod tests {
     #[test]
     fn test_base64_decode_empty() {
         assert_eq!(eval("base64.decode('')"), Value::Bytes(Arc::new(vec![])));
+    }
+
+    #[test]
+    fn test_base64_decode_unpadded() {
+        // cel-go accepts unpadded base64
+        assert_eq!(
+            eval("base64.decode('aGVsbG8')"),
+            Value::Bytes(Arc::new(b"hello".to_vec()))
+        );
     }
 }

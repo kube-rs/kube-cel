@@ -140,4 +140,30 @@ mod tests {
             Value::List(Arc::new(vec![]))
         );
     }
+
+    // --- cel-go parity tests ---
+
+    #[test]
+    fn test_find_full_match() {
+        assert_eq!(
+            eval("'hello'.find('hello')"),
+            Value::String(Arc::new("hello".into()))
+        );
+    }
+
+    #[test]
+    fn test_find_empty_string() {
+        assert_eq!(
+            eval("''.find('[a-z]+')"),
+            Value::String(Arc::new(String::new()))
+        );
+    }
+
+    #[test]
+    fn test_find_all_limit_exceeds_matches() {
+        assert_eq!(
+            eval("'hello'.findAll('[a-z]+', 100)"),
+            Value::List(Arc::new(vec![Value::String(Arc::new("hello".into()))]))
+        );
+    }
 }

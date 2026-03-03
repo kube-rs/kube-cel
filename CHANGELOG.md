@@ -4,10 +4,22 @@
 
 ### Added
 
-- `math.sqrt(double)` — square root function (errors on negative input)
+- `math.sqrt(double)` — square root function (returns NaN for negative input, matching cel-go)
 - `<IP>.string()` / `<CIDR>.string()` — convert IP/CIDR opaque types back to string
 - `<list>.first()` — returns `optional.of(first_element)` or `optional.none()` for empty list
 - `<list>.last()` — returns `optional.of(last_element)` or `optional.none()` for empty list
+
+### Fixed (cel-go parity)
+
+- `charAt(len)` now returns `""` instead of error (matching cel-go behavior)
+- `split(sep, 0)` now returns `[]` instead of `[""]`; negative limit returns all splits
+- `strings.quote` now escapes `\a`, `\b`, `\f`, `\v` control characters
+- `base64.decode` now accepts unpadded input (matching cel-go behavior)
+- `%b` format verb with bool now outputs `"1"`/`"0"` instead of `"true"`/`"false"`
+
+### Tests
+
+- Added ~60 cel-go parity tests across all modules (strings, math, lists, sets, ip/cidr, quantity, regex, format, semver, encoders)
 
 ## [0.4.1] - 2026-03-03
 

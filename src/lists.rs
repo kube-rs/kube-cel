@@ -606,4 +606,66 @@ mod tests {
             ]))]))
         );
     }
+
+    // --- cel-go parity tests ---
+
+    #[test]
+    fn test_reverse_strings() {
+        assert_eq!(
+            eval("['are', 'you', 'as', 'bored', 'as', 'I', 'am'].reverse()"),
+            Value::List(Arc::new(vec![
+                Value::String(Arc::new("am".into())),
+                Value::String(Arc::new("I".into())),
+                Value::String(Arc::new("as".into())),
+                Value::String(Arc::new("bored".into())),
+                Value::String(Arc::new("as".into())),
+                Value::String(Arc::new("you".into())),
+                Value::String(Arc::new("are".into())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_slice_at_end() {
+        assert_eq!(
+            eval("[1, 2, 3, 4].slice(4, 4)"),
+            Value::List(Arc::new(vec![]))
+        );
+    }
+
+    #[test]
+    fn test_slice_negative_error() {
+        eval_err("[1, 2, 3, 4].slice(-5, 10)");
+    }
+
+    #[test]
+    fn test_flatten_negative_depth_error() {
+        eval_err("[].flatten(-1)");
+    }
+
+    #[test]
+    fn test_first_single() {
+        assert_eq!(eval("[42].first().value()"), Value::Int(42));
+    }
+
+    #[test]
+    fn test_last_single() {
+        assert_eq!(eval("[42].last().value()"), Value::Int(42));
+    }
+
+    #[test]
+    fn test_first_strings() {
+        assert_eq!(
+            eval("['a', 'b', 'c'].first().value()"),
+            Value::String(Arc::new("a".into()))
+        );
+    }
+
+    #[test]
+    fn test_last_strings() {
+        assert_eq!(
+            eval("['a', 'b', 'c'].last().value()"),
+            Value::String(Arc::new("c".into()))
+        );
+    }
 }
