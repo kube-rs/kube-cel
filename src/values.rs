@@ -43,6 +43,9 @@ impl SchemaFormat {
 
 /// Convert a [`serde_json::Value`] into a [`cel::Value`].
 ///
+/// Object keys are escaped via [`escape_field_name`](crate::escaping::escape_field_name)
+/// to handle CEL reserved words and special characters (`.`, `-`, `/`, `_`).
+///
 /// # Number conversion priority
 ///
 /// JSON numbers are converted using the following priority:

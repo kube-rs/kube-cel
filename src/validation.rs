@@ -59,6 +59,10 @@ impl std::error::Error for ValidationError {}
 ///
 /// For repeated validation against the same schema, use [`compile_schema`](crate::compilation::compile_schema) +
 /// [`validate_compiled`](Validator::validate_compiled) to avoid re-compilation.
+///
+/// # Thread Safety
+///
+/// `Validator` is `Send + Sync` and can be shared across threads.
 #[derive(Clone, Debug)]
 pub struct Validator {
     _private: (),

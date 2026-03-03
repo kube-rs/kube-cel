@@ -127,6 +127,11 @@ pub(crate) fn compile_schema_validations(
 
 /// A pre-compiled schema tree. Compile once with [`compile_schema`], then
 /// validate many objects via [`Validator::validate_compiled`](crate::validation::Validator::validate_compiled).
+///
+/// # Note
+///
+/// `CompiledSchema` is not `Clone` because [`cel::Program`] is `!Clone`.
+/// Wrap in [`Arc`](std::sync::Arc) for shared ownership across threads.
 #[derive(Debug)]
 pub struct CompiledSchema {
     /// Compiled validation rules at this schema node.
