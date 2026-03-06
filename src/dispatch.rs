@@ -5,6 +5,7 @@
 //! both strings and lists), this module provides unified dispatch functions
 //! that route to the correct implementation based on the runtime type of `this`.
 
+#[cfg(any(feature = "ip", feature = "lists"))]
 use std::sync::Arc;
 
 use cel::extractors::{Arguments, This};
@@ -196,6 +197,7 @@ fn string_dispatch(This(this): This<Value>) -> ResolveResult {
 
 /// Reimplements cel's built-in `string()` for standard types.
 /// Must stay in sync with `cel::functions::string` (cel 0.12).
+#[cfg(feature = "ip")]
 fn builtin_string_fallback(this: Value) -> ResolveResult {
     match this {
         Value::String(_) => Ok(this),
@@ -219,6 +221,7 @@ fn builtin_string_fallback(this: Value) -> ResolveResult {
 
 /// Format nanoseconds matching Go's `time.Duration.String()`.
 /// Mirrors `cel::duration::format_duration` which is not pub.
+#[cfg(feature = "ip")]
 fn format_cel_duration(total_nanos: i64) -> String {
     if total_nanos == 0 {
         return "0s".into();
@@ -324,6 +327,7 @@ fn max_dispatch(This(this): This<Value>, Arguments(args): Arguments) -> ResolveR
 
 #[cfg(test)]
 mod tests {
+    #![allow(dead_code)]
     use cel::{Context, Program, Value};
 
     fn eval(expr: &str) -> Value {

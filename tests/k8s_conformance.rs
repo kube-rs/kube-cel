@@ -6,6 +6,8 @@
 //! - `k8s.io/apiserver/pkg/cel/library/quantity_test.go`
 //! - `k8s.io/apiserver/pkg/cel/library/semver_test.go`
 
+#![allow(dead_code, unused_imports)]
+
 use cel::{Context, Program, Value};
 use std::sync::Arc;
 
@@ -13,12 +15,6 @@ fn eval(expr: &str) -> Value {
     let mut ctx = Context::default();
     kube_cel::register_all(&mut ctx);
     Program::compile(expr).unwrap().execute(&ctx).unwrap()
-}
-
-fn eval_err(expr: &str) -> cel::ExecutionError {
-    let mut ctx = Context::default();
-    kube_cel::register_all(&mut ctx);
-    Program::compile(expr).unwrap().execute(&ctx).unwrap_err()
 }
 
 fn assert_true(expr: &str) {
@@ -56,6 +52,7 @@ fn assert_runtime_err(expr: &str) {
 // IP tests (from ip_test.go)
 // ===========================================================================
 
+#[cfg(feature = "ip")]
 mod ip {
     use super::*;
 
@@ -251,6 +248,7 @@ mod ip {
 // CIDR tests (from cidr_test.go)
 // ===========================================================================
 
+#[cfg(feature = "ip")]
 mod cidr {
     use super::*;
 
@@ -343,6 +341,7 @@ mod cidr {
 // Quantity tests (from quantity_test.go)
 // ===========================================================================
 
+#[cfg(feature = "quantity")]
 mod quantity {
     use super::*;
 
@@ -492,6 +491,7 @@ mod quantity {
 // Semver tests (from semver_test.go)
 // ===========================================================================
 
+#[cfg(feature = "semver_funcs")]
 mod semver {
     use super::*;
 
@@ -616,6 +616,7 @@ mod semver {
 // Lists tests (from lists.go function definitions)
 // ===========================================================================
 
+#[cfg(feature = "lists")]
 mod lists {
     use super::*;
 
