@@ -3,7 +3,7 @@
 //! Provides semver parsing, comparison, and accessor functions,
 //! matching `k8s.io/apiserver/pkg/cel/library/semverlib.go`.
 
-use cel::extractors::This;
+use cel::extractors::{Arguments, This};
 use cel::objects::{Opaque, Value};
 use cel::{Context, ExecutionError, ResolveResult};
 use std::cmp::Ordering;
@@ -29,22 +29,77 @@ pub fn register(ctx: &mut Context<'_>) {
     // isGreaterThan, isLessThan, compareTo registered via dispatch
 }
 
+/// Normalize a version string for lenient parsing:
+/// - Strip leading 'v' or 'V'
+/// - Strip leading zeros from each component (e.g., "01" -> "1")
+/// - Pad missing minor/patch (e.g., "1" -> "1.0.0", "1.2" -> "1.2.0")
+fn normalize(s: &str) -> String {
+    let s = s
+        .strip_prefix('v')
+        .or_else(|| s.strip_prefix('V'))
+        .unwrap_or(s);
+    let parts: Vec<&str> = s.splitn(2, '-').collect();
+    let version_part = parts[0];
+    let pre_part = parts.get(1);
+
+    let dots: Vec<&str> = version_part.split('.').collect();
+    let strip_zeros = |s: &str| -> String {
+        let stripped = s.trim_start_matches('0');
+        if stripped.is_empty() { "0".into() } else { stripped.into() }
+    };
+    // Each version component must be numeric
+    for comp in &dots {
+        if comp.is_empty() || !comp.bytes().all(|b| b.is_ascii_digit()) {
+            return s.to_string(); // return as-is, let semver::parse reject it
+        }
+    }
+    let normalized = match dots.len() {
+        1 => format!("{}.0.0", strip_zeros(dots[0])),
+        2 => format!("{}.{}.0", strip_zeros(dots[0]), strip_zeros(dots[1])),
+        _ => format!("{}.{}.{}", strip_zeros(dots[0]), strip_zeros(dots[1]), strip_zeros(dots[2])),
+    };
+
+    match pre_part {
+        Some(pre) => format!("{normalized}-{pre}"),
+        None => normalized,
+    }
+}
+
+/// Check if the lenient flag is set.
+/// Arguments contains ALL args (including the string consumed by This),
+/// so the bool flag is the last element.
+fn is_lenient(args: &[Value]) -> bool {
+    matches!(args.last(), Some(Value::Bool(true)))
+}
+
+/// Parse a semver string, using strict or lenient mode.
+fn do_parse(s: &str, lenient: bool) -> Result<semver::Version, semver::Error> {
+    if lenient {
+        semver::Version::parse(&normalize(s))
+    } else {
+        semver::Version::parse(s)
+    }
+}
+
 /// `semver(<string>) -> Semver`
+/// `semver(<string>, <bool>) -> Semver`
 ///
-/// Strict parsing: requires exact `Major.Minor.Patch` format.
-/// Rejects v-prefix, partial versions, and leading zeros.
-fn parse_semver(s: Arc<String>) -> ResolveResult {
-    let version = semver::Version::parse(&s).map_err(|e| {
+/// Strict (1-arg): requires exact `Major.Minor.Patch` format.
+/// Lenient (2-arg, true): accepts v-prefix, partial versions, leading zeros.
+fn parse_semver(This(s): This<Arc<String>>, Arguments(args): Arguments) -> ResolveResult {
+    let version = do_parse(&s, is_lenient(&args)).map_err(|e| {
         ExecutionError::function_error("semver", format!("invalid semver '{s}': {e}"))
     })?;
     Ok(Value::Opaque(Arc::new(KubeSemver(version))))
 }
 
 /// `isSemver(<string>) -> bool`
+/// `isSemver(<string>, <bool>) -> bool`
 ///
-/// Strict validation: requires exact `Major.Minor.Patch` format.
-fn is_semver(s: Arc<String>) -> ResolveResult {
-    Ok(Value::Bool(semver::Version::parse(&s).is_ok()))
+/// Strict (1-arg): requires exact `Major.Minor.Patch` format.
+/// Lenient (2-arg, true): accepts v-prefix, partial versions, leading zeros.
+fn is_semver(This(s): This<Arc<String>>, Arguments(args): Arguments) -> ResolveResult {
+    Ok(Value::Bool(do_parse(&s, is_lenient(&args)).is_ok()))
 }
 
 /// Helper to extract KubeSemver from an opaque Value.
@@ -282,5 +337,57 @@ mod tests {
             eval("semver('1.0.1').isGreaterThan(semver('1.0.0'))"),
             Value::Bool(true)
         );
+    }
+
+    // --- Lenient mode (2-arg) tests ---
+
+    #[test]
+    fn test_is_semver_lenient_v_prefix() {
+        assert_eq!(eval("isSemver('v1.0.0', true)"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_is_semver_lenient_partial() {
+        assert_eq!(eval("isSemver('1', true)"), Value::Bool(true));
+        assert_eq!(eval("isSemver('1.1', true)"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_is_semver_lenient_still_rejects_invalid() {
+        assert_eq!(eval("isSemver('', true)"), Value::Bool(false));
+        assert_eq!(eval("isSemver('not-a-version', true)"), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_is_semver_lenient_spaces_rejected() {
+        assert_eq!(eval("isSemver(' 1.0.0', true)"), Value::Bool(false));
+        assert_eq!(eval("isSemver('1.0.0 ', true)"), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_semver_lenient_v_prefix() {
+        assert_eq!(eval("semver('v1.2.3', true).major()"), Value::Int(1));
+    }
+
+    #[test]
+    fn test_semver_lenient_partial() {
+        assert_eq!(eval("semver('1', true).major()"), Value::Int(1));
+        assert_eq!(eval("semver('1', true).minor()"), Value::Int(0));
+        assert_eq!(eval("semver('1.2', true).patch()"), Value::Int(0));
+    }
+
+    #[test]
+    fn test_semver_lenient_equality() {
+        assert_eq!(
+            eval("semver('v01.01', true) == semver('1.1.0')"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn test_semver_lenient_false_is_strict() {
+        // Passing false should behave like strict mode
+        assert_eq!(eval("isSemver('v1.0.0', false)"), Value::Bool(false));
+        assert_eq!(eval("isSemver('1', false)"), Value::Bool(false));
     }
 }
