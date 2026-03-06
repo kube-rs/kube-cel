@@ -5,6 +5,8 @@
 //! both strings and lists), this module provides unified dispatch functions
 //! that route to the correct implementation based on the runtime type of `this`.
 
+use std::sync::Arc;
+
 use cel::extractors::{Arguments, This};
 use cel::objects::Value;
 use cel::{Context, ExecutionError, ResolveResult};
@@ -37,6 +39,13 @@ pub fn register(ctx: &mut Context<'_>) {
     // reverse: string → reversed string, list → reversed list
     #[cfg(any(feature = "strings", feature = "lists"))]
     ctx.add_function("reverse", reverse);
+
+    // min/max: list method vs cel built-in variadic
+    #[cfg(feature = "lists")]
+    {
+        ctx.add_function("min", min_dispatch);
+        ctx.add_function("max", max_dispatch);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -269,6 +278,34 @@ fn reverse(This(this): This<Value>) -> ResolveResult {
             "reverse",
             format!("reverse not supported on type {:?}", this.type_of()),
         )),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// min / max (list method vs cel built-in variadic)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "lists")]
+fn min_dispatch(This(this): This<Value>, Arguments(args): Arguments) -> ResolveResult {
+    match this {
+        Value::List(list) if args.is_empty() => crate::lists::list_min(This(list)),
+        _ => {
+            let mut all_args = vec![this];
+            all_args.extend(args.iter().cloned());
+            cel::functions::min(Arguments(Arc::new(all_args)))
+        }
+    }
+}
+
+#[cfg(feature = "lists")]
+fn max_dispatch(This(this): This<Value>, Arguments(args): Arguments) -> ResolveResult {
+    match this {
+        Value::List(list) if args.is_empty() => crate::lists::list_max(This(list)),
+        _ => {
+            let mut all_args = vec![this];
+            all_args.extend(args.iter().cloned());
+            cel::functions::max(Arguments(Arc::new(all_args)))
+        }
     }
 }
 

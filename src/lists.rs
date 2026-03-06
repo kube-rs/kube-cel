@@ -15,10 +15,8 @@ use crate::value_ops::{compare_values, val_add, val_eq, val_le, val_lt};
 pub fn register(ctx: &mut Context<'_>) {
     ctx.add_function("isSorted", is_sorted);
     ctx.add_function("sum", sum);
-    // Note: min/max are already built-in to the cel crate as variadic functions.
-    // We register list-member versions here that operate on `<list>.min()` / `<list>.max()`.
-    ctx.add_function("min", list_min);
-    ctx.add_function("max", list_max);
+    // min/max are registered via dispatch module to handle
+    // name collision with cel built-in variadic min/max.
     // indexOf/lastIndexOf are registered via dispatch module to handle
     // name collision between string and list versions.
     ctx.add_function("slice", slice);
@@ -62,7 +60,8 @@ fn sum(This(this): This<Arc<Vec<Value>>>) -> ResolveResult {
 /// `<list>.min() -> T`
 ///
 /// Returns the minimum element. Errors on empty list.
-fn list_min(This(this): This<Arc<Vec<Value>>>) -> ResolveResult {
+/// Called from dispatch module for list/variadic dispatch.
+pub(crate) fn list_min(This(this): This<Arc<Vec<Value>>>) -> ResolveResult {
     if this.is_empty() {
         return Err(cel::ExecutionError::function_error(
             "min",
@@ -81,7 +80,8 @@ fn list_min(This(this): This<Arc<Vec<Value>>>) -> ResolveResult {
 /// `<list>.max() -> T`
 ///
 /// Returns the maximum element. Errors on empty list.
-fn list_max(This(this): This<Arc<Vec<Value>>>) -> ResolveResult {
+/// Called from dispatch module for list/variadic dispatch.
+pub(crate) fn list_max(This(this): This<Arc<Vec<Value>>>) -> ResolveResult {
     if this.is_empty() {
         return Err(cel::ExecutionError::function_error(
             "max",
