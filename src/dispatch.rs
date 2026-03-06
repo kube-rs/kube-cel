@@ -167,93 +167,112 @@ fn ip_dispatch(This(this): This<Value>, Arguments(args): Arguments) -> ResolveRe
 }
 
 // ---------------------------------------------------------------------------
-// string (IP → string, CIDR → string)
+// string (IP/CIDR → string, plus cel built-in fallback)
 // ---------------------------------------------------------------------------
+//
+// Overriding cel's built-in `string()` is unavoidable: K8s CEL spec requires
+// `ip("1.2.3.4").string()` to work, but cel's built-in rejects Opaque types.
+// Since the function registry has no overload support, we must replace it and
+// reimplement the standard type conversions.
+//
+// The standard conversions below mirror `cel::functions::string` (cel 0.12).
+// cel::functions::string is pub but requires &FunctionContext which is not
+// available in the extractor-based API, so direct delegation is not possible.
 
 #[cfg(feature = "ip")]
 fn string_dispatch(This(this): This<Value>) -> ResolveResult {
     match &this {
+        // Opaque types: K8s CEL extensions
         Value::Opaque(o) if o.downcast_ref::<crate::ip::KubeIP>().is_some() => {
             crate::ip::ip_string(This(this))
         }
         Value::Opaque(o) if o.downcast_ref::<crate::ip::KubeCIDR>().is_some() => {
             crate::ip::cidr_string(This(this))
         }
-        // Replicate cel built-in string() conversion for all standard types,
-        // since registering "string" overrides the built-in.
+        // Standard types: mirrors cel::functions::string (cel 0.12)
+        _ => builtin_string_fallback(this),
+    }
+}
+
+/// Reimplements cel's built-in `string()` for standard types.
+/// Must stay in sync with `cel::functions::string` (cel 0.12).
+fn builtin_string_fallback(this: Value) -> ResolveResult {
+    match this {
         Value::String(_) => Ok(this),
-        Value::Int(n) => Ok(Value::String(std::sync::Arc::new(n.to_string()))),
-        Value::UInt(n) => Ok(Value::String(std::sync::Arc::new(n.to_string()))),
-        Value::Float(f) => Ok(Value::String(std::sync::Arc::new(f.to_string()))),
-        Value::Bool(b) => Ok(Value::String(std::sync::Arc::new(
-            if *b { "true" } else { "false" }.into(),
-        ))),
-        Value::Bytes(b) => Ok(Value::String(std::sync::Arc::new(
+        Value::Int(n) => Ok(Value::String(Arc::new(n.to_string()))),
+        Value::UInt(n) => Ok(Value::String(Arc::new(n.to_string()))),
+        Value::Float(f) => Ok(Value::String(Arc::new(f.to_string()))),
+        Value::Bytes(ref b) => Ok(Value::String(Arc::new(
             String::from_utf8_lossy(b.as_slice()).into(),
         ))),
-        // Timestamp/Duration: cel built-in handles these when chrono is enabled
-        // (which is cel's default). We replicate without directly referencing chrono.
-        Value::Timestamp(t) => Ok(Value::String(std::sync::Arc::new(t.to_rfc3339()))),
-        Value::Duration(d) => {
-            let total_nanos = d
-                .num_nanoseconds()
-                .unwrap_or(d.num_seconds() * 1_000_000_000);
-            if total_nanos == 0 {
-                return Ok(Value::String(std::sync::Arc::new("0s".into())));
-            }
-            let neg = total_nanos < 0;
-            let u = total_nanos.unsigned_abs();
-            let mut result = String::new();
-            if neg {
-                result.push('-');
-            }
-            const NS_SECOND: u64 = 1_000_000_000;
-            const NS_MINUTE: u64 = 60 * NS_SECOND;
-            const NS_HOUR: u64 = 60 * NS_MINUTE;
-            if u >= NS_SECOND {
-                let hours = u / NS_HOUR;
-                let mins = (u % NS_HOUR) / NS_MINUTE;
-                let secs = (u % NS_MINUTE) / NS_SECOND;
-                let frac = u % NS_SECOND;
-                // Match Go's time.Duration.String(): always write seconds,
-                // write minutes when total_minutes > 0, write hours when > 0.
-                if hours > 0 {
-                    result.push_str(&format!("{hours}h"));
-                }
-                if hours > 0 || mins > 0 {
-                    result.push_str(&format!("{mins}m"));
-                }
-                if frac > 0 {
-                    let frac_s = format!("{frac:09}");
-                    let frac_s = frac_s.trim_end_matches('0');
-                    result.push_str(&format!("{secs}.{frac_s}s"));
-                } else {
-                    result.push_str(&format!("{secs}s"));
-                }
-            } else {
-                const NS_MILLISECOND: u64 = 1_000_000;
-                const NS_MICROSECOND: u64 = 1_000;
-                if u >= NS_MILLISECOND {
-                    let ms = u as f64 / NS_MILLISECOND as f64;
-                    let s = format!("{ms:.3}");
-                    result.push_str(s.trim_end_matches('0').trim_end_matches('.'));
-                    result.push_str("ms");
-                } else if u >= NS_MICROSECOND {
-                    let us = u as f64 / NS_MICROSECOND as f64;
-                    let s = format!("{us:.3}");
-                    result.push_str(s.trim_end_matches('0').trim_end_matches('.'));
-                    result.push_str("µs");
-                } else {
-                    result.push_str(&format!("{u}ns"));
-                }
-            }
-            Ok(Value::String(std::sync::Arc::new(result)))
+        Value::Timestamp(ref t) => Ok(Value::String(Arc::new(t.to_rfc3339()))),
+        Value::Duration(ref d) => {
+            Ok(Value::String(Arc::new(format_cel_duration(
+                d.num_nanoseconds()
+                    .unwrap_or(d.num_seconds() * 1_000_000_000),
+            ))))
         }
         _ => Err(ExecutionError::function_error(
             "string",
-            format!("string not supported on type {:?}", this.type_of()),
+            format!("cannot convert {:?} to string", this.type_of()),
         )),
     }
+}
+
+/// Format nanoseconds matching Go's `time.Duration.String()`.
+/// Mirrors `cel::duration::format_duration` which is not pub.
+fn format_cel_duration(total_nanos: i64) -> String {
+    if total_nanos == 0 {
+        return "0s".into();
+    }
+
+    let neg = total_nanos < 0;
+    let u = total_nanos.unsigned_abs();
+    let mut result = String::new();
+    if neg {
+        result.push('-');
+    }
+
+    const NS_SECOND: u64 = 1_000_000_000;
+    const NS_MINUTE: u64 = 60 * NS_SECOND;
+    const NS_HOUR: u64 = 60 * NS_MINUTE;
+
+    if u >= NS_SECOND {
+        let hours = u / NS_HOUR;
+        let mins = (u % NS_HOUR) / NS_MINUTE;
+        let secs = (u % NS_MINUTE) / NS_SECOND;
+        let frac = u % NS_SECOND;
+        if hours > 0 {
+            result.push_str(&format!("{hours}h"));
+        }
+        if hours > 0 || mins > 0 {
+            result.push_str(&format!("{mins}m"));
+        }
+        if frac > 0 {
+            let frac_s = format!("{frac:09}");
+            let frac_s = frac_s.trim_end_matches('0');
+            result.push_str(&format!("{secs}.{frac_s}s"));
+        } else {
+            result.push_str(&format!("{secs}s"));
+        }
+    } else {
+        const NS_MILLISECOND: u64 = 1_000_000;
+        const NS_MICROSECOND: u64 = 1_000;
+        if u >= NS_MILLISECOND {
+            let ms = u as f64 / NS_MILLISECOND as f64;
+            let s = format!("{ms:.3}");
+            result.push_str(s.trim_end_matches('0').trim_end_matches('.'));
+            result.push_str("ms");
+        } else if u >= NS_MICROSECOND {
+            let us = u as f64 / NS_MICROSECOND as f64;
+            let s = format!("{us:.3}");
+            result.push_str(s.trim_end_matches('0').trim_end_matches('.'));
+            result.push_str("µs");
+        } else {
+            result.push_str(&format!("{u}ns"));
+        }
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
