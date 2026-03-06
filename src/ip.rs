@@ -140,8 +140,8 @@ fn is_ip(s: Arc<String>) -> ResolveResult {
 /// Returns true if the string is the canonical form of an IP address.
 /// Errors on invalid IP strings (matches K8s behavior).
 fn ip_is_canonical(s: Arc<String>) -> ResolveResult {
-    let addr = parse_ip_addr(&s)
-        .map_err(|e| cel::ExecutionError::function_error("ip.isCanonical", e))?;
+    let addr =
+        parse_ip_addr(&s).map_err(|e| cel::ExecutionError::function_error("ip.isCanonical", e))?;
     Ok(Value::Bool(addr.to_string() == s.as_str()))
 }
 

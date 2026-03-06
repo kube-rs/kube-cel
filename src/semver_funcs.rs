@@ -45,7 +45,11 @@ fn normalize(s: &str) -> String {
     let dots: Vec<&str> = version_part.split('.').collect();
     let strip_zeros = |s: &str| -> String {
         let stripped = s.trim_start_matches('0');
-        if stripped.is_empty() { "0".into() } else { stripped.into() }
+        if stripped.is_empty() {
+            "0".into()
+        } else {
+            stripped.into()
+        }
     };
     // Each version component must be numeric
     for comp in &dots {
@@ -56,7 +60,12 @@ fn normalize(s: &str) -> String {
     let normalized = match dots.len() {
         1 => format!("{}.0.0", strip_zeros(dots[0])),
         2 => format!("{}.{}.0", strip_zeros(dots[0]), strip_zeros(dots[1])),
-        _ => format!("{}.{}.{}", strip_zeros(dots[0]), strip_zeros(dots[1]), strip_zeros(dots[2])),
+        _ => format!(
+            "{}.{}.{}",
+            strip_zeros(dots[0]),
+            strip_zeros(dots[1]),
+            strip_zeros(dots[2])
+        ),
     };
 
     match pre_part {

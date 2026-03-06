@@ -30,7 +30,11 @@ fn assert_false(expr: &str) {
 }
 
 fn assert_int(expr: &str, expected: i64) {
-    assert_eq!(eval(expr), Value::Int(expected), "expected {expected}: {expr}");
+    assert_eq!(
+        eval(expr),
+        Value::Int(expected),
+        "expected {expected}: {expr}"
+    );
 }
 
 fn assert_string(expr: &str, expected: &str) {

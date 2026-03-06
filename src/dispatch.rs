@@ -206,12 +206,10 @@ fn builtin_string_fallback(this: Value) -> ResolveResult {
             String::from_utf8_lossy(b.as_slice()).into(),
         ))),
         Value::Timestamp(ref t) => Ok(Value::String(Arc::new(t.to_rfc3339()))),
-        Value::Duration(ref d) => {
-            Ok(Value::String(Arc::new(format_cel_duration(
-                d.num_nanoseconds()
-                    .unwrap_or(d.num_seconds() * 1_000_000_000),
-            ))))
-        }
+        Value::Duration(ref d) => Ok(Value::String(Arc::new(format_cel_duration(
+            d.num_nanoseconds()
+                .unwrap_or(d.num_seconds() * 1_000_000_000),
+        )))),
         _ => Err(ExecutionError::function_error(
             "string",
             format!("cannot convert {:?} to string", this.type_of()),
@@ -383,10 +381,7 @@ mod tests {
     #[test]
     #[cfg(feature = "ip")]
     fn test_string_uint() {
-        assert_eq!(
-            eval("42u.string()"),
-            Value::String("42".to_string().into())
-        );
+        assert_eq!(eval("42u.string()"), Value::String("42".to_string().into()));
     }
 
     #[test]
