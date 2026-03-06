@@ -42,7 +42,8 @@ impl Opaque for KubeCIDR {
 /// Register all IP and CIDR extension functions.
 pub fn register(ctx: &mut Context<'_>) {
     // IP functions
-    ctx.add_function("ip", parse_ip);
+    // ip() is registered via dispatch module to handle
+    // name collision between string→IP parsing and CIDR→network extraction.
     ctx.add_function("isIP", is_ip);
     ctx.add_function("ip.isCanonical", ip_is_canonical);
     ctx.add_function("family", ip_family);
@@ -127,12 +128,6 @@ fn extract_cidr(val: &Value) -> Result<&KubeCIDR, cel::ExecutionError> {
             "expected CIDR type",
         )),
     }
-}
-
-/// `ip(<string>) -> IP`
-fn parse_ip(s: Arc<String>) -> ResolveResult {
-    let addr = parse_ip_addr(&s).map_err(|e| cel::ExecutionError::function_error("ip", e))?;
-    Ok(Value::Opaque(Arc::new(KubeIP(addr))))
 }
 
 /// `isIP(<string>) -> bool`
@@ -341,7 +336,7 @@ mod tests {
 
     fn eval(expr: &str) -> Value {
         let mut ctx = Context::default();
-        register(&mut ctx);
+        crate::register_all(&mut ctx);
         Program::compile(expr).unwrap().execute(&ctx).unwrap()
     }
 
@@ -428,7 +423,7 @@ mod tests {
 
     fn eval_err(expr: &str) -> cel::ExecutionError {
         let mut ctx = Context::default();
-        register(&mut ctx);
+        crate::register_all(&mut ctx);
         Program::compile(expr).unwrap().execute(&ctx).unwrap_err()
     }
 

@@ -24,7 +24,8 @@ pub fn register(ctx: &mut Context<'_>) {
     ctx.add_function("slice", slice);
     ctx.add_function("sort", sort);
     ctx.add_function("flatten", flatten);
-    ctx.add_function("reverse", list_reverse);
+    // reverse is registered via dispatch module to handle
+    // name collision between string and list versions.
     ctx.add_function("distinct", distinct);
     ctx.add_function("first", list_first);
     ctx.add_function("last", list_last);
@@ -221,11 +222,7 @@ fn lists_range(n: i64) -> ResolveResult {
 /// `<list>.reverse() -> list`
 ///
 /// Returns a new list with elements in reverse order.
-fn list_reverse(This(this): This<Arc<Vec<Value>>>) -> ResolveResult {
-    list_reverse_value(This(this))
-}
-
-/// Inner reverse implementation callable from dispatch.
+/// Called from dispatch module for string/list dispatch.
 pub(crate) fn list_reverse_value(This(this): This<Arc<Vec<Value>>>) -> ResolveResult {
     let mut result: Vec<Value> = this.iter().cloned().collect();
     result.reverse();
