@@ -11,8 +11,10 @@ use cel::extractors::{Arguments, This};
 use cel::objects::Value;
 use cel::{Context, ExecutionError, ResolveResult};
 
-/// Register all dispatch functions. Must be called after individual module registrations
-/// to overwrite any conflicting single-type registrations.
+/// Register dispatch functions for names shared across multiple types or
+/// that override cel built-in functions. Registration order is independent
+/// of individual module registrations since modules no longer register
+/// these conflicting names.
 pub fn register(ctx: &mut Context<'_>) {
     ctx.add_function("indexOf", index_of);
     ctx.add_function("lastIndexOf", last_index_of);

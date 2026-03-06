@@ -137,7 +137,9 @@ pub fn register_all(ctx: &mut cel::Context<'_>) {
     #[cfg(feature = "encoders")]
     encoders::register(ctx);
 
-    // Must be last: overwrites single-type registrations with unified dispatch
+    // Dispatch: registers functions with name collisions (indexOf, reverse,
+    // min/max, string, ip, isGreaterThan, etc.). Order-independent since
+    // individual modules no longer register these conflicting names.
     dispatch::register(ctx);
 }
 
