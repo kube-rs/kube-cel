@@ -19,7 +19,7 @@
 //! without an API server.
 //!
 //! ```toml
-//! kube-cel = { version = "0.2", features = ["validation"] }
+//! kube-cel = { version = "0.4", features = ["validation"] }
 //! ```
 //!
 //! ```rust,ignore
