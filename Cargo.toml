@@ -1,11 +1,13 @@
 [package]
 name = "kube-cel"
-version = "0.4.3"
+version = "1.0.0"
 edition = "2024"
+rust-version = "1.85"
 license = "Apache-2.0"
 description = "Kubernetes CEL extension functions for the cel crate"
-repository = "https://github.com/doxxx93/kube-cel"
+repository = "https://github.com/kube-rs/kube-cel"
 documentation = "https://docs.rs/kube-cel"
+homepage = "https://kube.rs"
 keywords = ["kubernetes", "cel", "kube", "validation"]
 categories = ["api-bindings"]
 

@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.0] - 2026-03-11
+
+### Changed
+
+- **Repository transferred to [kube-rs](https://github.com/kube-rs) organization**
+- Version bump to 1.0.0 — API stabilized (no breaking changes from 0.4.3)
+- `rust-version = "1.85"` now explicitly specified
+- `homepage = "https://kube.rs"` added
+- README rewritten with proper documentation, usage examples, and feature flag reference
+- CI updated: `master` → `main` branch
+
 ## [0.4.3] - 2026-03-03
 
 ### Fixed
