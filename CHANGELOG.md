@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.4] - 2026-03-11
+
+### Changed
+
+- Repository transferred to [kube-rs](https://github.com/kube-rs) organization
+- `rust-version = "1.88"` explicitly specified (aligned with kube-rs/kube)
+- `homepage = "https://kube.rs"` added
+- README rewritten with full documentation
+- LICENSE copyright notice filled in
+- CI updated: `master` → `main` branch
+
 ## [0.4.3] - 2026-03-03
 
 ### Fixed
