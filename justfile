@@ -68,9 +68,23 @@ bump version:
     echo "Updated: Cargo.toml, README.md, src/lib.rs, CHANGELOG.md"
     echo "Edit CHANGELOG.md to fill in release notes"
 
-# Publish to crates.io (runs full check first)
-publish: check
+# Release: check → commit → tag → push → publish (run `just bump X.Y.Z` first)
+release: check
+    #!/usr/bin/env bash
+    set -euo pipefail
+    version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+    # Verify CHANGELOG has been filled in (not just template)
+    if grep -q "^## \[${version}\]" CHANGELOG.md && grep -A3 "^## \[${version}\]" CHANGELOG.md | grep -q "^$"; then
+        echo "⚠ CHANGELOG.md looks like a template — fill in release notes first"
+        exit 1
+    fi
+    echo "Releasing v${version}..."
+    git add -A
+    git commit -m "chore: release ${version}"
+    git tag "v${version}"
+    git push origin main --tags
     cargo publish
+    echo "Published kube-cel v${version}"
 
 # Dry-run publish
 publish-dry: check
