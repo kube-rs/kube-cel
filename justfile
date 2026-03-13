@@ -46,26 +46,26 @@ fmt-fix:
 test:
     cargo test
 
-# Bump version and add changelog template (e.g., just bump 0.5.0)
+# Bump version and update all references (e.g., just bump 0.6.0)
 bump version:
     #!/usr/bin/env bash
     set -euo pipefail
     old=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-    # Cross-platform sed -i (macOS vs GNU)
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        sed -i '' 's/^version = ".*"/version = "{{version}}"/' Cargo.toml
-    else
-        sed -i 's/^version = ".*"/version = "{{version}}"/' Cargo.toml
-    fi
+    old_minor="${old%.*}"  # e.g. 0.5.0 → 0.5
+    new_minor="{{version}}"
+    new_minor="${new_minor%.*}"  # e.g. 0.6.0 → 0.6
+    sedi() { if [[ "$OSTYPE" == "darwin"* ]]; then sed -i '' "$@"; else sed -i "$@"; fi; }
+    # Cargo.toml
+    sedi 's/^version = ".*"/version = "{{version}}"/' Cargo.toml
+    # README.md + src/lib.rs — update version in dependency examples
+    sedi "s/kube-cel = \"${old_minor}\"/kube-cel = \"${new_minor}\"/g" README.md
+    sedi "s/version = \"${old_minor}\"/version = \"${new_minor}\"/g" README.md src/lib.rs
     # Add changelog entry
     date=$(date +%Y-%m-%d)
     entry="## [{{version}}] - ${date}\n\n### Added\n\n### Fixed\n\n### Changed\n"
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        sed -i '' "s/^# Changelog$/# Changelog\n\n${entry}/" CHANGELOG.md
-    else
-        sed -i "s/^# Changelog$/# Changelog\n\n${entry}/" CHANGELOG.md
-    fi
+    sedi "s/^# Changelog$/# Changelog\n\n${entry}/" CHANGELOG.md
     echo "Bumped ${old} → {{version}}"
+    echo "Updated: Cargo.toml, README.md, src/lib.rs, CHANGELOG.md"
     echo "Edit CHANGELOG.md to fill in release notes"
 
 # Publish to crates.io (runs full check first)

@@ -13,7 +13,7 @@ Implements the Kubernetes-specific CEL libraries defined in [`k8s.io/apiserver/p
 
 ```toml
 [dependencies]
-kube-cel = "0.4"
+kube-cel = "0.5"
 cel = "0.12"
 ```
 
@@ -45,7 +45,7 @@ With the `validation` feature, you can compile and evaluate `x-kubernetes-valida
 
 ```toml
 [dependencies]
-kube-cel = { version = "0.4", features = ["validation"] }
+kube-cel = { version = "0.5", features = ["validation"] }
 ```
 
 ```rust
