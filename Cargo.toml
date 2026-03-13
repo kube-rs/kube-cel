@@ -13,7 +13,7 @@ categories = ["api-bindings"]
 exclude = ["PLAN.md", "justfile"]
 
 [dependencies]
-cel = "0.12"
+cel = "0.13"
 regex = { version = "1", optional = true }
 url = { version = "2", optional = true }
 ipnet = { version = "2", optional = true }
