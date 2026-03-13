@@ -3,11 +3,12 @@
 //! Provides semver parsing, comparison, and accessor functions,
 //! matching `k8s.io/apiserver/pkg/cel/library/semverlib.go`.
 
-use cel::extractors::{Arguments, This};
-use cel::objects::{Opaque, Value};
-use cel::{Context, ExecutionError, ResolveResult};
-use std::cmp::Ordering;
-use std::sync::Arc;
+use cel::{
+    Context, ExecutionError, ResolveResult,
+    extractors::{Arguments, This},
+    objects::{Opaque, Value},
+};
+use std::{cmp::Ordering, sync::Arc};
 
 /// A Kubernetes CEL Semver value wrapping `semver::Version`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,10 +35,7 @@ pub fn register(ctx: &mut Context<'_>) {
 /// - Strip leading zeros from each component (e.g., "01" -> "1")
 /// - Pad missing minor/patch (e.g., "1" -> "1.0.0", "1.2" -> "1.2.0")
 fn normalize(s: &str) -> String {
-    let s = s
-        .strip_prefix('v')
-        .or_else(|| s.strip_prefix('V'))
-        .unwrap_or(s);
+    let s = s.strip_prefix('v').or_else(|| s.strip_prefix('V')).unwrap_or(s);
     let parts: Vec<&str> = s.splitn(2, '-').collect();
     let version_part = parts[0];
     let pre_part = parts.get(1);
@@ -96,9 +94,8 @@ fn do_parse(s: &str, lenient: bool) -> Result<semver::Version, semver::Error> {
 /// Strict (1-arg): requires exact `Major.Minor.Patch` format.
 /// Lenient (2-arg, true): accepts v-prefix, partial versions, leading zeros.
 fn parse_semver(This(s): This<Arc<String>>, Arguments(args): Arguments) -> ResolveResult {
-    let version = do_parse(&s, is_lenient(&args)).map_err(|e| {
-        ExecutionError::function_error("semver", format!("invalid semver '{s}': {e}"))
-    })?;
+    let version = do_parse(&s, is_lenient(&args))
+        .map_err(|e| ExecutionError::function_error("semver", format!("invalid semver '{s}': {e}")))?;
     Ok(Value::Opaque(Arc::new(KubeSemver(version))))
 }
 
@@ -117,10 +114,7 @@ fn extract_semver(val: &Value) -> Result<&KubeSemver, ExecutionError> {
         Value::Opaque(o) => o
             .downcast_ref::<KubeSemver>()
             .ok_or_else(|| ExecutionError::function_error("semver", "expected Semver type")),
-        _ => Err(ExecutionError::function_error(
-            "semver",
-            "expected Semver type",
-        )),
+        _ => Err(ExecutionError::function_error("semver", "expected Semver type")),
     }
 }
 
@@ -240,18 +234,9 @@ mod tests {
 
     #[test]
     fn test_compare_to() {
-        assert_eq!(
-            eval("semver('1.0.0').compareTo(semver('1.0.0'))"),
-            Value::Int(0)
-        );
-        assert_eq!(
-            eval("semver('1.0.0').compareTo(semver('2.0.0'))"),
-            Value::Int(-1)
-        );
-        assert_eq!(
-            eval("semver('2.0.0').compareTo(semver('1.0.0'))"),
-            Value::Int(1)
-        );
+        assert_eq!(eval("semver('1.0.0').compareTo(semver('1.0.0'))"), Value::Int(0));
+        assert_eq!(eval("semver('1.0.0').compareTo(semver('2.0.0'))"), Value::Int(-1));
+        assert_eq!(eval("semver('2.0.0').compareTo(semver('1.0.0'))"), Value::Int(1));
     }
 
     #[test]
@@ -322,10 +307,7 @@ mod tests {
 
     #[test]
     fn test_semver_equal_self() {
-        assert_eq!(
-            eval("semver('1.0.0').compareTo(semver('1.0.0'))"),
-            Value::Int(0)
-        );
+        assert_eq!(eval("semver('1.0.0').compareTo(semver('1.0.0'))"), Value::Int(0));
     }
 
     #[test]

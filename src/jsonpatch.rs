@@ -3,8 +3,7 @@
 //! Provides `jsonpatch.escapeKey()` to escape JSONPatch path keys
 //! per RFC 6901 (`~` → `~0`, `/` → `~1`).
 
-use cel::objects::Value;
-use cel::{Context, ResolveResult};
+use cel::{Context, ResolveResult, objects::Value};
 use std::sync::Arc;
 
 /// Register the jsonpatch extension functions.

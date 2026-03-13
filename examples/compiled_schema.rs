@@ -2,8 +2,7 @@
 //!
 //! Run with: `cargo run --example compiled_schema --features validation`
 
-use kube_cel::compilation::compile_schema;
-use kube_cel::validation::validate_compiled;
+use kube_cel::{compilation::compile_schema, validation::validate_compiled};
 use serde_json::json;
 
 fn main() {

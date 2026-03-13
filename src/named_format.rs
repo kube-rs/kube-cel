@@ -9,11 +9,12 @@
 //!
 //! Mirrors `k8s.io/apiserver/pkg/cel/library/format.go` (Kubernetes 1.32+).
 
-use cel::extractors::This;
-use cel::objects::{Opaque, OptionalValue, Value};
-use cel::{Context, ExecutionError, ResolveResult};
-use std::fmt;
-use std::sync::Arc;
+use cel::{
+    Context, ExecutionError, ResolveResult,
+    extractors::This,
+    objects::{Opaque, OptionalValue, Value},
+};
+use std::{fmt, sync::Arc};
 
 // ---------------------------------------------------------------------------
 // Format kind enum
@@ -82,10 +83,7 @@ pub fn register(ctx: &mut Context<'_>) {
     ctx.add_function("format.dns1035Label", format_dns1035_label);
     ctx.add_function("format.dns1035LabelPrefix", format_dns1035_label_prefix);
     ctx.add_function("format.dns1123LabelPrefix", format_dns1123_label_prefix);
-    ctx.add_function(
-        "format.dns1123SubdomainPrefix",
-        format_dns1123_subdomain_prefix,
-    );
+    ctx.add_function("format.dns1123SubdomainPrefix", format_dns1123_subdomain_prefix);
     ctx.add_function("format.qualifiedName", format_qualified_name);
     ctx.add_function("format.labelValue", format_label_value);
     ctx.add_function("format.uri", format_uri);
@@ -160,10 +158,7 @@ pub(crate) fn format_validate(This(this): This<Value>, s: Arc<String>) -> Resolv
             .downcast_ref::<KubeFormat>()
             .ok_or_else(|| ExecutionError::function_error("validate", "expected Format type"))?,
         _ => {
-            return Err(ExecutionError::function_error(
-                "validate",
-                "expected Format type",
-            ));
+            return Err(ExecutionError::function_error("validate", "expected Format type"));
         }
     };
 
@@ -171,13 +166,10 @@ pub(crate) fn format_validate(This(this): This<Value>, s: Arc<String>) -> Resolv
     if errors.is_empty() {
         Ok(Value::Opaque(Arc::new(OptionalValue::none())))
     } else {
-        let list: Vec<Value> = errors
-            .into_iter()
-            .map(|e| Value::String(Arc::new(e)))
-            .collect();
-        Ok(Value::Opaque(Arc::new(OptionalValue::of(Value::List(
-            Arc::new(list),
-        )))))
+        let list: Vec<Value> = errors.into_iter().map(|e| Value::String(Arc::new(e))).collect();
+        Ok(Value::Opaque(Arc::new(OptionalValue::of(Value::List(Arc::new(
+            list,
+        ))))))
     }
 }
 
@@ -212,10 +204,7 @@ fn validate_dns1123_label(s: &str) -> Vec<String> {
         return errors;
     }
     if s.len() > 63 {
-        errors.push(format!(
-            "must be no more than 63 characters (is {})",
-            s.len()
-        ));
+        errors.push(format!("must be no more than 63 characters (is {})", s.len()));
     }
     if !is_dns1123_label_char_set(s) {
         errors.push("must consist of lower case alphanumeric characters or '-'".to_string());
@@ -240,10 +229,7 @@ fn validate_dns1035_label(s: &str) -> Vec<String> {
         return errors;
     }
     if s.len() > 63 {
-        errors.push(format!(
-            "must be no more than 63 characters (is {})",
-            s.len()
-        ));
+        errors.push(format!("must be no more than 63 characters (is {})", s.len()));
     }
     if !is_dns1035_char_set(s) {
         errors.push("must consist of lower case alphanumeric characters or '-'".to_string());
@@ -271,10 +257,7 @@ fn validate_dns1035_label_prefix(s: &str) -> Vec<String> {
         return errors;
     }
     if s.len() > 63 {
-        errors.push(format!(
-            "must be no more than 63 characters (is {})",
-            s.len()
-        ));
+        errors.push(format!("must be no more than 63 characters (is {})", s.len()));
     }
     if !is_dns1035_char_set(s) {
         errors.push("must consist of lower case alphanumeric characters or '-'".to_string());
@@ -296,10 +279,7 @@ fn validate_dns1123_subdomain(s: &str) -> Vec<String> {
         return errors;
     }
     if s.len() > 253 {
-        errors.push(format!(
-            "must be no more than 253 characters (is {})",
-            s.len()
-        ));
+        errors.push(format!("must be no more than 253 characters (is {})", s.len()));
     }
     for part in s.split('.') {
         let part_errors = validate_dns1123_label(part);
@@ -317,10 +297,7 @@ fn validate_dns1123_label_prefix(s: &str) -> Vec<String> {
         return errors;
     }
     if s.len() > 63 {
-        errors.push(format!(
-            "must be no more than 63 characters (is {})",
-            s.len()
-        ));
+        errors.push(format!("must be no more than 63 characters (is {})", s.len()));
     }
     if !is_dns1123_label_char_set(s) {
         errors.push("must consist of lower case alphanumeric characters or '-'".to_string());
@@ -341,10 +318,7 @@ fn validate_dns1123_subdomain_prefix(s: &str) -> Vec<String> {
         return errors;
     }
     if s.len() > 253 {
-        errors.push(format!(
-            "must be no more than 253 characters (is {})",
-            s.len()
-        ));
+        errors.push(format!("must be no more than 253 characters (is {})", s.len()));
     }
     let parts: Vec<&str> = s.split('.').collect();
     for (i, part) in parts.iter().enumerate() {
@@ -404,10 +378,7 @@ fn validate_qualified_name_local(s: &str) -> Vec<String> {
         return errors;
     }
     if s.len() > 63 {
-        errors.push(format!(
-            "must be no more than 63 characters (is {})",
-            s.len()
-        ));
+        errors.push(format!("must be no more than 63 characters (is {})", s.len()));
     }
     if !is_qualified_name_char_set(s) {
         errors.push("must consist of alphanumeric characters, '-', '_', or '.'".to_string());
@@ -435,10 +406,7 @@ fn validate_label_value(s: &str) -> Vec<String> {
         return errors;
     }
     if s.len() > 63 {
-        errors.push(format!(
-            "must be no more than 63 characters (is {})",
-            s.len()
-        ));
+        errors.push(format!("must be no more than 63 characters (is {})", s.len()));
     }
     if !is_label_value_char_set(s) {
         errors.push("must consist of alphanumeric characters, '-', '_', or '.'".to_string());
@@ -493,10 +461,8 @@ fn validate_uuid(s: &str) -> Vec<String> {
     // 8-4-4-4-12 hex pattern
     let parts: Vec<&str> = s.split('-').collect();
     if parts.len() != 5 {
-        errors.push(
-            "must be in the form 8-4-4-4-12 (e.g., xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)"
-                .to_string(),
-        );
+        errors
+            .push("must be in the form 8-4-4-4-12 (e.g., xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)".to_string());
         return errors;
     }
     let expected_lens = [8, 4, 4, 4, 12];
@@ -508,10 +474,8 @@ fn validate_uuid(s: &str) -> Vec<String> {
         }
     }
     if !valid {
-        errors.push(
-            "must be in the form 8-4-4-4-12 (e.g., xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)"
-                .to_string(),
-        );
+        errors
+            .push("must be in the form 8-4-4-4-12 (e.g., xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)".to_string());
     }
     errors
 }

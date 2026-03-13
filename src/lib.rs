@@ -42,56 +42,39 @@
 //! For repeated validation against the same schema, pre-compile with
 //! [`compilation::compile_schema`] and use [`validation::Validator::validate_compiled`].
 
-#[cfg(feature = "strings")]
-pub mod strings;
+#[cfg(feature = "strings")] pub mod strings;
 
-#[cfg(feature = "lists")]
-pub mod lists;
+#[cfg(feature = "lists")] pub mod lists;
 
-#[cfg(feature = "sets")]
-pub mod sets;
+#[cfg(feature = "sets")] pub mod sets;
 
-#[cfg(feature = "regex_funcs")]
-pub mod regex_funcs;
+#[cfg(feature = "regex_funcs")] pub mod regex_funcs;
 
-#[cfg(feature = "urls")]
-pub mod urls;
+#[cfg(feature = "urls")] pub mod urls;
 
-#[cfg(feature = "ip")]
-pub mod ip;
+#[cfg(feature = "ip")] pub mod ip;
 
-#[cfg(feature = "semver_funcs")]
-pub mod semver_funcs;
+#[cfg(feature = "semver_funcs")] pub mod semver_funcs;
 
-#[cfg(feature = "format")]
-pub mod format;
+#[cfg(feature = "format")] pub mod format;
 
-#[cfg(feature = "quantity")]
-pub mod quantity;
+#[cfg(feature = "quantity")] pub mod quantity;
 
-#[cfg(feature = "jsonpatch")]
-pub mod jsonpatch;
+#[cfg(feature = "jsonpatch")] pub mod jsonpatch;
 
-#[cfg(feature = "named_format")]
-pub mod named_format;
+#[cfg(feature = "named_format")] pub mod named_format;
 
-#[cfg(feature = "math")]
-pub mod math;
+#[cfg(feature = "math")] pub mod math;
 
-#[cfg(feature = "encoders")]
-pub mod encoders;
+#[cfg(feature = "encoders")] pub mod encoders;
 
-#[cfg(feature = "validation")]
-pub mod escaping;
+#[cfg(feature = "validation")] pub mod escaping;
 
-#[cfg(feature = "validation")]
-pub mod values;
+#[cfg(feature = "validation")] pub mod values;
 
-#[cfg(feature = "validation")]
-pub mod compilation;
+#[cfg(feature = "validation")] pub mod compilation;
 
-#[cfg(feature = "validation")]
-pub mod validation;
+#[cfg(feature = "validation")] pub mod validation;
 
 mod dispatch;
 mod value_ops;
@@ -147,8 +130,7 @@ pub fn register_all(ctx: &mut cel::Context<'_>) {
 mod tests {
     use super::*;
 
-    #[allow(unused_imports)]
-    use std::sync::Arc;
+    #[allow(unused_imports)] use std::sync::Arc;
 
     use cel::{Context, Program, Value};
 
@@ -162,10 +144,7 @@ mod tests {
     #[test]
     #[cfg(feature = "strings")]
     fn test_integration_strings() {
-        assert_eq!(
-            eval("'hello'.charAt(1)"),
-            Value::String(Arc::new("e".into()))
-        );
+        assert_eq!(eval("'hello'.charAt(1)"), Value::String(Arc::new("e".into())));
         assert_eq!(
             eval("'HELLO'.lowerAscii()"),
             Value::String(Arc::new("hello".into()))

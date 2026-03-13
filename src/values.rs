@@ -9,14 +9,14 @@
 //! `format: "duration"`, use [`json_to_cel_with_schema`] or
 //! [`json_to_cel_with_compiled`].
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
-use cel::Value;
-use cel::objects::{Key, Map};
+use cel::{
+    Value,
+    objects::{Key, Map},
+};
 
-use crate::compilation::CompiledSchema;
-use crate::escaping::escape_field_name;
+use crate::{compilation::CompiledSchema, escaping::escape_field_name};
 
 /// The `format` hint from an OpenAPI schema property.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -298,10 +298,7 @@ mod tests {
 
     #[test]
     fn test_empty_string() {
-        assert_eq!(
-            json_to_cel(&json!("")),
-            Value::String(Arc::new(String::new()))
-        );
+        assert_eq!(json_to_cel(&json!("")), Value::String(Arc::new(String::new())));
     }
 
     #[test]
@@ -357,10 +354,7 @@ mod tests {
             }
         }));
         if let Value::Map(outer) = v {
-            let spec = outer
-                .map
-                .get(&Key::String(Arc::new("spec".into())))
-                .unwrap();
+            let spec = outer.map.get(&Key::String(Arc::new("spec".into()))).unwrap();
             if let Value::Map(inner) = spec {
                 assert_eq!(
                     inner.map.get(&Key::String(Arc::new("replicas".into()))),
@@ -405,18 +399,12 @@ mod tests {
 
     #[test]
     fn parse_duration_minutes() {
-        assert_eq!(
-            parse_go_duration("30m"),
-            Some(chrono::Duration::minutes(30))
-        );
+        assert_eq!(parse_go_duration("30m"), Some(chrono::Duration::minutes(30)));
     }
 
     #[test]
     fn parse_duration_seconds() {
-        assert_eq!(
-            parse_go_duration("45s"),
-            Some(chrono::Duration::seconds(45))
-        );
+        assert_eq!(parse_go_duration("45s"), Some(chrono::Duration::seconds(45)));
     }
 
     #[test]
@@ -451,21 +439,14 @@ mod tests {
         );
         assert_eq!(
             parse_go_duration("1h30m10s"),
-            Some(
-                chrono::Duration::hours(1)
-                    + chrono::Duration::minutes(30)
-                    + chrono::Duration::seconds(10)
-            )
+            Some(chrono::Duration::hours(1) + chrono::Duration::minutes(30) + chrono::Duration::seconds(10))
         );
     }
 
     #[test]
     fn parse_duration_negative() {
         assert_eq!(parse_go_duration("-1h"), Some(chrono::Duration::hours(-1)));
-        assert_eq!(
-            parse_go_duration("-30s"),
-            Some(chrono::Duration::seconds(-30))
-        );
+        assert_eq!(parse_go_duration("-30s"), Some(chrono::Duration::seconds(-30)));
     }
 
     #[test]
@@ -595,10 +576,7 @@ mod tests {
         });
         let value = json!("2024-01-01T00:00:00Z");
         let result = json_to_cel_with_schema(&value, &schema);
-        assert_eq!(
-            result,
-            Value::String(Arc::new("2024-01-01T00:00:00Z".into()))
-        );
+        assert_eq!(result, Value::String(Arc::new("2024-01-01T00:00:00Z".into())));
     }
 
     #[test]
@@ -606,9 +584,6 @@ mod tests {
         // Original json_to_cel should still work as before
         let value = json!("2024-01-01T00:00:00Z");
         let result = json_to_cel(&value);
-        assert_eq!(
-            result,
-            Value::String(Arc::new("2024-01-01T00:00:00Z".into()))
-        );
+        assert_eq!(result, Value::String(Arc::new("2024-01-01T00:00:00Z".into())));
     }
 }

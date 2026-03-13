@@ -51,17 +51,10 @@ fn plan_usage_example() {
 
     // spec-level: minReplicas <= replicas fails (0 <= -1 is false)
     let spec_err = errors.iter().find(|e| e.field_path == "spec").unwrap();
-    assert!(
-        spec_err
-            .message
-            .contains("self.minReplicas <= self.replicas")
-    );
+    assert!(spec_err.message.contains("self.minReplicas <= self.replicas"));
 
     // replicas-level: self >= 0 fails
-    let rep_err = errors
-        .iter()
-        .find(|e| e.field_path == "spec.replicas")
-        .unwrap();
+    let rep_err = errors.iter().find(|e| e.field_path == "spec.replicas").unwrap();
     assert_eq!(rep_err.message, "replicas must be non-negative");
 }
 
@@ -482,11 +475,7 @@ fn mixed_transition_and_non_transition_rules() {
     assert_eq!(errors[0].message, "non-negative");
 
     // Update: both rules evaluated
-    let errors = validate(
-        &schema,
-        &json!({"replicas": -1}),
-        Some(&json!({"replicas": 3})),
-    );
+    let errors = validate(&schema, &json!({"replicas": -1}), Some(&json!({"replicas": 3})));
     assert_eq!(errors.len(), 2);
 }
 
@@ -594,16 +583,8 @@ fn realistic_istio_like_crd() {
     // spec: hosts empty, route[0]: weight 150, route[1]: weight -10
     assert_eq!(errors.len(), 3);
     assert!(errors.iter().any(|e| e.field_path == "spec"));
-    assert!(
-        errors
-            .iter()
-            .any(|e| e.field_path == "spec.http[0].route[0]")
-    );
-    assert!(
-        errors
-            .iter()
-            .any(|e| e.field_path == "spec.http[0].route[1]")
-    );
+    assert!(errors.iter().any(|e| e.field_path == "spec.http[0].route[0]"));
+    assert!(errors.iter().any(|e| e.field_path == "spec.http[0].route[1]"));
 }
 
 #[test]
@@ -746,8 +727,7 @@ fn optional_old_self_create_end_to_end() {
 
 #[test]
 fn compiled_schema_end_to_end() {
-    use kube_cel::compilation::compile_schema;
-    use kube_cel::validation::validate_compiled;
+    use kube_cel::{compilation::compile_schema, validation::validate_compiled};
 
     let schema = json!({
         "type": "object",
@@ -784,8 +764,7 @@ fn compiled_schema_end_to_end() {
 
 #[test]
 fn compiled_schema_with_message_expression() {
-    use kube_cel::compilation::compile_schema;
-    use kube_cel::validation::validate_compiled;
+    use kube_cel::{compilation::compile_schema, validation::validate_compiled};
 
     let schema = json!({
         "type": "object",
@@ -806,8 +785,7 @@ fn compiled_schema_with_message_expression() {
 
 #[test]
 fn compiled_schema_with_transition_rule() {
-    use kube_cel::compilation::compile_schema;
-    use kube_cel::validation::validate_compiled;
+    use kube_cel::{compilation::compile_schema, validation::validate_compiled};
 
     let schema = json!({
         "type": "object",
@@ -832,8 +810,7 @@ fn compiled_schema_with_transition_rule() {
 
 #[test]
 fn compiled_schema_matches_schema_validation() {
-    use kube_cel::compilation::compile_schema;
-    use kube_cel::validation::validate_compiled;
+    use kube_cel::{compilation::compile_schema, validation::validate_compiled};
 
     // Complex schema with nested properties, arrays, and multiple rules
     let schema = json!({
@@ -931,10 +908,7 @@ fn kube_core_rule_json_compatibility() {
 
     // First rule: all fields populated
     let r0 = results[0].as_ref().unwrap();
-    assert_eq!(
-        r0.rule.message.as_deref(),
-        Some("host must match spec.host")
-    );
+    assert_eq!(r0.rule.message.as_deref(), Some("host must match spec.host"));
     assert_eq!(r0.rule.field_path.as_deref(), Some("spec.host"));
     assert_eq!(r0.rule.reason.as_deref(), Some("FieldValueInvalid"));
     assert!(!r0.is_transition_rule);
@@ -1129,8 +1103,7 @@ fn timestamp_transition_rule() {
 
 #[test]
 fn compiled_schema_timestamp_comparison() {
-    use kube_cel::compilation::compile_schema;
-    use kube_cel::validation::validate_compiled;
+    use kube_cel::{compilation::compile_schema, validation::validate_compiled};
 
     let schema = json!({
         "type": "object",
@@ -1161,8 +1134,7 @@ fn compiled_schema_timestamp_comparison() {
 
 #[test]
 fn compiled_schema_duration_comparison() {
-    use kube_cel::compilation::compile_schema;
-    use kube_cel::validation::validate_compiled;
+    use kube_cel::{compilation::compile_schema, validation::validate_compiled};
 
     let schema = json!({
         "type": "object",
@@ -1335,8 +1307,7 @@ fn underscore_in_field_name() {
 
 #[test]
 fn escaped_field_with_compiled_schema() {
-    use kube_cel::compilation::compile_schema;
-    use kube_cel::validation::validate_compiled;
+    use kube_cel::{compilation::compile_schema, validation::validate_compiled};
 
     let schema = json!({
         "type": "object",

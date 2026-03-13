@@ -3,13 +3,13 @@
 //! Provides IP address and CIDR functions,
 //! matching `k8s.io/apiserver/pkg/cel/library/ip.go` and `cidr.go`.
 
-use cel::extractors::This;
-use cel::objects::{Opaque, Value};
-use cel::{Context, ResolveResult};
+use cel::{
+    Context, ResolveResult,
+    extractors::This,
+    objects::{Opaque, Value},
+};
 use ipnet::IpNet;
-use std::net::IpAddr;
-use std::str::FromStr;
-use std::sync::Arc;
+use std::{net::IpAddr, str::FromStr, sync::Arc};
 
 // --- Custom CEL types ---
 
@@ -111,10 +111,7 @@ fn extract_ip(val: &Value) -> Result<&KubeIP, cel::ExecutionError> {
         Value::Opaque(o) => o
             .downcast_ref::<KubeIP>()
             .ok_or_else(|| cel::ExecutionError::function_error("ip", "expected IP type")),
-        _ => Err(cel::ExecutionError::function_error(
-            "ip",
-            "expected IP type",
-        )),
+        _ => Err(cel::ExecutionError::function_error("ip", "expected IP type")),
     }
 }
 
@@ -123,10 +120,7 @@ fn extract_cidr(val: &Value) -> Result<&KubeCIDR, cel::ExecutionError> {
         Value::Opaque(o) => o
             .downcast_ref::<KubeCIDR>()
             .ok_or_else(|| cel::ExecutionError::function_error("cidr", "expected CIDR type")),
-        _ => Err(cel::ExecutionError::function_error(
-            "cidr",
-            "expected CIDR type",
-        )),
+        _ => Err(cel::ExecutionError::function_error("cidr", "expected CIDR type")),
     }
 }
 
@@ -140,8 +134,7 @@ fn is_ip(s: Arc<String>) -> ResolveResult {
 /// Returns true if the string is the canonical form of an IP address.
 /// Errors on invalid IP strings (matches K8s behavior).
 fn ip_is_canonical(s: Arc<String>) -> ResolveResult {
-    let addr =
-        parse_ip_addr(&s).map_err(|e| cel::ExecutionError::function_error("ip.isCanonical", e))?;
+    let addr = parse_ip_addr(&s).map_err(|e| cel::ExecutionError::function_error("ip.isCanonical", e))?;
     Ok(Value::Bool(addr.to_string() == s.as_str()))
 }
 
@@ -219,9 +212,9 @@ fn cidr_contains_ip(This(this): This<Value>, arg: Value) -> ResolveResult {
             parse_ip_addr(s).map_err(|e| cel::ExecutionError::function_error("containsIP", e))?
         }
         Value::Opaque(o) => {
-            let kip = o.downcast_ref::<KubeIP>().ok_or_else(|| {
-                cel::ExecutionError::function_error("containsIP", "expected IP or string")
-            })?;
+            let kip = o
+                .downcast_ref::<KubeIP>()
+                .ok_or_else(|| cel::ExecutionError::function_error("containsIP", "expected IP or string"))?;
             kip.0
         }
         _ => {
@@ -303,16 +296,12 @@ pub(crate) fn cidr_string(This(this): This<Value>) -> ResolveResult {
 
 /// `isIPv4(<string>) -> bool`
 fn is_ipv4(s: Arc<String>) -> ResolveResult {
-    Ok(Value::Bool(
-        parse_ip_addr(&s).is_ok_and(|addr| addr.is_ipv4()),
-    ))
+    Ok(Value::Bool(parse_ip_addr(&s).is_ok_and(|addr| addr.is_ipv4())))
 }
 
 /// `isIPv6(<string>) -> bool`
 fn is_ipv6(s: Arc<String>) -> ResolveResult {
-    Ok(Value::Bool(
-        parse_ip_addr(&s).is_ok_and(|addr| addr.is_ipv6()),
-    ))
+    Ok(Value::Bool(parse_ip_addr(&s).is_ok_and(|addr| addr.is_ipv6())))
 }
 
 /// `isCIDRv4(<string>) -> bool`
@@ -376,10 +365,7 @@ mod tests {
     #[test]
     fn test_ip_global_unicast() {
         assert_eq!(eval("ip('8.8.8.8').isGlobalUnicast()"), Value::Bool(true));
-        assert_eq!(
-            eval("ip('127.0.0.1').isGlobalUnicast()"),
-            Value::Bool(false)
-        );
+        assert_eq!(eval("ip('127.0.0.1').isGlobalUnicast()"), Value::Bool(false));
     }
 
     #[test]
@@ -414,10 +400,7 @@ mod tests {
 
     #[test]
     fn test_cidr_prefix_length() {
-        assert_eq!(
-            eval("cidr('192.168.0.0/24').prefixLength()"),
-            Value::Int(24)
-        );
+        assert_eq!(eval("cidr('192.168.0.0/24').prefixLength()"), Value::Int(24));
     }
 
     // --- Error & edge case tests ---
@@ -443,61 +426,31 @@ mod tests {
     #[test]
     fn test_ip_is_link_local_multicast() {
         // IPv4 link-local multicast: 224.0.0.x
-        assert_eq!(
-            eval("ip('224.0.0.1').isLinkLocalMulticast()"),
-            Value::Bool(true)
-        );
+        assert_eq!(eval("ip('224.0.0.1').isLinkLocalMulticast()"), Value::Bool(true));
         // Global multicast, not link-local
-        assert_eq!(
-            eval("ip('224.0.1.1').isLinkLocalMulticast()"),
-            Value::Bool(false)
-        );
+        assert_eq!(eval("ip('224.0.1.1').isLinkLocalMulticast()"), Value::Bool(false));
         // IPv6 link-local multicast: ff02::x
-        assert_eq!(
-            eval("ip('ff02::1').isLinkLocalMulticast()"),
-            Value::Bool(true)
-        );
+        assert_eq!(eval("ip('ff02::1').isLinkLocalMulticast()"), Value::Bool(true));
         // Not link-local multicast
-        assert_eq!(
-            eval("ip('ff05::1').isLinkLocalMulticast()"),
-            Value::Bool(false)
-        );
+        assert_eq!(eval("ip('ff05::1').isLinkLocalMulticast()"), Value::Bool(false));
     }
 
     #[test]
     fn test_ip_is_link_local_unicast() {
         // IPv4 link-local: 169.254.x.x
-        assert_eq!(
-            eval("ip('169.254.1.1').isLinkLocalUnicast()"),
-            Value::Bool(true)
-        );
-        assert_eq!(
-            eval("ip('169.253.1.1').isLinkLocalUnicast()"),
-            Value::Bool(false)
-        );
+        assert_eq!(eval("ip('169.254.1.1').isLinkLocalUnicast()"), Value::Bool(true));
+        assert_eq!(eval("ip('169.253.1.1').isLinkLocalUnicast()"), Value::Bool(false));
         // IPv6 link-local: fe80::x
-        assert_eq!(
-            eval("ip('fe80::1').isLinkLocalUnicast()"),
-            Value::Bool(true)
-        );
-        assert_eq!(
-            eval("ip('fec0::1').isLinkLocalUnicast()"),
-            Value::Bool(false)
-        );
+        assert_eq!(eval("ip('fe80::1').isLinkLocalUnicast()"), Value::Bool(true));
+        assert_eq!(eval("ip('fec0::1').isLinkLocalUnicast()"), Value::Bool(false));
     }
 
     #[test]
     fn test_ip_global_unicast_edge_cases() {
         // Link-local unicast should not be global
-        assert_eq!(
-            eval("ip('169.254.1.1').isGlobalUnicast()"),
-            Value::Bool(false)
-        );
+        assert_eq!(eval("ip('169.254.1.1').isGlobalUnicast()"), Value::Bool(false));
         // Multicast should not be global
-        assert_eq!(
-            eval("ip('224.0.0.1').isGlobalUnicast()"),
-            Value::Bool(false)
-        );
+        assert_eq!(eval("ip('224.0.0.1').isGlobalUnicast()"), Value::Bool(false));
         // IPv6 link-local should not be global
         assert_eq!(eval("ip('fe80::1').isGlobalUnicast()"), Value::Bool(false));
     }
@@ -532,10 +485,7 @@ mod tests {
     fn test_cidr_ipv6() {
         assert_eq!(eval("isCIDR('fd00::/8')"), Value::Bool(true));
         assert_eq!(eval("cidr('fd00::/8').prefixLength()"), Value::Int(8));
-        assert_eq!(
-            eval("cidr('fd00::/8').containsIP('fd00::1')"),
-            Value::Bool(true)
-        );
+        assert_eq!(eval("cidr('fd00::/8').containsIP('fd00::1')"), Value::Bool(true));
     }
 
     #[test]
@@ -546,10 +496,7 @@ mod tests {
     #[test]
     fn test_ip_is_canonical_ipv6() {
         // Non-canonical IPv6
-        assert_eq!(
-            eval("ip.isCanonical('0:0:0:0:0:0:0:1')"),
-            Value::Bool(false)
-        );
+        assert_eq!(eval("ip.isCanonical('0:0:0:0:0:0:0:1')"), Value::Bool(false));
         // Canonical form
         assert_eq!(eval("ip.isCanonical('::1')"), Value::Bool(true));
     }
@@ -718,10 +665,7 @@ mod tests {
 
     #[test]
     fn test_ip_fd00_not_link_local_multicast() {
-        assert_eq!(
-            eval("ip('fd00::1').isLinkLocalMulticast()"),
-            Value::Bool(false)
-        );
+        assert_eq!(eval("ip('fd00::1').isLinkLocalMulticast()"), Value::Bool(false));
     }
 
     #[test]

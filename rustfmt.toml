@@ -1,0 +1,11 @@
+# https://github.com/kube-rs/kube/issues/707
+style_edition = "2024"
+unstable_features = true
+overflow_delimited_expr = true
+newline_style = "Unix"
+imports_granularity = "Crate"
+reorder_impl_items = true
+blank_lines_upper_bound = 2
+comment_width = 110
+max_width = 110
+inline_attribute_width = 80

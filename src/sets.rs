@@ -3,8 +3,7 @@
 //! Provides set operations on lists, matching `cel-go/ext/sets.go`.
 //! These are namespaced functions called as `sets.contains(a, b)`.
 
-use cel::objects::Value;
-use cel::{Context, ResolveResult};
+use cel::{Context, ResolveResult, objects::Value};
 use std::sync::Arc;
 
 use crate::value_ops::val_eq;
@@ -79,14 +78,8 @@ mod tests {
 
     #[test]
     fn test_equivalent() {
-        assert_eq!(
-            eval("sets.equivalent([1, 2, 3], [3, 2, 1])"),
-            Value::Bool(true)
-        );
-        assert_eq!(
-            eval("sets.equivalent([1, 2, 2], [1, 2])"),
-            Value::Bool(true)
-        );
+        assert_eq!(eval("sets.equivalent([1, 2, 3], [3, 2, 1])"), Value::Bool(true));
+        assert_eq!(eval("sets.equivalent([1, 2, 2], [1, 2])"), Value::Bool(true));
         assert_eq!(eval("sets.equivalent([1, 2], [1, 3])"), Value::Bool(false));
     }
 
@@ -120,10 +113,7 @@ mod tests {
 
     #[test]
     fn test_intersects_strings() {
-        assert_eq!(
-            eval("sets.intersects(['a', 'b'], ['b', 'c'])"),
-            Value::Bool(true)
-        );
+        assert_eq!(eval("sets.intersects(['a', 'b'], ['b', 'c'])"), Value::Bool(true));
     }
 
     // --- cel-go parity tests ---
@@ -151,17 +141,11 @@ mod tests {
 
     #[test]
     fn test_contains_with_duplicates() {
-        assert_eq!(
-            eval("sets.contains([1, 1, 2, 2, 3], [1, 2])"),
-            Value::Bool(true)
-        );
+        assert_eq!(eval("sets.contains([1, 1, 2, 2, 3], [1, 2])"), Value::Bool(true));
     }
 
     #[test]
     fn test_equivalent_with_duplicates() {
-        assert_eq!(
-            eval("sets.equivalent([1, 1, 2], [2, 2, 1])"),
-            Value::Bool(true)
-        );
+        assert_eq!(eval("sets.equivalent([1, 1, 2], [2, 2, 1])"), Value::Bool(true));
     }
 }

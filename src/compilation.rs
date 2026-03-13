@@ -123,8 +123,7 @@ pub(crate) fn compile_schema_validations(
     rules
         .iter()
         .map(|raw| {
-            let rule: Rule =
-                serde_json::from_value(raw.clone()).map_err(CompilationError::InvalidRule)?;
+            let rule: Rule = serde_json::from_value(raw.clone()).map_err(CompilationError::InvalidRule)?;
             compile_rule(&rule)
         })
         .collect()
@@ -155,10 +154,7 @@ impl CompiledSchema {
     /// Returns references to all compilation errors in this node's validations.
     #[must_use]
     pub fn compilation_errors(&self) -> Vec<&CompilationError> {
-        self.validations
-            .iter()
-            .filter_map(|r| r.as_ref().err())
-            .collect()
+        self.validations.iter().filter_map(|r| r.as_ref().err()).collect()
     }
 
     /// Returns `true` if any validation rule at this node failed to compile.

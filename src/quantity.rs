@@ -3,12 +3,12 @@
 //! Provides parsing, comparison, and arithmetic for Kubernetes resource quantities
 //! (e.g., "1.5Gi", "500m", "100n"), matching `k8s.io/apiserver/pkg/cel/library/quantity.go`.
 
-use cel::extractors::{Arguments, This};
-use cel::objects::{Opaque, Value};
-use cel::{Context, ExecutionError, ResolveResult};
-use std::cmp::Ordering;
-use std::fmt;
-use std::sync::Arc;
+use cel::{
+    Context, ExecutionError, ResolveResult,
+    extractors::{Arguments, This},
+    objects::{Opaque, Value},
+};
+use std::{cmp::Ordering, fmt, sync::Arc};
 
 // ---------------------------------------------------------------------------
 // Internal representation
@@ -121,9 +121,8 @@ impl KubeQuantity {
             let val = self.mantissa.checked_mul(multiplier).ok_or_else(|| {
                 ExecutionError::function_error("asInteger", "quantity too large for integer")
             })?;
-            i64::try_from(val).map_err(|_| {
-                ExecutionError::function_error("asInteger", "quantity too large for integer")
-            })
+            i64::try_from(val)
+                .map_err(|_| ExecutionError::function_error("asInteger", "quantity too large for integer"))
         } else {
             let divisor = 10i128.checked_pow((-self.scale) as u32).ok_or_else(|| {
                 ExecutionError::function_error("asInteger", "quantity too large for integer")
@@ -135,9 +134,8 @@ impl KubeQuantity {
                 ));
             }
             let val = self.mantissa / divisor;
-            i64::try_from(val).map_err(|_| {
-                ExecutionError::function_error("asInteger", "quantity too large for integer")
-            })
+            i64::try_from(val)
+                .map_err(|_| ExecutionError::function_error("asInteger", "quantity too large for integer"))
         }
     }
 
@@ -265,9 +263,7 @@ fn parse_decimal(s: &str) -> Result<(i128, i32), String> {
         let decimal_places = frac_part.len() as i32;
 
         let combined = format!("{int_part}{frac_part}");
-        let mantissa: i128 = combined
-            .parse()
-            .map_err(|_| format!("invalid number: '{s}'"))?;
+        let mantissa: i128 = combined.parse().map_err(|_| format!("invalid number: '{s}'"))?;
         Ok((mantissa, -decimal_places))
     } else {
         let mantissa: i128 = s.parse().map_err(|_| format!("invalid number: '{s}'"))?;
@@ -453,43 +449,28 @@ mod tests {
 
     #[test]
     fn test_parse_decimal() {
-        assert_eq!(
-            eval("quantity('1.5').asApproximateFloat()"),
-            Value::Float(1.5)
-        );
+        assert_eq!(eval("quantity('1.5').asApproximateFloat()"), Value::Float(1.5));
     }
 
     #[test]
     fn test_parse_decimal_si() {
         assert_eq!(eval("quantity('1k').asInteger()"), Value::Int(1000));
         assert_eq!(eval("quantity('1M').asInteger()"), Value::Int(1_000_000));
-        assert_eq!(
-            eval("quantity('500m').asApproximateFloat()"),
-            Value::Float(0.5)
-        );
-        assert_eq!(
-            eval("quantity('100n').asApproximateFloat()"),
-            Value::Float(1e-7)
-        );
+        assert_eq!(eval("quantity('500m').asApproximateFloat()"), Value::Float(0.5));
+        assert_eq!(eval("quantity('100n').asApproximateFloat()"), Value::Float(1e-7));
     }
 
     #[test]
     fn test_parse_binary_si() {
         assert_eq!(eval("quantity('1Ki').asInteger()"), Value::Int(1024));
         assert_eq!(eval("quantity('1Mi').asInteger()"), Value::Int(1_048_576));
-        assert_eq!(
-            eval("quantity('1Gi').asInteger()"),
-            Value::Int(1_073_741_824)
-        );
+        assert_eq!(eval("quantity('1Gi').asInteger()"), Value::Int(1_073_741_824));
     }
 
     #[test]
     fn test_parse_binary_si_decimal() {
         // 1.5Gi = 1.5 * 2^30 = 1610612736
-        assert_eq!(
-            eval("quantity('1.5Gi').asInteger()"),
-            Value::Int(1_610_612_736)
-        );
+        assert_eq!(eval("quantity('1.5Gi').asInteger()"), Value::Int(1_610_612_736));
     }
 
     #[test]
@@ -501,10 +482,7 @@ mod tests {
     #[test]
     fn test_parse_negative() {
         assert_eq!(eval("quantity('-1').asInteger()"), Value::Int(-1));
-        assert_eq!(
-            eval("quantity('-500m').asApproximateFloat()"),
-            Value::Float(-0.5)
-        );
+        assert_eq!(eval("quantity('-500m').asApproximateFloat()"), Value::Float(-0.5));
     }
 
     #[test]
@@ -554,18 +532,9 @@ mod tests {
 
     #[test]
     fn test_compare_to() {
-        assert_eq!(
-            eval("quantity('1k').compareTo(quantity('1000'))"),
-            Value::Int(0)
-        );
-        assert_eq!(
-            eval("quantity('1k').compareTo(quantity('2k'))"),
-            Value::Int(-1)
-        );
-        assert_eq!(
-            eval("quantity('2k').compareTo(quantity('1k'))"),
-            Value::Int(1)
-        );
+        assert_eq!(eval("quantity('1k').compareTo(quantity('1000'))"), Value::Int(0));
+        assert_eq!(eval("quantity('1k').compareTo(quantity('2k'))"), Value::Int(-1));
+        assert_eq!(eval("quantity('2k').compareTo(quantity('1k'))"), Value::Int(1));
     }
 
     #[test]
@@ -590,10 +559,7 @@ mod tests {
 
     #[test]
     fn test_add_int() {
-        assert_eq!(
-            eval("quantity('1k').add(500).asInteger()"),
-            Value::Int(1500)
-        );
+        assert_eq!(eval("quantity('1k').add(500).asInteger()"), Value::Int(1500));
     }
 
     #[test]
@@ -611,10 +577,7 @@ mod tests {
 
     #[test]
     fn test_add_results_in_zero() {
-        assert_eq!(
-            eval("quantity('1k').sub(quantity('1k')).sign()"),
-            Value::Int(0)
-        );
+        assert_eq!(eval("quantity('1k').sub(quantity('1k')).sign()"), Value::Int(0));
     }
 
     // -- Display --
@@ -673,14 +636,8 @@ mod tests {
     #[test]
     fn test_parse_remaining_si_suffixes() {
         // Decimal SI: u, T, P, E
-        assert_eq!(
-            eval("quantity('1u').asApproximateFloat()"),
-            Value::Float(1e-6)
-        );
-        assert_eq!(
-            eval("quantity('1T').asInteger()"),
-            Value::Int(1_000_000_000_000)
-        );
+        assert_eq!(eval("quantity('1u').asApproximateFloat()"), Value::Float(1e-6));
+        assert_eq!(eval("quantity('1T').asInteger()"), Value::Int(1_000_000_000_000));
         assert_eq!(
             eval("quantity('1P').asInteger()"),
             Value::Int(1_000_000_000_000_000)
@@ -738,10 +695,7 @@ mod tests {
             Value::Int(0)
         );
         // 2000k == 2M
-        assert_eq!(
-            eval("quantity('2000k').compareTo(quantity('2M'))"),
-            Value::Int(0)
-        );
+        assert_eq!(eval("quantity('2000k').compareTo(quantity('2M'))"), Value::Int(0));
     }
 
     #[test]
@@ -772,9 +726,6 @@ mod tests {
 
     #[test]
     fn test_quantity_zero_equality() {
-        assert_eq!(
-            eval("quantity('0').compareTo(quantity('0M'))"),
-            Value::Int(0)
-        );
+        assert_eq!(eval("quantity('0').compareTo(quantity('0M'))"), Value::Int(0));
     }
 }

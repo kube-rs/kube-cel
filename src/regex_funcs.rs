@@ -3,9 +3,11 @@
 //! Provides `find` and `findAll` regex functions,
 //! matching `k8s.io/apiserver/pkg/cel/library/regex.go`.
 
-use cel::extractors::{Arguments, This};
-use cel::objects::Value;
-use cel::{Context, ExecutionError, ResolveResult};
+use cel::{
+    Context, ExecutionError, ResolveResult,
+    extractors::{Arguments, This},
+    objects::Value,
+};
 use regex::Regex;
 use std::sync::Arc;
 
@@ -19,10 +21,7 @@ pub fn register(ctx: &mut Context<'_>) {
 fn find(This(this): This<Arc<String>>, pattern: Arc<String>) -> ResolveResult {
     let re = Regex::new(&pattern)
         .map_err(|e| ExecutionError::function_error("find", format!("invalid regex: {e}")))?;
-    let result = re
-        .find(&this)
-        .map(|m| m.as_str().to_string())
-        .unwrap_or_default();
+    let result = re.find(&this).map(|m| m.as_str().to_string()).unwrap_or_default();
     Ok(Value::String(Arc::new(result)))
 }
 
@@ -127,10 +126,7 @@ mod tests {
 
     #[test]
     fn test_find_all_no_matches() {
-        assert_eq!(
-            eval("'12345'.findAll('[a-z]+')"),
-            Value::List(Arc::new(vec![]))
-        );
+        assert_eq!(eval("'12345'.findAll('[a-z]+')"), Value::List(Arc::new(vec![])));
     }
 
     #[test]
@@ -153,10 +149,7 @@ mod tests {
 
     #[test]
     fn test_find_empty_string() {
-        assert_eq!(
-            eval("''.find('[a-z]+')"),
-            Value::String(Arc::new(String::new()))
-        );
+        assert_eq!(eval("''.find('[a-z]+')"), Value::String(Arc::new(String::new())));
     }
 
     #[test]

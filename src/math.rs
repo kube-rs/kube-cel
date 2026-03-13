@@ -3,9 +3,7 @@
 //! Provides math functions matching `cel-go/ext/math.go` and
 //! `k8s.io/apiserver/pkg/cel/library/cost.go` math extensions.
 
-use cel::extractors::Arguments;
-use cel::objects::Value;
-use cel::{Context, ExecutionError, ResolveResult};
+use cel::{Context, ExecutionError, ResolveResult, extractors::Arguments, objects::Value};
 
 /// Register all math extension functions.
 pub fn register(ctx: &mut Context<'_>) {
@@ -74,9 +72,11 @@ fn math_abs(Arguments(args): Arguments) -> ResolveResult {
         .first()
         .ok_or_else(|| ExecutionError::function_error("math.abs", "missing argument"))?;
     match arg {
-        Value::Int(n) => Ok(Value::Int(n.checked_abs().ok_or_else(|| {
-            ExecutionError::function_error("math.abs", "integer overflow")
-        })?)),
+        Value::Int(n) => {
+            Ok(Value::Int(n.checked_abs().ok_or_else(|| {
+                ExecutionError::function_error("math.abs", "integer overflow")
+            })?))
+        }
         Value::UInt(n) => Ok(Value::UInt(*n)),
         Value::Float(f) => Ok(Value::Float(f.abs())),
         _ => Err(ExecutionError::function_error(
@@ -195,9 +195,8 @@ fn numeric_cmp(a: &Value, b: &Value) -> Result<std::cmp::Ordering, ExecutionErro
     // Promote to f64 for cross-type comparison
     let fa = to_f64(a)?;
     let fb = to_f64(b)?;
-    fa.partial_cmp(&fb).ok_or_else(|| {
-        ExecutionError::function_error("math.greatest/least", "cannot compare NaN values")
-    })
+    fa.partial_cmp(&fb)
+        .ok_or_else(|| ExecutionError::function_error("math.greatest/least", "cannot compare NaN values"))
 }
 
 fn to_f64(v: &Value) -> Result<f64, ExecutionError> {
@@ -402,10 +401,7 @@ mod tests {
     fn test_sqrt() {
         assert_eq!(eval("math.sqrt(4.0)"), Value::Float(2.0));
         assert_eq!(eval("math.sqrt(0.0)"), Value::Float(0.0));
-        assert_eq!(
-            eval("math.sqrt(2.0)"),
-            Value::Float(std::f64::consts::SQRT_2)
-        );
+        assert_eq!(eval("math.sqrt(2.0)"), Value::Float(std::f64::consts::SQRT_2));
         assert_eq!(eval("math.sqrt(49.0)"), Value::Float(7.0));
     }
 

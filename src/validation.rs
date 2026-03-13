@@ -4,10 +4,10 @@
 //! compiles `x-kubernetes-validations` rules, evaluates them against object data,
 //! and collects [`ValidationError`]s.
 
-use crate::compilation::{
-    CompilationError, CompilationResult, CompiledSchema, compile_schema_validations,
+use crate::{
+    compilation::{CompilationError, CompilationResult, CompiledSchema, compile_schema_validations},
+    values::{json_to_cel_with_compiled, json_to_cel_with_schema},
 };
-use crate::values::{json_to_cel_with_compiled, json_to_cel_with_schema};
 use cel::Context;
 
 /// The kind of error that occurred during validation.
@@ -88,14 +88,7 @@ impl Validator {
         let mut base_ctx = Context::default();
         crate::register_all(&mut base_ctx);
         let mut errors = Vec::new();
-        self.walk_schema(
-            schema,
-            object,
-            old_object,
-            String::new(),
-            &mut errors,
-            &base_ctx,
-        );
+        self.walk_schema(schema, object, old_object, String::new(), &mut errors, &base_ctx);
         errors
     }
 
@@ -137,14 +130,7 @@ impl Validator {
     ) {
         let cel_value = json_to_cel_with_schema(value, schema);
         let cel_old = old_value.map(|o| json_to_cel_with_schema(o, schema));
-        self.evaluate_validations(
-            schema,
-            &cel_value,
-            cel_old.as_ref(),
-            &path,
-            errors,
-            base_ctx,
-        );
+        self.evaluate_validations(schema, &cel_value, cel_old.as_ref(), &path, errors, base_ctx);
 
         if let (Some(properties), Some(obj)) = (
             schema.get("properties").and_then(|p| p.as_object()),
@@ -154,14 +140,7 @@ impl Validator {
                 if let Some(child_value) = obj.get(prop_name) {
                     let child_old = old_value.and_then(|o| o.get(prop_name));
                     let child_path = join_path(&path, prop_name);
-                    self.walk_schema(
-                        prop_schema,
-                        child_value,
-                        child_old,
-                        child_path,
-                        errors,
-                        base_ctx,
-                    );
+                    self.walk_schema(prop_schema, child_value, child_old, child_path, errors, base_ctx);
                 }
             }
         }
@@ -190,14 +169,7 @@ impl Validator {
                 }
                 let old_val = old_value.and_then(|o| o.get(key));
                 let child_path = join_path(&path, key);
-                self.walk_schema(
-                    additional_schema,
-                    val,
-                    old_val,
-                    child_path,
-                    errors,
-                    base_ctx,
-                );
+                self.walk_schema(additional_schema, val, old_val, child_path, errors, base_ctx);
             }
         }
     }
@@ -262,23 +234,14 @@ impl Validator {
             }
         }
 
-        if let (Some(additional_compiled), Some(obj)) =
-            (&compiled.additional_properties, value.as_object())
-        {
+        if let (Some(additional_compiled), Some(obj)) = (&compiled.additional_properties, value.as_object()) {
             for (key, val) in obj {
                 if compiled.properties.contains_key(key) {
                     continue;
                 }
                 let old_val = old_value.and_then(|o| o.get(key));
                 let child_path = join_path(&path, key);
-                self.walk_compiled(
-                    additional_compiled,
-                    val,
-                    old_val,
-                    child_path,
-                    errors,
-                    base_ctx,
-                );
+                self.walk_compiled(additional_compiled, val, old_val, child_path, errors, base_ctx);
             }
         }
     }
@@ -825,22 +788,10 @@ mod tests {
         let compiled = compile_schema(&schema);
 
         // Validate multiple objects with the same compiled schema
-        assert_eq!(
-            validate_compiled(&compiled, &json!({"x": 1}), None).len(),
-            0
-        );
-        assert_eq!(
-            validate_compiled(&compiled, &json!({"x": -1}), None).len(),
-            1
-        );
-        assert_eq!(
-            validate_compiled(&compiled, &json!({"x": 5}), None).len(),
-            0
-        );
-        assert_eq!(
-            validate_compiled(&compiled, &json!({"x": 0}), None).len(),
-            1
-        );
+        assert_eq!(validate_compiled(&compiled, &json!({"x": 1}), None).len(), 0);
+        assert_eq!(validate_compiled(&compiled, &json!({"x": -1}), None).len(), 1);
+        assert_eq!(validate_compiled(&compiled, &json!({"x": 5}), None).len(), 0);
+        assert_eq!(validate_compiled(&compiled, &json!({"x": 0}), None).len(), 1);
     }
 
     // ── fieldPath override tests ────────────────────────────────────

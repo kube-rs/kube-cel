@@ -4,8 +4,7 @@
 
 #![allow(dead_code)]
 
-use cel::ExecutionError;
-use cel::objects::Value;
+use cel::{ExecutionError, objects::Value};
 use std::cmp::Ordering;
 
 pub(crate) fn compare_values(a: &Value, b: &Value) -> Result<Ordering, ExecutionError> {

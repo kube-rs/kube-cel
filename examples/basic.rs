@@ -47,11 +47,7 @@ fn main() {
 
     // IP / CIDR
     run(&ctx, "ip family", "ip('192.168.1.1').family()");
-    run(
-        &ctx,
-        "cidr.ip()",
-        "cidr('10.0.0.0/24').ip() == ip('10.0.0.0')",
-    );
+    run(&ctx, "cidr.ip()", "cidr('10.0.0.0/24').ip() == ip('10.0.0.0')");
     run(&ctx, "isIPv4", "isIPv4('192.168.1.1')");
     run(&ctx, "isCIDRv6", "isCIDRv6('fd00::/64')");
 

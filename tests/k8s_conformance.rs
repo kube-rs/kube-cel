@@ -26,11 +26,7 @@ fn assert_false(expr: &str) {
 }
 
 fn assert_int(expr: &str, expected: i64) {
-    assert_eq!(
-        eval(expr),
-        Value::Int(expected),
-        "expected {expected}: {expr}"
-    );
+    assert_eq!(eval(expr), Value::Int(expected), "expected {expected}: {expr}");
 }
 
 fn assert_string(expr: &str, expected: &str) {
@@ -382,9 +378,7 @@ mod quantity {
 
     #[test]
     fn equality_symmetry() {
-        assert_true(
-            "quantity(\"200M\") == quantity(\"0.2G\") && quantity(\"0.2G\") == quantity(\"200M\")",
-        );
+        assert_true("quantity(\"200M\") == quantity(\"0.2G\") && quantity(\"0.2G\") == quantity(\"200M\")");
     }
 
     #[test]

@@ -5,12 +5,13 @@
 //! both strings and lists), this module provides unified dispatch functions
 //! that route to the correct implementation based on the runtime type of `this`.
 
-#[cfg(any(feature = "ip", feature = "lists"))]
-use std::sync::Arc;
+#[cfg(any(feature = "ip", feature = "lists"))] use std::sync::Arc;
 
-use cel::extractors::{Arguments, This};
-use cel::objects::Value;
-use cel::{Context, ExecutionError, ResolveResult};
+use cel::{
+    Context, ExecutionError, ResolveResult,
+    extractors::{Arguments, This},
+    objects::Value,
+};
 
 /// Register dispatch functions for names shared across multiple types or
 /// that override cel built-in functions. Registration order is independent
@@ -158,11 +159,8 @@ fn ip_dispatch(This(this): This<Value>, Arguments(args): Arguments) -> ResolveRe
                     }
                 },
             };
-            let addr = crate::ip::parse_ip_addr(&s)
-                .map_err(|e| ExecutionError::function_error("ip", e))?;
-            Ok(Value::Opaque(std::sync::Arc::new(crate::ip::KubeIP::new(
-                addr,
-            ))))
+            let addr = crate::ip::parse_ip_addr(&s).map_err(|e| ExecutionError::function_error("ip", e))?;
+            Ok(Value::Opaque(std::sync::Arc::new(crate::ip::KubeIP::new(addr))))
         }
     }
 }
@@ -209,8 +207,7 @@ fn builtin_string_fallback(this: Value) -> ResolveResult {
         ))),
         Value::Timestamp(ref t) => Ok(Value::String(Arc::new(t.to_rfc3339()))),
         Value::Duration(ref d) => Ok(Value::String(Arc::new(format_cel_duration(
-            d.num_nanoseconds()
-                .unwrap_or(d.num_seconds() * 1_000_000_000),
+            d.num_nanoseconds().unwrap_or(d.num_seconds() * 1_000_000_000),
         )))),
         _ => Err(ExecutionError::function_error(
             "string",
@@ -391,10 +388,7 @@ mod tests {
     #[test]
     #[cfg(feature = "ip")]
     fn test_string_float() {
-        assert_eq!(
-            eval("3.14.string()"),
-            Value::String("3.14".to_string().into())
-        );
+        assert_eq!(eval("3.14.string()"), Value::String("3.14".to_string().into()));
     }
 
     #[test]
@@ -409,10 +403,7 @@ mod tests {
     #[test]
     #[cfg(feature = "ip")]
     fn test_string_bytes() {
-        assert_eq!(
-            eval("b'abc'.string()"),
-            Value::String("abc".to_string().into())
-        );
+        assert_eq!(eval("b'abc'.string()"), Value::String("abc".to_string().into()));
     }
 
     #[test]

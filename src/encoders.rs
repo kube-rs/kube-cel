@@ -3,11 +3,14 @@
 //! Provides `base64.decode` and `base64.encode` matching
 //! `cel-go/ext/encoders.go`.
 
-use base64::Engine;
-use base64::engine::DecodePaddingMode;
-use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STANDARD};
-use cel::objects::Value;
-use cel::{Context, ExecutionError, ResolveResult};
+use base64::{
+    Engine,
+    engine::{
+        DecodePaddingMode,
+        general_purpose::{GeneralPurpose, GeneralPurposeConfig, STANDARD},
+    },
+};
+use cel::{Context, ExecutionError, ResolveResult, objects::Value};
 use std::sync::Arc;
 
 /// Base64 decoder that accepts both padded and unpadded input (matching cel-go).

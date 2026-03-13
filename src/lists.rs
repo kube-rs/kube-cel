@@ -3,11 +3,12 @@
 //! Provides list functions available in Kubernetes CEL expressions,
 //! matching the behavior of `k8s.io/apiserver/pkg/cel/library/lists.go`.
 
-use cel::extractors::{Arguments, This};
-use cel::objects::{OptionalValue, Value};
-use cel::{Context, ExecutionError, ResolveResult};
-use std::cmp::Ordering;
-use std::sync::Arc;
+use cel::{
+    Context, ExecutionError, ResolveResult,
+    extractors::{Arguments, This},
+    objects::{OptionalValue, Value},
+};
+use std::{cmp::Ordering, sync::Arc};
 
 use crate::value_ops::{compare_values, val_add, val_eq, val_le, val_lt};
 
@@ -394,14 +395,8 @@ mod tests {
 
     #[test]
     fn test_min_max_strings() {
-        assert_eq!(
-            eval("['c', 'a', 'b'].min()"),
-            Value::String(Arc::new("a".into()))
-        );
-        assert_eq!(
-            eval("['c', 'a', 'b'].max()"),
-            Value::String(Arc::new("c".into()))
-        );
+        assert_eq!(eval("['c', 'a', 'b'].min()"), Value::String(Arc::new("a".into())));
+        assert_eq!(eval("['c', 'a', 'b'].max()"), Value::String(Arc::new("c".into())));
     }
 
     #[test]
@@ -567,10 +562,7 @@ mod tests {
 
     #[test]
     fn test_slice_at_end() {
-        assert_eq!(
-            eval("[1, 2, 3, 4].slice(4, 4)"),
-            Value::List(Arc::new(vec![]))
-        );
+        assert_eq!(eval("[1, 2, 3, 4].slice(4, 4)"), Value::List(Arc::new(vec![])));
     }
 
     #[test]

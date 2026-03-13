@@ -3,9 +3,11 @@
 //! Provides the string functions available in Kubernetes CEL expressions,
 //! matching the behavior of `cel-go/ext/strings.go`.
 
-use cel::extractors::{Arguments, This};
-use cel::objects::Value;
-use cel::{Context, ExecutionError, ResolveResult};
+use cel::{
+    Context, ExecutionError, ResolveResult,
+    extractors::{Arguments, This},
+    objects::Value,
+};
 use std::sync::Arc;
 
 /// Register all string extension functions.
@@ -32,10 +34,7 @@ fn char_at(This(this): This<Arc<String>>, idx: i64) -> ResolveResult {
     if idx < 0 || idx as usize > chars.len() {
         return Err(ExecutionError::function_error(
             "charAt",
-            format!(
-                "index {idx} out of range for string of length {}",
-                chars.len()
-            ),
+            format!("index {idx} out of range for string of length {}", chars.len()),
         ));
     }
     if idx as usize == chars.len() {
@@ -46,10 +45,7 @@ fn char_at(This(this): This<Arc<String>>, idx: i64) -> ResolveResult {
 
 /// `<string>.indexOf(<string>) -> <int>`
 /// `<string>.indexOf(<string>, <int>) -> <int>`
-pub(crate) fn string_index_of(
-    This(this): This<Arc<String>>,
-    Arguments(args): Arguments,
-) -> ResolveResult {
+pub(crate) fn string_index_of(This(this): This<Arc<String>>, Arguments(args): Arguments) -> ResolveResult {
     let search = match args.first() {
         Some(Value::String(s)) => s.clone(),
         _ => {
@@ -72,9 +68,7 @@ pub(crate) fn string_index_of(
     }
 
     for i in offset..chars.len() {
-        if i + search_chars.len() <= chars.len()
-            && chars[i..i + search_chars.len()] == search_chars[..]
-        {
+        if i + search_chars.len() <= chars.len() && chars[i..i + search_chars.len()] == search_chars[..] {
             return Ok(Value::Int(i as i64));
         }
     }
@@ -297,14 +291,8 @@ mod tests {
 
     #[test]
     fn test_char_at() {
-        assert_eq!(
-            eval("'hello'.charAt(0)"),
-            Value::String(Arc::new("h".into()))
-        );
-        assert_eq!(
-            eval("'hello'.charAt(4)"),
-            Value::String(Arc::new("o".into()))
-        );
+        assert_eq!(eval("'hello'.charAt(0)"), Value::String(Arc::new("h".into())));
+        assert_eq!(eval("'hello'.charAt(4)"), Value::String(Arc::new("o".into())));
     }
 
     #[test]
@@ -402,22 +390,13 @@ mod tests {
     #[test]
     fn test_char_at_at_length() {
         // charAt(len) returns empty string (cel-go behavior)
-        assert_eq!(
-            eval("'hello'.charAt(5)"),
-            Value::String(Arc::new("".into()))
-        );
-        assert_eq!(
-            eval("'tacocat'.charAt(7)"),
-            Value::String(Arc::new("".into()))
-        );
+        assert_eq!(eval("'hello'.charAt(5)"), Value::String(Arc::new("".into())));
+        assert_eq!(eval("'tacocat'.charAt(7)"), Value::String(Arc::new("".into())));
     }
 
     #[test]
     fn test_char_at_unicode() {
-        assert_eq!(
-            eval("'héllo'.charAt(1)"),
-            Value::String(Arc::new("é".into()))
-        );
+        assert_eq!(eval("'héllo'.charAt(1)"), Value::String(Arc::new("é".into())));
     }
 
     #[test]
@@ -487,10 +466,7 @@ mod tests {
 
     #[test]
     fn test_string_reverse() {
-        assert_eq!(
-            eval("'hello'.reverse()"),
-            Value::String(Arc::new("olleh".into()))
-        );
+        assert_eq!(eval("'hello'.reverse()"), Value::String(Arc::new("olleh".into())));
         assert_eq!(eval("''.reverse()"), Value::String(Arc::new("".into())));
         assert_eq!(eval("'a'.reverse()"), Value::String(Arc::new("a".into())));
     }
@@ -530,10 +506,7 @@ mod tests {
 
     #[test]
     fn test_index_of_not_found_longer() {
-        assert_eq!(
-            eval("'hello wello'.indexOf('elbo room!!!')"),
-            Value::Int(-1)
-        );
+        assert_eq!(eval("'hello wello'.indexOf('elbo room!!!')"), Value::Int(-1));
     }
 
     #[test]
@@ -550,10 +523,7 @@ mod tests {
 
     #[test]
     fn test_last_index_of_full_match() {
-        assert_eq!(
-            eval("'hello wello'.lastIndexOf('hello wello')"),
-            Value::Int(0)
-        );
+        assert_eq!(eval("'hello wello'.lastIndexOf('hello wello')"), Value::Int(0));
     }
 
     #[test]

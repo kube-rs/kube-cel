@@ -3,9 +3,11 @@
 //! Provides printf-style `format()` function,
 //! matching `cel-go/ext/strings.go` format implementation.
 
-use cel::extractors::This;
-use cel::objects::{Key, Value};
-use cel::{Context, ExecutionError, ResolveResult};
+use cel::{
+    Context, ExecutionError, ResolveResult,
+    extractors::This,
+    objects::{Key, Value},
+};
 use std::sync::Arc;
 
 /// Register the format function.
@@ -277,10 +279,7 @@ fn format_hex(val: &Value, upper: bool, out: &mut String) -> Result<(), Executio
         _ => {
             return Err(ExecutionError::function_error(
                 "format",
-                format!(
-                    "%x requires int, uint, string, or bytes, got {:?}",
-                    val.type_of()
-                ),
+                format!("%x requires int, uint, string, or bytes, got {:?}", val.type_of()),
             ));
         }
     }
@@ -294,10 +293,7 @@ fn extract_float(val: &Value, verb: char) -> Result<f64, ExecutionError> {
         Value::UInt(n) => Ok(*n as f64),
         _ => Err(ExecutionError::function_error(
             "format",
-            format!(
-                "%{verb} requires float, int, or uint, got {:?}",
-                val.type_of()
-            ),
+            format!("%{verb} requires float, int, or uint, got {:?}", val.type_of()),
         )),
     }
 }
@@ -323,10 +319,7 @@ mod tests {
     #[test]
     fn test_format_s() {
         assert_eq!(eval_str("'hello %s'.format(['world'])"), "hello world");
-        assert_eq!(
-            eval_str("'%s is %s'.format(['age', 'number'])"),
-            "age is number"
-        );
+        assert_eq!(eval_str("'%s is %s'.format(['age', 'number'])"), "age is number");
     }
 
     #[test]
