@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.0] - 2026-03-13
+
+### Changed
+
+- **BREAKING**: `cel` dependency updated from 0.12 to 0.13 (`paste` → `pastey`, resolves RUSTSEC-2024-0436)
+- `extractions/setup-just` CI action updated from v2 to v3
+- `rustfmt.toml` added (aligned with kube-rs/kube style)
+- `dependabot.yml` added for automated dependency updates
+
 ## [0.4.4] - 2026-03-11
 
 ### Changed
