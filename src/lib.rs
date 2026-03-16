@@ -76,6 +76,8 @@
 
 #[cfg(feature = "validation")] pub mod validation;
 
+#[cfg(feature = "validation")] pub mod defaults;
+
 mod dispatch;
 mod value_ops;
 

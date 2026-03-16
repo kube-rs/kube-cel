@@ -162,6 +162,21 @@ impl Validator {
         errors
     }
 
+    /// Validate with schema defaults applied to the object first.
+    ///
+    /// Equivalent to calling [`defaults::apply_defaults`] followed by [`validate`].
+    #[must_use]
+    pub fn validate_with_defaults(
+        &self,
+        schema: &serde_json::Value,
+        object: &serde_json::Value,
+        old_object: Option<&serde_json::Value>,
+    ) -> Vec<ValidationError> {
+        let defaulted = crate::defaults::apply_defaults(schema, object);
+        let defaulted_old = old_object.map(|o| crate::defaults::apply_defaults(schema, o));
+        self.validate(schema, &defaulted, defaulted_old.as_ref())
+    }
+
     // ── Schema-based walking (compiles on each call) ────────────────
 
     fn walk_schema(
@@ -1247,6 +1262,29 @@ mod tests {
         };
         let compiled = crate::compilation::compile_schema(&schema);
         let errors = Validator::new().validate_compiled_with_context(&compiled, &obj, None, Some(&root_ctx));
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validate_with_defaults_fills_missing_then_validates() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "replicas": {
+                    "type": "integer",
+                    "default": 1,
+                    "x-kubernetes-validations": [
+                        {"rule": "self >= 0", "message": "must be non-negative"}
+                    ]
+                }
+            }
+        });
+        // Without defaults, replicas is missing -> no validation runs
+        let errors = validate(&schema, &json!({}), None);
+        assert!(errors.is_empty());
+
+        // With defaults, replicas=1 is injected -> validation runs and passes
+        let errors = Validator::new().validate_with_defaults(&schema, &json!({}), None);
         assert!(errors.is_empty());
     }
 }
