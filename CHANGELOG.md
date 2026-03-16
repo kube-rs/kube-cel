@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.5.2] - 2026-03-16
+### Added
+- `VapEvaluator::compile_expressions()` / `evaluate_compiled()` — pre-compile VAP expressions once, evaluate many times
+- `analysis::analyze_rule()` — combined scope + cost analysis in a single CEL compilation pass
+
+### Changed
+- `Validator::new()` now pre-registers all CEL functions (was per-call). Repeated `validate()` calls skip ~90 function registrations
+- `Validator` no longer derives `Clone` (`Context` is not `Clone`; use `Validator::new()` to create instances)
+- Convenience functions `validate()` / `validate_compiled()` use `thread_local!` caching
+
+### Performance
+- Eliminated redundant `register_all` + `Context::default()` on every validation call
+- `apply_defaults` skips cloning when no defaults need to be applied
+- `json_to_cel_with_schema` hoists `schema.get("items")` outside array iteration
+- `#[inline]` on hot-path helpers (`convert_number`, `join_path`, `escape_field_name`, etc.)
+
+
 ## [0.5.1] - 2026-03-16
 ### Added
 - **Schema composition walking** — `allOf`/`oneOf`/`anyOf` branches are now walked for `x-kubernetes-validations` rules
