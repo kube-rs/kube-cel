@@ -116,6 +116,100 @@ JSON field names that are CEL reserved words or contain special characters are a
 | `x/y` | `self.x__slash__y` |
 | `my_field` | `self.my__field` |
 
+### Schema defaults
+
+Apply schema `default` values before validation, matching K8s API server behavior:
+
+```rust
+use kube_cel::defaults::apply_defaults;
+
+let schema = json!({
+    "type": "object",
+    "properties": {
+        "replicas": {"type": "integer", "default": 1},
+        "strategy": {"type": "string", "default": "RollingUpdate"}
+    }
+});
+
+let object = json!({"replicas": 3});
+let defaulted = apply_defaults(&schema, &object);
+// defaulted = {"replicas": 3, "strategy": "RollingUpdate"}
+```
+
+Or use the convenience method:
+
+```rust
+let errors = Validator::new().validate_with_defaults(&schema, &object, None);
+```
+
+### Root-level variables
+
+Bind CRD-level `apiVersion`, `apiGroup`, `kind` variables for root-level rules:
+
+```rust
+use kube_cel::validation::{Validator, RootContext};
+
+let root_ctx = RootContext {
+    api_version: "apps/v1".into(),
+    api_group: "apps".into(),
+    kind: "Deployment".into(),
+};
+let errors = Validator::new().validate_with_context(&schema, &object, None, Some(&root_ctx));
+```
+
+## ValidatingAdmissionPolicy (VAP)
+
+Evaluate [ValidatingAdmissionPolicy](https://kubernetes.io/docs/reference/access-authn-authz/validating-admission-policy/) CEL expressions client-side — no API server required. Supports all VAP variables except `authorizer`.
+
+```rust
+use kube_cel::vap::{VapEvaluator, VapExpression, AdmissionRequest};
+
+let evaluator = VapEvaluator::builder()
+    .object(json!({"spec": {"replicas": 3}}))
+    .request(AdmissionRequest {
+        operation: "CREATE".into(),
+        namespace: "production".into(),
+        ..Default::default()
+    })
+    .params(json!({"maxReplicas": 5}))
+    .build();
+
+let results = evaluator.evaluate(&[VapExpression {
+    expression: "object.spec.replicas <= params.maxReplicas".into(),
+    message: Some("too many replicas".into()),
+    message_expression: None,
+}]);
+
+assert!(results[0].passed);
+```
+
+For repeated evaluation, pre-compile expressions:
+
+```rust
+let compiled = evaluator.compile_expressions(&expressions);
+let results = evaluator.evaluate_compiled(&compiled); // no re-parsing
+```
+
+## Static Analysis
+
+Catch CEL rule issues before deployment — variable scope violations and cost budget warnings:
+
+```rust
+use kube_cel::analysis::{analyze_rule, ScopeContext};
+use kube_cel::compilation::compile_schema;
+
+let compiled = compile_schema(&schema);
+
+let warnings = analyze_rule(
+    "self.items.all(item, item.size() > 0)",
+    &compiled,
+    ScopeContext::CrdValidation,
+);
+// Warns: "list field has no maxItems bound" (may exceed K8s 1M cost budget)
+```
+
+`ScopeContext::CrdValidation` catches admission-only variables (`request`, `object`, etc.) used in CRD rules. `ScopeContext::AdmissionPolicy` allows the full VAP variable set.
+
 ## Supported Functions
 
 ### Strings
@@ -196,7 +290,7 @@ All features are enabled by default. Disable with `default-features = false` and
 | `named_format` | - | Named format validation (`format.dns1123Label()`, etc.) |
 | `math` | - | Math functions (`math.ceil`, `math.abs`, bitwise, etc.) |
 | `encoders` | `base64` | Base64 encode/decode |
-| `validation` | `serde_json`, `serde`, `chrono` | CRD validation pipeline (compile + evaluate `x-kubernetes-validations`, `format: date-time/duration`) |
+| `validation` | `serde_json`, `serde`, `chrono` | CRD validation pipeline, VAP evaluation, static analysis, schema defaults |
 
 ## Known Limitations
 

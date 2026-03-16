@@ -190,7 +190,7 @@ impl Validator {
 
     /// Validate with schema defaults applied and root context variables bound.
     ///
-    /// Combines [`crate::defaults::apply_defaults`] with [`validate_with_context`].
+    /// Combines [`crate::defaults::apply_defaults`] with [`Self::validate_with_context`].
     #[must_use]
     pub fn validate_with_defaults_and_context(
         &self,
@@ -1389,9 +1389,8 @@ mod tests {
             kind: "Deployment".into(),
         };
         // Empty object: defaults fill replicas=1, root context provides kind
-        let errors = Validator::new().validate_with_defaults_and_context(
-            &schema, &json!({}), None, Some(&root_ctx)
-        );
+        let errors =
+            Validator::new().validate_with_defaults_and_context(&schema, &json!({}), None, Some(&root_ctx));
         assert!(errors.is_empty());
     }
 
