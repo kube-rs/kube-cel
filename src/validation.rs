@@ -10,6 +10,20 @@ use crate::{
 };
 use cel::Context;
 
+/// CRD-level context variables available at the root schema node.
+///
+/// These are derived from the CRD definition, not from the object being validated.
+/// Available as root-level CEL variables: `apiVersion`, `apiGroup`, `kind`.
+#[derive(Clone, Debug, Default)]
+pub struct RootContext {
+    /// CRD API version (e.g., `"apps/v1"`).
+    pub api_version: String,
+    /// CRD API group (e.g., `"apps"`). Empty string for core resources.
+    pub api_group: String,
+    /// CRD kind (e.g., `"Deployment"`).
+    pub kind: String,
+}
+
 /// The kind of error that occurred during validation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
@@ -85,10 +99,25 @@ impl Validator {
         object: &serde_json::Value,
         old_object: Option<&serde_json::Value>,
     ) -> Vec<ValidationError> {
+        self.validate_with_context(schema, object, old_object, None)
+    }
+
+    /// Validate an object against a CRD schema's CEL validation rules, with optional root context.
+    ///
+    /// Like [`validate`](Self::validate), but also binds `apiVersion`, `apiGroup`, and `kind`
+    /// as root-level CEL variables when a [`RootContext`] is provided.
+    #[must_use]
+    pub fn validate_with_context(
+        &self,
+        schema: &serde_json::Value,
+        object: &serde_json::Value,
+        old_object: Option<&serde_json::Value>,
+        root_ctx: Option<&RootContext>,
+    ) -> Vec<ValidationError> {
         let mut base_ctx = Context::default();
         crate::register_all(&mut base_ctx);
         let mut errors = Vec::new();
-        self.walk_schema(schema, object, old_object, String::new(), &mut errors, &base_ctx);
+        self.walk_schema(schema, object, old_object, String::new(), &mut errors, &base_ctx, root_ctx);
         errors
     }
 
@@ -103,6 +132,21 @@ impl Validator {
         object: &serde_json::Value,
         old_object: Option<&serde_json::Value>,
     ) -> Vec<ValidationError> {
+        self.validate_compiled_with_context(compiled, object, old_object, None)
+    }
+
+    /// Validate an object using a pre-compiled schema tree, with optional root context.
+    ///
+    /// Like [`validate_compiled`](Self::validate_compiled), but also binds `apiVersion`,
+    /// `apiGroup`, and `kind` as root-level CEL variables when a [`RootContext`] is provided.
+    #[must_use]
+    pub fn validate_compiled_with_context(
+        &self,
+        compiled: &CompiledSchema,
+        object: &serde_json::Value,
+        old_object: Option<&serde_json::Value>,
+        root_ctx: Option<&RootContext>,
+    ) -> Vec<ValidationError> {
         let mut base_ctx = Context::default();
         crate::register_all(&mut base_ctx);
         let mut errors = Vec::new();
@@ -113,6 +157,7 @@ impl Validator {
             String::new(),
             &mut errors,
             &base_ctx,
+            root_ctx,
         );
         errors
     }
@@ -127,10 +172,11 @@ impl Validator {
         path: String,
         errors: &mut Vec<ValidationError>,
         base_ctx: &Context<'_>,
+        root_ctx: Option<&RootContext>,
     ) {
         let cel_value = json_to_cel_with_schema(value, schema);
         let cel_old = old_value.map(|o| json_to_cel_with_schema(o, schema));
-        self.evaluate_validations(schema, &cel_value, cel_old.as_ref(), &path, errors, base_ctx);
+        self.evaluate_validations(schema, &cel_value, cel_old.as_ref(), &path, errors, base_ctx, root_ctx);
 
         if let (Some(properties), Some(obj)) = (
             schema.get("properties").and_then(|p| p.as_object()),
@@ -140,7 +186,7 @@ impl Validator {
                 if let Some(child_value) = obj.get(prop_name) {
                     let child_old = old_value.and_then(|o| o.get(prop_name));
                     let child_path = join_path(&path, prop_name);
-                    self.walk_schema(prop_schema, child_value, child_old, child_path, errors, base_ctx);
+                    self.walk_schema(prop_schema, child_value, child_old, child_path, errors, base_ctx, None);
                 }
             }
         }
@@ -149,7 +195,7 @@ impl Validator {
             for (i, item) in arr.iter().enumerate() {
                 let old_item = old_value.and_then(|o| o.as_array()).and_then(|a| a.get(i));
                 let item_path = join_path_index(&path, i);
-                self.walk_schema(items_schema, item, old_item, item_path, errors, base_ctx);
+                self.walk_schema(items_schema, item, old_item, item_path, errors, base_ctx, None);
             }
         }
 
@@ -169,7 +215,7 @@ impl Validator {
                 }
                 let old_val = old_value.and_then(|o| o.get(key));
                 let child_path = join_path(&path, key);
-                self.walk_schema(additional_schema, val, old_val, child_path, errors, base_ctx);
+                self.walk_schema(additional_schema, val, old_val, child_path, errors, base_ctx, None);
             }
         }
 
@@ -177,7 +223,7 @@ impl Validator {
         for keyword in &["allOf", "oneOf", "anyOf"] {
             if let Some(branches) = schema.get(keyword).and_then(|v| v.as_array()) {
                 for branch in branches {
-                    self.walk_schema(branch, value, old_value, path.clone(), errors, base_ctx);
+                    self.walk_schema(branch, value, old_value, path.clone(), errors, base_ctx, root_ctx);
                 }
             }
         }
@@ -191,9 +237,10 @@ impl Validator {
         path: &str,
         errors: &mut Vec<ValidationError>,
         base_ctx: &Context<'_>,
+        root_ctx: Option<&RootContext>,
     ) {
         let compiled = compile_schema_validations(schema);
-        self.evaluate_compiled_results(&compiled, cel_value, cel_old, path, errors, base_ctx);
+        self.evaluate_compiled_results(&compiled, cel_value, cel_old, path, errors, base_ctx, root_ctx);
     }
 
     // ── CompiledSchema-based walking ────────────────────────────────
@@ -206,6 +253,7 @@ impl Validator {
         path: String,
         errors: &mut Vec<ValidationError>,
         base_ctx: &Context<'_>,
+        root_ctx: Option<&RootContext>,
     ) {
         let cel_value = json_to_cel_with_compiled(value, compiled);
         let cel_old = old_value.map(|o| json_to_cel_with_compiled(o, compiled));
@@ -216,6 +264,7 @@ impl Validator {
             &path,
             errors,
             base_ctx,
+            root_ctx,
         );
 
         if let Some(obj) = value.as_object() {
@@ -230,6 +279,7 @@ impl Validator {
                         child_path,
                         errors,
                         base_ctx,
+                        None,
                     );
                 }
             }
@@ -239,7 +289,7 @@ impl Validator {
             for (i, item) in arr.iter().enumerate() {
                 let old_item = old_value.and_then(|o| o.as_array()).and_then(|a| a.get(i));
                 let item_path = join_path_index(&path, i);
-                self.walk_compiled(items_compiled, item, old_item, item_path, errors, base_ctx);
+                self.walk_compiled(items_compiled, item, old_item, item_path, errors, base_ctx, None);
             }
         }
 
@@ -250,12 +300,12 @@ impl Validator {
                 }
                 let old_val = old_value.and_then(|o| o.get(key));
                 let child_path = join_path(&path, key);
-                self.walk_compiled(additional_compiled, val, old_val, child_path, errors, base_ctx);
+                self.walk_compiled(additional_compiled, val, old_val, child_path, errors, base_ctx, None);
             }
         }
 
         for branch in compiled.all_of.iter().chain(compiled.one_of.iter()).chain(compiled.any_of.iter()) {
-            self.walk_compiled(branch, value, old_value, path.clone(), errors, base_ctx);
+            self.walk_compiled(branch, value, old_value, path.clone(), errors, base_ctx, root_ctx);
         }
     }
 
@@ -269,12 +319,30 @@ impl Validator {
         path: &str,
         errors: &mut Vec<ValidationError>,
         base_ctx: &Context<'_>,
+        root_ctx: Option<&RootContext>,
     ) {
         // Create a node-level scope once with self/oldSelf bound
         let mut node_ctx = base_ctx.new_inner_scope();
         node_ctx.add_variable_from_value("self", cel_value.clone());
         if let Some(old) = cel_old {
             node_ctx.add_variable_from_value("oldSelf", old.clone());
+        }
+
+        if path.is_empty() {
+            if let Some(rc) = root_ctx {
+                node_ctx.add_variable_from_value(
+                    "apiVersion",
+                    cel::Value::String(std::sync::Arc::new(rc.api_version.clone())),
+                );
+                node_ctx.add_variable_from_value(
+                    "apiGroup",
+                    cel::Value::String(std::sync::Arc::new(rc.api_group.clone())),
+                );
+                node_ctx.add_variable_from_value(
+                    "kind",
+                    cel::Value::String(std::sync::Arc::new(rc.kind.clone())),
+                );
+            }
         }
 
         for result in results {
@@ -1008,5 +1076,80 @@ mod tests {
         let errors_compiled = validate_compiled(&compiled, &obj, None);
         assert_eq!(errors_schema.len(), errors_compiled.len());
         assert_eq!(errors_schema[0].message, errors_compiled[0].message);
+    }
+
+    // ── RootContext tests ────────────────────────────────────────────
+
+    #[test]
+    fn root_context_variables_bound() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "x-kubernetes-validations": [{
+                "rule": "apiVersion == 'apps/v1'",
+                "message": "wrong api version"
+            }]
+        });
+        let obj = json!({"name": "test"});
+        let root_ctx = RootContext {
+            api_version: "apps/v1".into(),
+            api_group: "apps".into(),
+            kind: "Deployment".into(),
+        };
+        let errors = Validator::new().validate_with_context(&schema, &obj, None, Some(&root_ctx));
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn root_context_empty_api_group_for_core() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "x-kubernetes-validations": [{
+                "rule": "apiGroup == ''",
+                "message": "not core"
+            }]
+        });
+        let obj = json!({"name": "test"});
+        let root_ctx = RootContext {
+            api_version: "v1".into(),
+            api_group: "".into(),
+            kind: "Pod".into(),
+        };
+        let errors = Validator::new().validate_with_context(&schema, &obj, None, Some(&root_ctx));
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validate_without_root_context_still_works() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"x": {"type": "integer"}},
+            "x-kubernetes-validations": [{"rule": "self.x >= 0", "message": "bad"}]
+        });
+        let obj = json!({"x": -1});
+        let errors = validate(&schema, &obj, None);
+        assert_eq!(errors.len(), 1);
+    }
+
+    #[test]
+    fn root_context_compiled_path() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"x": {"type": "integer"}},
+            "x-kubernetes-validations": [{
+                "rule": "kind == 'MyResource'",
+                "message": "wrong kind"
+            }]
+        });
+        let obj = json!({"x": 1});
+        let root_ctx = RootContext {
+            api_version: "v1".into(),
+            api_group: "example.com".into(),
+            kind: "MyResource".into(),
+        };
+        let compiled = crate::compilation::compile_schema(&schema);
+        let errors = Validator::new().validate_compiled_with_context(&compiled, &obj, None, Some(&root_ctx));
+        assert!(errors.is_empty());
     }
 }
