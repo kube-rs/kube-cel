@@ -15,24 +15,35 @@
 pub fn apply_defaults(schema: &serde_json::Value, value: &serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Object(obj) => {
-            let mut result = obj.clone();
+            let props = match schema.get("properties").and_then(|p| p.as_object()) {
+                Some(p) => p,
+                None => return value.clone(),
+            };
 
-            if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
-                for (key, prop_schema) in props {
-                    match result.get(key) {
-                        Some(child) => {
-                            let defaulted = apply_defaults(prop_schema, child);
-                            result.insert(key.clone(), defaulted);
-                        }
-                        None => {
-                            if let Some(default_val) = prop_schema.get("default") {
-                                result.insert(key.clone(), default_val.clone());
-                            }
+            // Check if any work needs to be done before cloning
+            let has_missing_defaults = props.iter().any(|(key, prop_schema)| {
+                !obj.contains_key(key) && prop_schema.get("default").is_some()
+            });
+            let has_children_to_recurse = props.keys().any(|key| obj.contains_key(key));
+
+            if !has_missing_defaults && !has_children_to_recurse {
+                return value.clone();
+            }
+
+            let mut result = obj.clone();
+            for (key, prop_schema) in props {
+                match result.get(key) {
+                    Some(child) => {
+                        let defaulted = apply_defaults(prop_schema, child);
+                        result.insert(key.clone(), defaulted);
+                    }
+                    None => {
+                        if let Some(default_val) = prop_schema.get("default") {
+                            result.insert(key.clone(), default_val.clone());
                         }
                     }
                 }
             }
-
             serde_json::Value::Object(result)
         }
         serde_json::Value::Array(arr) => {
