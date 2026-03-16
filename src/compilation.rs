@@ -154,6 +154,12 @@ pub struct CompiledSchema {
     pub one_of: Vec<CompiledSchema>,
     /// Compiled `anyOf` branch schemas.
     pub any_of: Vec<CompiledSchema>,
+    /// `maxLength` from the schema (for cost estimation).
+    pub max_length: Option<u64>,
+    /// `maxItems` from the schema (for cost estimation).
+    pub max_items: Option<u64>,
+    /// `maxProperties` from the schema (for cost estimation).
+    pub max_properties: Option<u64>,
     /// Whether `x-kubernetes-preserve-unknown-fields: true` is set on this node.
     /// When true, `additionalProperties` walking is skipped.
     pub preserve_unknown_fields: bool,
@@ -213,6 +219,10 @@ pub fn compile_schema(schema: &serde_json::Value) -> CompiledSchema {
     let one_of = compile_schema_array(schema, "oneOf");
     let any_of = compile_schema_array(schema, "anyOf");
 
+    let max_length = schema.get("maxLength").and_then(|v| v.as_u64());
+    let max_items = schema.get("maxItems").and_then(|v| v.as_u64());
+    let max_properties = schema.get("maxProperties").and_then(|v| v.as_u64());
+
     let preserve_unknown_fields = schema
         .get("x-kubernetes-preserve-unknown-fields")
         .and_then(|v| v.as_bool())
@@ -232,6 +242,9 @@ pub fn compile_schema(schema: &serde_json::Value) -> CompiledSchema {
         all_of,
         one_of,
         any_of,
+        max_length,
+        max_items,
+        max_properties,
         preserve_unknown_fields,
         embedded_resource,
     }
