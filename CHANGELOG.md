@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.3] - 2026-03-16
+### Added
+- `Validator::validate_with_defaults_and_context()` — combines schema defaults + root context in one call
+- `Serialize` derive on `ValidationError`, `ErrorKind`, `AnalysisWarning`, `WarningKind` — enables JSON output for CI tooling
+- `Deserialize` derive on `VapResult`
+- `PartialEq, Eq` derive on all VAP types (`VapResult`, `VapExpression`, `AdmissionRequest`, `GroupVersionKind`, `GroupVersionResource`)
+- `compile_rule` and `compile_schema_validations` are now `pub` (were `pub(crate)`)
+- Examples: `vap_evaluation`, `static_analysis`, `defaults_and_context`
+- README sections for VAP evaluation, static analysis, schema defaults, and root-level variables
+
+### Fixed
+- `convert_number` no longer panics on non-representable floats (uses `unwrap_or(NAN)`)
+- Recursion depth limit (64) on `compile_schema`, `walk_schema`, `walk_compiled`, `apply_defaults` — prevents stack overflow on deeply nested schemas
+- Convenience functions `validate()` / `validate_compiled()` now share a single `thread_local` Validator instance (was two separate)
+
+
 ## [0.5.2] - 2026-03-16
 ### Added
 - `VapEvaluator::compile_expressions()` / `evaluate_compiled()` — pre-compile VAP expressions once, evaluate many times
