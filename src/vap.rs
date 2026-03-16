@@ -212,10 +212,7 @@ impl VapEvaluator {
             let _ = ctx.add_variable("namespaceObject", json_to_cel(ns));
         }
 
-        expressions
-            .iter()
-            .map(|expr| self.eval_one(expr, &ctx))
-            .collect()
+        expressions.iter().map(|expr| self.eval_one(expr, &ctx)).collect()
     }
 
     fn eval_one(&self, expr: &VapExpression, ctx: &Context<'_>) -> VapResult {
@@ -270,12 +267,11 @@ impl VapEvaluator {
     /// Tries `messageExpression` first, then falls back to static `message`.
     fn resolve_message(&self, expr: &VapExpression, ctx: &Context<'_>) -> Option<String> {
         // Try messageExpression
-        if let Some(msg_expr) = &expr.message_expression {
-            if let Ok(program) = Program::compile(msg_expr) {
-                if let Ok(Value::String(s)) = program.execute(ctx) {
-                    return Some((*s).clone());
-                }
-            }
+        if let Some(msg_expr) = &expr.message_expression
+            && let Ok(program) = Program::compile(msg_expr)
+            && let Ok(Value::String(s)) = program.execute(ctx)
+        {
+            return Some((*s).clone());
         }
 
         // Fall back to static message
@@ -284,7 +280,10 @@ impl VapEvaluator {
         }
 
         // Default
-        Some(format!("validation expression '{}' evaluated to false", expr.expression))
+        Some(format!(
+            "validation expression '{}' evaluated to false",
+            expr.expression
+        ))
     }
 }
 
@@ -317,10 +316,7 @@ fn request_to_cel(req: &AdmissionRequest) -> Value {
         Key::String(Arc::new("namespace".into())),
         Value::String(Arc::new(req.namespace.clone())),
     );
-    map.insert(
-        Key::String(Arc::new("dryRun".into())),
-        Value::Bool(req.dry_run),
-    );
+    map.insert(Key::String(Arc::new("dryRun".into())), Value::Bool(req.dry_run));
 
     // kind: { group, version, kind }
     let mut kind_map: HashMap<Key, Value> = HashMap::new();
@@ -338,7 +334,9 @@ fn request_to_cel(req: &AdmissionRequest) -> Value {
     );
     map.insert(
         Key::String(Arc::new("kind".into())),
-        Value::Map(Map { map: Arc::new(kind_map) }),
+        Value::Map(Map {
+            map: Arc::new(kind_map),
+        }),
     );
 
     // resource: { group, version, resource }
@@ -357,7 +355,9 @@ fn request_to_cel(req: &AdmissionRequest) -> Value {
     );
     map.insert(
         Key::String(Arc::new("resource".into())),
-        Value::Map(Map { map: Arc::new(resource_map) }),
+        Value::Map(Map {
+            map: Arc::new(resource_map),
+        }),
     );
 
     // userInfo: { username, uid, groups }
@@ -381,7 +381,9 @@ fn request_to_cel(req: &AdmissionRequest) -> Value {
     );
     map.insert(
         Key::String(Arc::new("userInfo".into())),
-        Value::Map(Map { map: Arc::new(user_info_map) }),
+        Value::Map(Map {
+            map: Arc::new(user_info_map),
+        }),
     );
 
     Value::Map(Map { map: Arc::new(map) })
@@ -396,7 +398,10 @@ mod tests {
     fn vap_basic_validation_passes() {
         let evaluator = VapEvaluator::builder()
             .object(json!({"metadata": {"name": "test"}, "spec": {"replicas": 3}}))
-            .request(AdmissionRequest { operation: "CREATE".into(), ..Default::default() })
+            .request(AdmissionRequest {
+                operation: "CREATE".into(),
+                ..Default::default()
+            })
             .build();
         let results = evaluator.evaluate(&[VapExpression {
             expression: "object.spec.replicas >= 0".into(),
@@ -411,7 +416,10 @@ mod tests {
     fn vap_validation_fails_with_message() {
         let evaluator = VapEvaluator::builder()
             .object(json!({"spec": {"replicas": -1}}))
-            .request(AdmissionRequest { operation: "CREATE".into(), ..Default::default() })
+            .request(AdmissionRequest {
+                operation: "CREATE".into(),
+                ..Default::default()
+            })
             .build();
         let results = evaluator.evaluate(&[VapExpression {
             expression: "object.spec.replicas >= 0".into(),
@@ -419,7 +427,10 @@ mod tests {
             message_expression: None,
         }]);
         assert!(!results[0].passed);
-        assert_eq!(results[0].message.as_deref(), Some("replicas must be non-negative"));
+        assert_eq!(
+            results[0].message.as_deref(),
+            Some("replicas must be non-negative")
+        );
     }
 
     #[test]
@@ -445,7 +456,10 @@ mod tests {
     fn vap_old_object_null_on_create() {
         let evaluator = VapEvaluator::builder()
             .object(json!({"spec": {}}))
-            .request(AdmissionRequest { operation: "CREATE".into(), ..Default::default() })
+            .request(AdmissionRequest {
+                operation: "CREATE".into(),
+                ..Default::default()
+            })
             .build();
         let results = evaluator.evaluate(&[VapExpression {
             expression: "oldObject == null".into(),

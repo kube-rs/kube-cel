@@ -12,10 +12,7 @@
 ///
 /// This is a recursive pre-processing pass. It does not modify the input.
 #[must_use]
-pub fn apply_defaults(
-    schema: &serde_json::Value,
-    value: &serde_json::Value,
-) -> serde_json::Value {
+pub fn apply_defaults(schema: &serde_json::Value, value: &serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Object(obj) => {
             let mut result = obj.clone();
@@ -40,7 +37,8 @@ pub fn apply_defaults(
         }
         serde_json::Value::Array(arr) => {
             if let Some(items_schema) = schema.get("items") {
-                let items: Vec<_> = arr.iter()
+                let items: Vec<_> = arr
+                    .iter()
                     .map(|item| apply_defaults(items_schema, item))
                     .collect();
                 serde_json::Value::Array(items)

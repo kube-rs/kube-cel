@@ -117,7 +117,15 @@ impl Validator {
         let mut base_ctx = Context::default();
         crate::register_all(&mut base_ctx);
         let mut errors = Vec::new();
-        self.walk_schema(schema, object, old_object, String::new(), &mut errors, &base_ctx, root_ctx);
+        self.walk_schema(
+            schema,
+            object,
+            old_object,
+            String::new(),
+            &mut errors,
+            &base_ctx,
+            root_ctx,
+        );
         errors
     }
 
@@ -164,7 +172,7 @@ impl Validator {
 
     /// Validate with schema defaults applied to the object first.
     ///
-    /// Equivalent to calling [`defaults::apply_defaults`] followed by [`validate`].
+    /// Equivalent to calling [`crate::defaults::apply_defaults`] followed by [`validate`].
     #[must_use]
     pub fn validate_with_defaults(
         &self,
@@ -179,6 +187,7 @@ impl Validator {
 
     // ── Schema-based walking (compiles on each call) ────────────────
 
+    #[allow(clippy::too_many_arguments)]
     fn walk_schema(
         &self,
         schema: &serde_json::Value,
@@ -191,7 +200,15 @@ impl Validator {
     ) {
         let cel_value = json_to_cel_with_schema(value, schema);
         let cel_old = old_value.map(|o| json_to_cel_with_schema(o, schema));
-        self.evaluate_validations(schema, &cel_value, cel_old.as_ref(), &path, errors, base_ctx, root_ctx);
+        self.evaluate_validations(
+            schema,
+            &cel_value,
+            cel_old.as_ref(),
+            &path,
+            errors,
+            base_ctx,
+            root_ctx,
+        );
 
         if let (Some(properties), Some(obj)) = (
             schema.get("properties").and_then(|p| p.as_object()),
@@ -201,7 +218,15 @@ impl Validator {
                 if let Some(child_value) = obj.get(prop_name) {
                     let child_old = old_value.and_then(|o| o.get(prop_name));
                     let child_path = join_path(&path, prop_name);
-                    self.walk_schema(prop_schema, child_value, child_old, child_path, errors, base_ctx, None);
+                    self.walk_schema(
+                        prop_schema,
+                        child_value,
+                        child_old,
+                        child_path,
+                        errors,
+                        base_ctx,
+                        None,
+                    );
                 }
             }
         }
@@ -219,25 +244,33 @@ impl Validator {
             .and_then(|v| v.as_bool())
             == Some(true);
 
-        if !preserve_unknown {
-            if let (Some(additional_schema), Some(obj)) = (
+        if !preserve_unknown
+            && let (Some(additional_schema), Some(obj)) = (
                 schema.get("additionalProperties").filter(|a| a.is_object()),
                 value.as_object(),
-            ) {
-                let known: std::collections::HashSet<&str> = schema
-                    .get("properties")
-                    .and_then(|p| p.as_object())
-                    .map(|p| p.keys().map(|k| k.as_str()).collect())
-                    .unwrap_or_default();
+            )
+        {
+            let known: std::collections::HashSet<&str> = schema
+                .get("properties")
+                .and_then(|p| p.as_object())
+                .map(|p| p.keys().map(|k| k.as_str()).collect())
+                .unwrap_or_default();
 
-                for (key, val) in obj {
-                    if known.contains(key.as_str()) {
-                        continue;
-                    }
-                    let old_val = old_value.and_then(|o| o.get(key));
-                    let child_path = join_path(&path, key);
-                    self.walk_schema(additional_schema, val, old_val, child_path, errors, base_ctx, None);
+            for (key, val) in obj {
+                if known.contains(key.as_str()) {
+                    continue;
                 }
+                let old_val = old_value.and_then(|o| o.get(key));
+                let child_path = join_path(&path, key);
+                self.walk_schema(
+                    additional_schema,
+                    val,
+                    old_val,
+                    child_path,
+                    errors,
+                    base_ctx,
+                    None,
+                );
             }
         }
 
@@ -251,6 +284,7 @@ impl Validator {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn evaluate_validations(
         &self,
         schema: &serde_json::Value,
@@ -267,6 +301,7 @@ impl Validator {
 
     // ── CompiledSchema-based walking ────────────────────────────────
 
+    #[allow(clippy::too_many_arguments)]
     fn walk_compiled(
         &self,
         compiled: &CompiledSchema,
@@ -315,28 +350,41 @@ impl Validator {
             }
         }
 
-        if !compiled.preserve_unknown_fields {
-            if let (Some(additional_compiled), Some(obj)) =
+        if !compiled.preserve_unknown_fields
+            && let (Some(additional_compiled), Some(obj)) =
                 (&compiled.additional_properties, value.as_object())
-            {
-                for (key, val) in obj {
-                    if compiled.properties.contains_key(key) {
-                        continue;
-                    }
-                    let old_val = old_value.and_then(|o| o.get(key));
-                    let child_path = join_path(&path, key);
-                    self.walk_compiled(additional_compiled, val, old_val, child_path, errors, base_ctx, None);
+        {
+            for (key, val) in obj {
+                if compiled.properties.contains_key(key) {
+                    continue;
                 }
+                let old_val = old_value.and_then(|o| o.get(key));
+                let child_path = join_path(&path, key);
+                self.walk_compiled(
+                    additional_compiled,
+                    val,
+                    old_val,
+                    child_path,
+                    errors,
+                    base_ctx,
+                    None,
+                );
             }
         }
 
-        for branch in compiled.all_of.iter().chain(compiled.one_of.iter()).chain(compiled.any_of.iter()) {
+        for branch in compiled
+            .all_of
+            .iter()
+            .chain(compiled.one_of.iter())
+            .chain(compiled.any_of.iter())
+        {
             self.walk_compiled(branch, value, old_value, path.clone(), errors, base_ctx, root_ctx);
         }
     }
 
     // ── Shared evaluation logic ─────────────────────────────────────
 
+    #[allow(clippy::too_many_arguments)]
     fn evaluate_compiled_results(
         &self,
         results: &[Result<CompilationResult, CompilationError>],
@@ -354,21 +402,19 @@ impl Validator {
             node_ctx.add_variable_from_value("oldSelf", old.clone());
         }
 
-        if path.is_empty() {
-            if let Some(rc) = root_ctx {
-                node_ctx.add_variable_from_value(
-                    "apiVersion",
-                    cel::Value::String(std::sync::Arc::new(rc.api_version.clone())),
-                );
-                node_ctx.add_variable_from_value(
-                    "apiGroup",
-                    cel::Value::String(std::sync::Arc::new(rc.api_group.clone())),
-                );
-                node_ctx.add_variable_from_value(
-                    "kind",
-                    cel::Value::String(std::sync::Arc::new(rc.kind.clone())),
-                );
-            }
+        if path.is_empty()
+            && let Some(rc) = root_ctx
+        {
+            node_ctx.add_variable_from_value(
+                "apiVersion",
+                cel::Value::String(std::sync::Arc::new(rc.api_version.clone())),
+            );
+            node_ctx.add_variable_from_value(
+                "apiGroup",
+                cel::Value::String(std::sync::Arc::new(rc.api_group.clone())),
+            );
+            node_ctx
+                .add_variable_from_value("kind", cel::Value::String(std::sync::Arc::new(rc.kind.clone())));
         }
 
         for result in results {

@@ -3,8 +3,7 @@
 //! Provides compile-time checks beyond syntax validation:
 //! variable scope validation and cost estimation.
 
-use cel::common::ast::Expr;
-use cel::Program;
+use cel::{Program, common::ast::Expr};
 
 use crate::compilation::CompiledSchema;
 
@@ -128,7 +127,11 @@ fn estimate_expr_cost(expr: &Expr, schema: &CompiledSchema) -> u64 {
                 .as_ref()
                 .map(|t| estimate_expr_cost(&t.expr, schema))
                 .unwrap_or(0);
-            let arg_cost: u64 = call.args.iter().map(|a| estimate_expr_cost(&a.expr, schema)).sum();
+            let arg_cost: u64 = call
+                .args
+                .iter()
+                .map(|a| estimate_expr_cost(&a.expr, schema))
+                .sum();
             if is_string_traversal(&call.func_name) {
                 let str_len = find_max_length(schema);
                 base + (str_len as f64 * STRING_TRAVERSAL_FACTOR) as u64 + target_cost + arg_cost
@@ -198,8 +201,7 @@ fn check_missing_bounds(
             if prop.items.is_some() && prop.max_items.is_none() {
                 warnings.push(AnalysisWarning {
                     rule: rule.to_string(),
-                    message: "list field has no maxItems bound; cost estimate uses worst-case default"
-                        .into(),
+                    message: "list field has no maxItems bound; cost estimate uses worst-case default".into(),
                     kind: WarningKind::MissingBounds,
                 });
                 break;
@@ -216,8 +218,10 @@ mod tests {
 
     #[test]
     fn detect_wrong_scope_variable() {
-        let warnings =
-            check_rule_scope("request.userInfo.username == 'admin'", ScopeContext::CrdValidation);
+        let warnings = check_rule_scope(
+            "request.userInfo.username == 'admin'",
+            ScopeContext::CrdValidation,
+        );
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].message.contains("request"));
         assert_eq!(warnings[0].kind, WarningKind::WrongScope);
@@ -225,8 +229,7 @@ mod tests {
 
     #[test]
     fn self_and_old_self_are_valid() {
-        let warnings =
-            check_rule_scope("self.replicas >= oldSelf.replicas", ScopeContext::CrdValidation);
+        let warnings = check_rule_scope("self.replicas >= oldSelf.replicas", ScopeContext::CrdValidation);
         assert!(warnings.is_empty());
     }
 
@@ -241,8 +244,7 @@ mod tests {
 
     #[test]
     fn crd_scope_rejects_object_variable() {
-        let warnings =
-            check_rule_scope("object.metadata.name == 'test'", ScopeContext::CrdValidation);
+        let warnings = check_rule_scope("object.metadata.name == 'test'", ScopeContext::CrdValidation);
         assert_eq!(warnings.len(), 1);
     }
 
@@ -265,9 +267,11 @@ mod tests {
         });
         let compiled = compile_schema(&schema);
         let warnings = estimate_rule_cost("self.items.all(item, item.size() > 0)", &compiled);
-        assert!(warnings
-            .iter()
-            .any(|w| w.kind == WarningKind::CostExceeded || w.kind == WarningKind::MissingBounds));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.kind == WarningKind::CostExceeded || w.kind == WarningKind::MissingBounds)
+        );
     }
 
     #[test]

@@ -141,7 +141,11 @@ pub fn json_to_cel_with_schema(value: &serde_json::Value, schema: &serde_json::V
                 map.entry(Key::String(Arc::new("kind".into())))
                     .or_insert_with(|| Value::String(Arc::new(String::new())));
                 map.entry(Key::String(Arc::new("metadata".into())))
-                    .or_insert_with(|| Value::Map(Map { map: Arc::new(HashMap::new()) }));
+                    .or_insert_with(|| {
+                        Value::Map(Map {
+                            map: Arc::new(HashMap::new()),
+                        })
+                    });
             }
 
             Value::Map(Map { map: Arc::new(map) })
@@ -189,7 +193,11 @@ pub fn json_to_cel_with_compiled(value: &serde_json::Value, compiled: &CompiledS
                 map.entry(Key::String(Arc::new("kind".into())))
                     .or_insert_with(|| Value::String(Arc::new(String::new())));
                 map.entry(Key::String(Arc::new("metadata".into())))
-                    .or_insert_with(|| Value::Map(Map { map: Arc::new(HashMap::new()) }));
+                    .or_insert_with(|| {
+                        Value::Map(Map {
+                            map: Arc::new(HashMap::new()),
+                        })
+                    });
             }
 
             Value::Map(Map { map: Arc::new(map) })
