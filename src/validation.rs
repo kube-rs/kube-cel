@@ -1124,6 +1124,57 @@ mod tests {
         assert_eq!(errors.len(), 1);
     }
 
+    // ── x-kubernetes-embedded-resource tests ────────────────────────
+
+    #[test]
+    fn embedded_resource_fields_accessible() {
+        let schema = json!({
+            "type": "object",
+            "x-kubernetes-embedded-resource": true,
+            "properties": {
+                "spec": {"type": "object"}
+            },
+            "x-kubernetes-validations": [{
+                "rule": "self.apiVersion.size() >= 0",
+                "message": "apiVersion must exist"
+            }]
+        });
+        let obj = json!({"spec": {}});
+        let errors = validate(&schema, &obj, None);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn embedded_resource_preserves_existing_fields() {
+        let schema = json!({
+            "type": "object",
+            "x-kubernetes-embedded-resource": true,
+            "x-kubernetes-validations": [{
+                "rule": "self.apiVersion == 'v1'",
+                "message": "wrong version"
+            }]
+        });
+        let obj = json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "test"}});
+        let errors = validate(&schema, &obj, None);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn embedded_resource_compiled_path() {
+        let schema = json!({
+            "type": "object",
+            "x-kubernetes-embedded-resource": true,
+            "x-kubernetes-validations": [{
+                "rule": "self.kind.size() >= 0",
+                "message": "kind must exist"
+            }]
+        });
+        let obj = json!({"spec": {}});
+        let compiled = compile_schema(&schema);
+        let errors = validate_compiled(&compiled, &obj, None);
+        assert!(errors.is_empty());
+    }
+
     // ── RootContext tests ────────────────────────────────────────────
 
     #[test]

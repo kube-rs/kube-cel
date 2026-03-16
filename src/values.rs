@@ -130,6 +130,20 @@ pub fn json_to_cel_with_schema(value: &serde_json::Value, schema: &serde_json::V
                 };
                 map.insert(Key::String(Arc::new(escape_field_name(k))), child_val);
             }
+
+            let is_embedded = schema
+                .get("x-kubernetes-embedded-resource")
+                .and_then(|v| v.as_bool())
+                == Some(true);
+            if is_embedded {
+                map.entry(Key::String(Arc::new("apiVersion".into())))
+                    .or_insert_with(|| Value::String(Arc::new(String::new())));
+                map.entry(Key::String(Arc::new("kind".into())))
+                    .or_insert_with(|| Value::String(Arc::new(String::new())));
+                map.entry(Key::String(Arc::new("metadata".into())))
+                    .or_insert_with(|| Value::Map(Map { map: Arc::new(HashMap::new()) }));
+            }
+
             Value::Map(Map { map: Arc::new(map) })
         }
     }
@@ -168,6 +182,16 @@ pub fn json_to_cel_with_compiled(value: &serde_json::Value, compiled: &CompiledS
                 };
                 map.insert(Key::String(Arc::new(escape_field_name(k))), child_val);
             }
+
+            if compiled.embedded_resource {
+                map.entry(Key::String(Arc::new("apiVersion".into())))
+                    .or_insert_with(|| Value::String(Arc::new(String::new())));
+                map.entry(Key::String(Arc::new("kind".into())))
+                    .or_insert_with(|| Value::String(Arc::new(String::new())));
+                map.entry(Key::String(Arc::new("metadata".into())))
+                    .or_insert_with(|| Value::Map(Map { map: Arc::new(HashMap::new()) }));
+            }
+
             Value::Map(Map { map: Arc::new(map) })
         }
     }
