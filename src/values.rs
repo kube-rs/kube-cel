@@ -20,11 +20,15 @@ use crate::{compilation::CompiledSchema, escaping::escape_field_name};
 
 /// The `format` hint from an OpenAPI schema property.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SchemaFormat {
     /// `format: "date-time"` — strings should be parsed as CEL `Timestamp`.
     DateTime,
     /// `format: "duration"` — strings should be parsed as CEL `Duration`.
     Duration,
+    /// `x-kubernetes-int-or-string: true` — field can be int or string.
+    /// Primarily a marker to prevent format: "date-time" etc from being interpreted.
+    IntOrString,
     /// No recognized format or not a string type.
     #[default]
     None,
@@ -33,6 +37,9 @@ pub enum SchemaFormat {
 impl SchemaFormat {
     /// Extract a `SchemaFormat` from a raw JSON schema node.
     pub(crate) fn from_schema(schema: &serde_json::Value) -> Self {
+        if schema.get("x-kubernetes-int-or-string").and_then(|v| v.as_bool()) == Some(true) {
+            return SchemaFormat::IntOrString;
+        }
         match schema.get("format").and_then(|f| f.as_str()) {
             Some("date-time") => SchemaFormat::DateTime,
             Some("duration") => SchemaFormat::Duration,
@@ -181,6 +188,7 @@ fn convert_string_with_format(s: &str, format: &SchemaFormat) -> Value {
             }
             Value::String(Arc::new(s.to_string()))
         }
+        SchemaFormat::IntOrString => Value::String(Arc::new(s.to_string())),
         SchemaFormat::None => Value::String(Arc::new(s.to_string())),
     }
 }
@@ -585,5 +593,32 @@ mod tests {
         let value = json!("2024-01-01T00:00:00Z");
         let result = json_to_cel(&value);
         assert_eq!(result, Value::String(Arc::new("2024-01-01T00:00:00Z".into())));
+    }
+
+    #[test]
+    fn int_or_string_schema_format_detected() {
+        let schema = json!({"x-kubernetes-int-or-string": true});
+        assert_eq!(SchemaFormat::from_schema(&schema), SchemaFormat::IntOrString);
+    }
+
+    #[test]
+    fn int_or_string_int_value_preserved() {
+        let schema = json!({"x-kubernetes-int-or-string": true});
+        let result = json_to_cel_with_schema(&json!(8080), &schema);
+        assert_eq!(result, Value::Int(8080));
+    }
+
+    #[test]
+    fn int_or_string_string_value_preserved() {
+        let schema = json!({"x-kubernetes-int-or-string": true});
+        let result = json_to_cel_with_schema(&json!("http"), &schema);
+        assert_eq!(result, Value::String(Arc::new("http".into())));
+    }
+
+    #[test]
+    fn int_or_string_overrides_format() {
+        // Even with format: date-time, int-or-string takes precedence
+        let schema = json!({"x-kubernetes-int-or-string": true, "format": "date-time"});
+        assert_eq!(SchemaFormat::from_schema(&schema), SchemaFormat::IntOrString);
     }
 }
