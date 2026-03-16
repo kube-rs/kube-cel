@@ -18,7 +18,7 @@ pub enum ScopeContext {
 }
 
 /// A warning produced by static analysis.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnalysisWarning {
     pub rule: String,
     pub message: String,
