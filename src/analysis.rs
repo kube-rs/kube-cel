@@ -113,6 +113,56 @@ pub fn estimate_rule_cost(rule: &str, schema: &CompiledSchema) -> Vec<AnalysisWa
     warnings
 }
 
+/// Run all available static analyses on a CEL rule in a single pass.
+///
+/// Compiles the rule once and performs both scope validation and cost estimation.
+/// More efficient than calling [`check_rule_scope`] and [`estimate_rule_cost`] separately.
+#[must_use]
+pub fn analyze_rule(
+    rule: &str,
+    schema: &CompiledSchema,
+    scope: ScopeContext,
+) -> Vec<AnalysisWarning> {
+    let program = match Program::compile(rule) {
+        Ok(p) => p,
+        Err(_) => return vec![],
+    };
+
+    let mut warnings = Vec::new();
+
+    // Scope validation
+    let valid = valid_variables(scope);
+    for var in program.references().variables() {
+        if !valid.contains(&var) {
+            warnings.push(AnalysisWarning {
+                rule: rule.to_string(),
+                message: format!(
+                    "variable '{}' is not available in {:?} context; valid variables: {:?}",
+                    var, scope, valid
+                ),
+                kind: WarningKind::WrongScope,
+            });
+        }
+    }
+
+    // Cost estimation
+    let expr = program.expression();
+    let cost = estimate_expr_cost(&expr.expr, schema);
+    if cost > K8S_COST_BUDGET {
+        warnings.push(AnalysisWarning {
+            rule: rule.to_string(),
+            message: format!(
+                "estimated cost {} exceeds K8s budget {}; consider adding maxItems/maxLength to schema bounds",
+                cost, K8S_COST_BUDGET
+            ),
+            kind: WarningKind::CostExceeded,
+        });
+    }
+    check_missing_bounds(&expr.expr, schema, rule, &mut warnings);
+
+    warnings
+}
+
 fn estimate_expr_cost(expr: &Expr, schema: &CompiledSchema) -> u64 {
     match expr {
         Expr::Comprehension(comp) => {
@@ -301,6 +351,34 @@ mod tests {
         let compiled = compile_schema(&schema);
         let warnings = estimate_rule_cost("self.x >= 0", &compiled);
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn analyze_rule_catches_scope_issue() {
+        let schema = json!({"type": "object", "properties": {"x": {"type": "integer"}}});
+        let compiled = compile_schema(&schema);
+        let warnings = analyze_rule("request.name == 'test'", &compiled, ScopeContext::CrdValidation);
+        assert!(warnings.iter().any(|w| w.kind == WarningKind::WrongScope));
+    }
+
+    #[test]
+    fn analyze_rule_catches_cost_and_bounds() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "items": {"type": "array", "items": {"type": "string"}}
+            }
+        });
+        let compiled = compile_schema(&schema);
+        let warnings = analyze_rule(
+            "self.items.all(item, item.size() > 0)",
+            &compiled,
+            ScopeContext::CrdValidation,
+        );
+        // `self` should not be flagged as a scope violation
+        assert!(!warnings.iter().any(|w| w.kind == WarningKind::WrongScope && w.message.contains("'self'")));
+        // Missing maxItems bound should be reported
+        assert!(warnings.iter().any(|w| w.kind == WarningKind::MissingBounds));
     }
 
     #[test]
