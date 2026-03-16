@@ -130,6 +130,7 @@ impl Validator {
             &mut errors,
             &self.base_ctx,
             root_ctx,
+            0,
         );
         errors
     }
@@ -169,6 +170,7 @@ impl Validator {
             &mut errors,
             &self.base_ctx,
             root_ctx,
+            0,
         );
         errors
     }
@@ -216,7 +218,12 @@ impl Validator {
         errors: &mut Vec<ValidationError>,
         base_ctx: &Context<'_>,
         root_ctx: Option<&RootContext>,
+        depth: usize,
     ) {
+        if depth > 64 {
+            return;
+        }
+
         let cel_value = json_to_cel_with_schema(value, schema);
         let cel_old = old_value.map(|o| json_to_cel_with_schema(o, schema));
         self.evaluate_validations(
@@ -245,6 +252,7 @@ impl Validator {
                         errors,
                         base_ctx,
                         None,
+                        depth + 1,
                     );
                 }
             }
@@ -254,7 +262,16 @@ impl Validator {
             for (i, item) in arr.iter().enumerate() {
                 let old_item = old_value.and_then(|o| o.as_array()).and_then(|a| a.get(i));
                 let item_path = join_path_index(&path, i);
-                self.walk_schema(items_schema, item, old_item, item_path, errors, base_ctx, None);
+                self.walk_schema(
+                    items_schema,
+                    item,
+                    old_item,
+                    item_path,
+                    errors,
+                    base_ctx,
+                    None,
+                    depth + 1,
+                );
             }
         }
 
@@ -289,6 +306,7 @@ impl Validator {
                     errors,
                     base_ctx,
                     None,
+                    depth + 1,
                 );
             }
         }
@@ -297,7 +315,16 @@ impl Validator {
         for keyword in &["allOf", "oneOf", "anyOf"] {
             if let Some(branches) = schema.get(keyword).and_then(|v| v.as_array()) {
                 for branch in branches {
-                    self.walk_schema(branch, value, old_value, path.clone(), errors, base_ctx, root_ctx);
+                    self.walk_schema(
+                        branch,
+                        value,
+                        old_value,
+                        path.clone(),
+                        errors,
+                        base_ctx,
+                        root_ctx,
+                        depth + 1,
+                    );
                 }
             }
         }
@@ -330,7 +357,12 @@ impl Validator {
         errors: &mut Vec<ValidationError>,
         base_ctx: &Context<'_>,
         root_ctx: Option<&RootContext>,
+        depth: usize,
     ) {
+        if depth > 64 {
+            return;
+        }
+
         let cel_value = json_to_cel_with_compiled(value, compiled);
         let cel_old = old_value.map(|o| json_to_cel_with_compiled(o, compiled));
         self.evaluate_compiled_results(
@@ -356,6 +388,7 @@ impl Validator {
                         errors,
                         base_ctx,
                         None,
+                        depth + 1,
                     );
                 }
             }
@@ -365,7 +398,16 @@ impl Validator {
             for (i, item) in arr.iter().enumerate() {
                 let old_item = old_value.and_then(|o| o.as_array()).and_then(|a| a.get(i));
                 let item_path = join_path_index(&path, i);
-                self.walk_compiled(items_compiled, item, old_item, item_path, errors, base_ctx, None);
+                self.walk_compiled(
+                    items_compiled,
+                    item,
+                    old_item,
+                    item_path,
+                    errors,
+                    base_ctx,
+                    None,
+                    depth + 1,
+                );
             }
         }
 
@@ -387,6 +429,7 @@ impl Validator {
                     errors,
                     base_ctx,
                     None,
+                    depth + 1,
                 );
             }
         }
@@ -397,7 +440,16 @@ impl Validator {
             .chain(compiled.one_of.iter())
             .chain(compiled.any_of.iter())
         {
-            self.walk_compiled(branch, value, old_value, path.clone(), errors, base_ctx, root_ctx);
+            self.walk_compiled(
+                branch,
+                value,
+                old_value,
+                path.clone(),
+                errors,
+                base_ctx,
+                root_ctx,
+                depth + 1,
+            );
         }
     }
 
@@ -549,6 +601,10 @@ impl Default for Validator {
     }
 }
 
+thread_local! {
+    static THREAD_VALIDATOR: Validator = Validator::new();
+}
+
 /// Convenience function to validate without creating a [`Validator`] instance.
 ///
 /// Uses a thread-local [`Validator`] to avoid re-registering CEL functions on each call.
@@ -560,10 +616,7 @@ pub fn validate(
     object: &serde_json::Value,
     old_object: Option<&serde_json::Value>,
 ) -> Vec<ValidationError> {
-    thread_local! {
-        static VALIDATOR: Validator = Validator::new();
-    }
-    VALIDATOR.with(|v| v.validate(schema, object, old_object))
+    THREAD_VALIDATOR.with(|v| v.validate(schema, object, old_object))
 }
 
 /// Convenience function to validate using a pre-compiled schema.
@@ -577,10 +630,7 @@ pub fn validate_compiled(
     object: &serde_json::Value,
     old_object: Option<&serde_json::Value>,
 ) -> Vec<ValidationError> {
-    thread_local! {
-        static VALIDATOR: Validator = Validator::new();
-    }
-    VALIDATOR.with(|v| v.validate_compiled(compiled, object, old_object))
+    THREAD_VALIDATOR.with(|v| v.validate_compiled(compiled, object, old_object))
 }
 
 // ── Path helpers ────────────────────────────────────────────────────

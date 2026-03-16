@@ -87,7 +87,7 @@ fn convert_number(n: &serde_json::Number) -> Value {
     } else if let Some(u) = n.as_u64() {
         Value::UInt(u)
     } else {
-        Value::Float(n.as_f64().unwrap())
+        Value::Float(n.as_f64().unwrap_or(f64::NAN))
     }
 }
 

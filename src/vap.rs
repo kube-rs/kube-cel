@@ -36,7 +36,7 @@ use cel::{
 use crate::values::json_to_cel;
 
 /// Group/Version/Kind identifier.
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GroupVersionKind {
     pub group: String,
     pub version: String,
@@ -44,7 +44,7 @@ pub struct GroupVersionKind {
 }
 
 /// Group/Version/Resource identifier.
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GroupVersionResource {
     pub group: String,
     pub version: String,
@@ -55,7 +55,7 @@ pub struct GroupVersionResource {
 ///
 /// Mirrors the `request` variable available in Kubernetes ValidatingAdmissionPolicy
 /// CEL expressions.
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdmissionRequest {
     /// The admission operation: `"CREATE"`, `"UPDATE"`, `"DELETE"`, or `"CONNECT"`.
@@ -79,7 +79,7 @@ pub struct AdmissionRequest {
 }
 
 /// A single CEL validation expression from a ValidatingAdmissionPolicy.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VapExpression {
     /// The CEL expression to evaluate. Must evaluate to a boolean.
@@ -92,7 +92,7 @@ pub struct VapExpression {
 }
 
 /// The result of evaluating a single [`VapExpression`].
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct VapResult {
     /// The original CEL expression.
     pub expression: String,

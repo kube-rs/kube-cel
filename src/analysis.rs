@@ -17,14 +17,14 @@ pub enum ScopeContext {
 }
 
 /// A warning produced by static analysis.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct AnalysisWarning {
     pub rule: String,
     pub message: String,
     pub kind: WarningKind,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum WarningKind {
     /// Variable not available in the given scope.
     WrongScope,

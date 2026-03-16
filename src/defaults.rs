@@ -13,6 +13,18 @@
 /// This is a recursive pre-processing pass. It does not modify the input.
 #[must_use]
 pub fn apply_defaults(schema: &serde_json::Value, value: &serde_json::Value) -> serde_json::Value {
+    apply_defaults_inner(schema, value, 0)
+}
+
+fn apply_defaults_inner(
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
+    depth: usize,
+) -> serde_json::Value {
+    if depth > 64 {
+        return value.clone();
+    }
+
     match value {
         serde_json::Value::Object(obj) => {
             let props = match schema.get("properties").and_then(|p| p.as_object()) {
@@ -34,7 +46,7 @@ pub fn apply_defaults(schema: &serde_json::Value, value: &serde_json::Value) -> 
             for (key, prop_schema) in props {
                 match result.get(key) {
                     Some(child) => {
-                        let defaulted = apply_defaults(prop_schema, child);
+                        let defaulted = apply_defaults_inner(prop_schema, child, depth + 1);
                         result.insert(key.clone(), defaulted);
                     }
                     None => {
@@ -50,7 +62,7 @@ pub fn apply_defaults(schema: &serde_json::Value, value: &serde_json::Value) -> 
             if let Some(items_schema) = schema.get("items") {
                 let items: Vec<_> = arr
                     .iter()
-                    .map(|item| apply_defaults(items_schema, item))
+                    .map(|item| apply_defaults_inner(items_schema, item, depth + 1))
                     .collect();
                 serde_json::Value::Array(items)
             } else {

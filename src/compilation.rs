@@ -86,7 +86,7 @@ impl std::error::Error for CompilationError {
 /// Compile a single [`Rule`] into a [`CompilationResult`].
 ///
 /// Returns [`CompilationError::Parse`] if the CEL expression is invalid.
-pub(crate) fn compile_rule(rule: &Rule) -> Result<CompilationResult, CompilationError> {
+pub fn compile_rule(rule: &Rule) -> Result<CompilationResult, CompilationError> {
     let program = Program::compile(&rule.rule).map_err(|e| CompilationError::Parse {
         rule: rule.rule.clone(),
         source: e,
@@ -112,7 +112,7 @@ pub(crate) fn compile_rule(rule: &Rule) -> Result<CompilationResult, Compilation
 /// If the schema has no `x-kubernetes-validations` key or it is not an array,
 /// returns an empty `Vec`. Each rule is compiled independently — failures in one
 /// rule do not prevent others from compiling.
-pub(crate) fn compile_schema_validations(
+pub fn compile_schema_validations(
     schema: &serde_json::Value,
 ) -> Vec<Result<CompilationResult, CompilationError>> {
     let rules = match schema.get("x-kubernetes-validations") {
@@ -183,11 +183,14 @@ impl CompiledSchema {
     }
 }
 
-fn compile_schema_array(schema: &serde_json::Value, key: &str) -> Vec<CompiledSchema> {
+/// Maximum schema nesting depth to prevent unbounded recursion.
+const MAX_SCHEMA_DEPTH: usize = 64;
+
+fn compile_schema_array(schema: &serde_json::Value, key: &str, depth: usize) -> Vec<CompiledSchema> {
     schema
         .get(key)
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().map(compile_schema).collect())
+        .map(|arr| arr.iter().map(|s| compile_schema_inner(s, depth)).collect())
         .unwrap_or_default()
 }
 
@@ -197,27 +200,51 @@ fn compile_schema_array(schema: &serde_json::Value, key: &str) -> Vec<CompiledSc
 /// calls, avoiding repeated compilation.
 #[must_use]
 pub fn compile_schema(schema: &serde_json::Value) -> CompiledSchema {
+    compile_schema_inner(schema, 0)
+}
+
+fn compile_schema_inner(schema: &serde_json::Value, depth: usize) -> CompiledSchema {
+    if depth > MAX_SCHEMA_DEPTH {
+        return CompiledSchema {
+            validations: Vec::new(),
+            properties: HashMap::new(),
+            items: None,
+            additional_properties: None,
+            format: SchemaFormat::None,
+            all_of: Vec::new(),
+            one_of: Vec::new(),
+            any_of: Vec::new(),
+            max_length: None,
+            max_items: None,
+            max_properties: None,
+            preserve_unknown_fields: false,
+            embedded_resource: false,
+        };
+    }
+
     let validations = compile_schema_validations(schema);
 
     let mut properties = HashMap::new();
     if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
         for (name, prop_schema) in props {
-            properties.insert(name.clone(), compile_schema(prop_schema));
+            properties.insert(name.clone(), compile_schema_inner(prop_schema, depth + 1));
         }
     }
 
-    let items = schema.get("items").map(|s| Box::new(compile_schema(s)));
+    let items = schema
+        .get("items")
+        .map(|s| Box::new(compile_schema_inner(s, depth + 1)));
 
     let additional_properties = schema
         .get("additionalProperties")
         .filter(|a| a.is_object())
-        .map(|s| Box::new(compile_schema(s)));
+        .map(|s| Box::new(compile_schema_inner(s, depth + 1)));
 
     let format = SchemaFormat::from_schema(schema);
 
-    let all_of = compile_schema_array(schema, "allOf");
-    let one_of = compile_schema_array(schema, "oneOf");
-    let any_of = compile_schema_array(schema, "anyOf");
+    let all_of = compile_schema_array(schema, "allOf", depth + 1);
+    let one_of = compile_schema_array(schema, "oneOf", depth + 1);
+    let any_of = compile_schema_array(schema, "anyOf", depth + 1);
 
     let max_length = schema.get("maxLength").and_then(|v| v.as_u64());
     let max_items = schema.get("maxItems").and_then(|v| v.as_u64());
