@@ -92,7 +92,7 @@ pub struct VapExpression {
 }
 
 /// The result of evaluating a single [`VapExpression`].
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct VapResult {
     /// The original CEL expression.
     pub expression: String,

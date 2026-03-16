@@ -25,7 +25,7 @@ pub struct RootContext {
 }
 
 /// The kind of error that occurred during validation.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum ErrorKind {
     /// CEL expression syntax error.
     CompilationFailure,
@@ -40,7 +40,7 @@ pub enum ErrorKind {
 }
 
 /// An error produced when a CEL validation rule fails.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct ValidationError {
     /// The CEL expression that failed.
     pub rule: String,
@@ -1393,5 +1393,20 @@ mod tests {
             &schema, &json!({}), None, Some(&root_ctx)
         );
         assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validation_error_serializable() {
+        let err = ValidationError {
+            rule: "self.x >= 0".into(),
+            message: "must be non-negative".into(),
+            field_path: "spec.x".into(),
+            reason: Some("FieldValueInvalid".into()),
+            kind: ErrorKind::ValidationFailure,
+        };
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["rule"], "self.x >= 0");
+        assert_eq!(json["field_path"], "spec.x");
+        assert_eq!(json["kind"], "ValidationFailure");
     }
 }
