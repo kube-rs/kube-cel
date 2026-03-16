@@ -80,6 +80,8 @@
 
 #[cfg(feature = "validation")] pub mod analysis;
 
+#[cfg(feature = "validation")] pub mod vap;
+
 mod dispatch;
 mod value_ops;
 
