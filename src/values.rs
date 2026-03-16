@@ -80,6 +80,7 @@ pub fn json_to_cel(value: &serde_json::Value) -> Value {
     }
 }
 
+#[inline]
 fn convert_number(n: &serde_json::Number) -> Value {
     if let Some(i) = n.as_i64() {
         Value::Int(i)
@@ -207,6 +208,7 @@ pub fn json_to_cel_with_compiled(value: &serde_json::Value, compiled: &CompiledS
 }
 
 /// Convert a string using the schema format hint.
+#[inline]
 fn convert_string_with_format(s: &str, format: &SchemaFormat) -> Value {
     match format {
         SchemaFormat::DateTime => {

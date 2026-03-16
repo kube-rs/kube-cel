@@ -569,6 +569,7 @@ pub fn validate_compiled(
 
 // ── Path helpers ────────────────────────────────────────────────────
 
+#[inline]
 fn effective_path(base_path: &str, rule_field_path: Option<&str>) -> String {
     match rule_field_path {
         Some(fp) if fp.starts_with('.') => format!("{base_path}{fp}"),
@@ -578,6 +579,7 @@ fn effective_path(base_path: &str, rule_field_path: Option<&str>) -> String {
     }
 }
 
+#[inline]
 fn join_path(base: &str, segment: &str) -> String {
     if base.is_empty() {
         segment.to_string()
@@ -586,6 +588,7 @@ fn join_path(base: &str, segment: &str) -> String {
     }
 }
 
+#[inline]
 fn join_path_index(base: &str, index: usize) -> String {
     if base.is_empty() {
         format!("[{index}]")
