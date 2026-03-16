@@ -102,6 +102,17 @@ pub struct VapResult {
     pub message: Option<String>,
 }
 
+/// A pre-compiled VAP expression for repeated evaluation.
+///
+/// Created by [`VapEvaluator::compile_expressions`]. Since [`cel::Program`] is
+/// `!Clone`, wrap in [`Arc`] for shared ownership if needed.
+pub struct CompiledVapExpression {
+    program: Program,
+    expression: String,
+    message: Option<String>,
+    message_program: Option<Program>,
+}
+
 /// Client-side evaluator for Kubernetes ValidatingAdmissionPolicy CEL expressions.
 ///
 /// Binds `object`, `oldObject`, `request`, and optionally `params` and
@@ -179,13 +190,8 @@ impl VapEvaluator {
         VapEvaluatorBuilder::default()
     }
 
-    /// Evaluate a slice of [`VapExpression`]s against the bound context.
-    ///
-    /// Returns one [`VapResult`] per expression in the same order.
-    /// Expressions that fail to compile or execute are treated as failures
-    /// with a descriptive error message.
-    #[must_use]
-    pub fn evaluate(&self, expressions: &[VapExpression]) -> Vec<VapResult> {
+    /// Build a CEL [`Context`] with all VAP variables bound.
+    fn build_context(&self) -> Context<'static> {
         let mut ctx = Context::default();
         crate::register_all(&mut ctx);
 
@@ -212,78 +218,105 @@ impl VapEvaluator {
             let _ = ctx.add_variable("namespaceObject", json_to_cel(ns));
         }
 
-        expressions.iter().map(|expr| self.eval_one(expr, &ctx)).collect()
+        ctx
     }
 
-    fn eval_one(&self, expr: &VapExpression, ctx: &Context<'_>) -> VapResult {
-        // Compile
-        let program = match Program::compile(&expr.expression) {
-            Ok(p) => p,
-            Err(e) => {
-                return VapResult {
+    /// Pre-compile validation expressions for repeated evaluation.
+    ///
+    /// Returns one entry per input expression. Failed compilations are
+    /// represented as `Err(String)` containing the error message.
+    #[must_use]
+    pub fn compile_expressions(
+        &self,
+        expressions: &[VapExpression],
+    ) -> Vec<Result<CompiledVapExpression, String>> {
+        expressions
+            .iter()
+            .map(|expr| {
+                let program = Program::compile(&expr.expression)
+                    .map_err(|e| format!("compilation error: {e}"))?;
+                let message_program = expr
+                    .message_expression
+                    .as_deref()
+                    .and_then(|me| Program::compile(me).ok());
+                Ok(CompiledVapExpression {
+                    program,
                     expression: expr.expression.clone(),
-                    passed: false,
-                    message: Some(format!("compilation error: {e}")),
-                };
-            }
-        };
-
-        // Execute
-        let value = match program.execute(ctx) {
-            Ok(v) => v,
-            Err(e) => {
-                return VapResult {
-                    expression: expr.expression.clone(),
-                    passed: false,
-                    message: Some(format!("evaluation error: {e}")),
-                };
-            }
-        };
-
-        // Interpret result
-        match value {
-            Value::Bool(true) => VapResult {
-                expression: expr.expression.clone(),
-                passed: true,
-                message: None,
-            },
-            Value::Bool(false) => {
-                let message = self.resolve_message(expr, ctx);
-                VapResult {
-                    expression: expr.expression.clone(),
-                    passed: false,
-                    message,
-                }
-            }
-            other => VapResult {
-                expression: expr.expression.clone(),
-                passed: false,
-                message: Some(format!("expression returned non-boolean: {other:?}")),
-            },
-        }
+                    message: expr.message.clone(),
+                    message_program,
+                })
+            })
+            .collect()
     }
 
-    /// Resolve the error message for a failing expression.
-    /// Tries `messageExpression` first, then falls back to static `message`.
-    fn resolve_message(&self, expr: &VapExpression, ctx: &Context<'_>) -> Option<String> {
-        // Try messageExpression
-        if let Some(msg_expr) = &expr.message_expression
-            && let Ok(program) = Program::compile(msg_expr)
-            && let Ok(Value::String(s)) = program.execute(ctx)
-        {
-            return Some((*s).clone());
-        }
+    /// Evaluate pre-compiled expressions against the bound context.
+    ///
+    /// The context is built once and all compiled expressions are executed
+    /// against it. Expressions that failed compilation (represented as
+    /// `Err`) are returned as failed [`VapResult`]s.
+    #[must_use]
+    pub fn evaluate_compiled(
+        &self,
+        compiled: &[Result<CompiledVapExpression, String>],
+    ) -> Vec<VapResult> {
+        let ctx = self.build_context();
 
-        // Fall back to static message
-        if let Some(msg) = &expr.message {
-            return Some(msg.clone());
-        }
+        compiled
+            .iter()
+            .map(|c| match c {
+                Ok(ce) => match ce.program.execute(&ctx) {
+                    Ok(Value::Bool(true)) => VapResult {
+                        expression: ce.expression.clone(),
+                        passed: true,
+                        message: None,
+                    },
+                    Ok(Value::Bool(false)) => {
+                        let msg = ce
+                            .message_program
+                            .as_ref()
+                            .and_then(|prog| match prog.execute(&ctx) {
+                                Ok(Value::String(s)) => Some((*s).clone()),
+                                _ => None,
+                            })
+                            .or_else(|| ce.message.clone())
+                            .unwrap_or_else(|| {
+                                format!("validation expression '{}' evaluated to false", ce.expression)
+                            });
+                        VapResult {
+                            expression: ce.expression.clone(),
+                            passed: false,
+                            message: Some(msg),
+                        }
+                    }
+                    Ok(other) => VapResult {
+                        expression: ce.expression.clone(),
+                        passed: false,
+                        message: Some(format!("expression returned non-boolean: {other:?}")),
+                    },
+                    Err(e) => VapResult {
+                        expression: ce.expression.clone(),
+                        passed: false,
+                        message: Some(format!("evaluation error: {e}")),
+                    },
+                },
+                Err(e) => VapResult {
+                    expression: String::new(),
+                    passed: false,
+                    message: Some(e.clone()),
+                },
+            })
+            .collect()
+    }
 
-        // Default
-        Some(format!(
-            "validation expression '{}' evaluated to false",
-            expr.expression
-        ))
+    /// Evaluate a slice of [`VapExpression`]s against the bound context.
+    ///
+    /// Returns one [`VapResult`] per expression in the same order.
+    /// Expressions that fail to compile or execute are treated as failures
+    /// with a descriptive error message.
+    #[must_use]
+    pub fn evaluate(&self, expressions: &[VapExpression]) -> Vec<VapResult> {
+        let compiled = self.compile_expressions(expressions);
+        self.evaluate_compiled(&compiled)
     }
 }
 
@@ -497,6 +530,52 @@ mod tests {
         }]);
         assert!(!results[0].passed);
         assert_eq!(results[0].message.as_deref(), Some("replicas is -1"));
+    }
+
+    #[test]
+    fn vap_compiled_expressions_reusable() {
+        let evaluator = VapEvaluator::builder()
+            .object(json!({"spec": {"replicas": 3}}))
+            .request(AdmissionRequest {
+                operation: "CREATE".into(),
+                ..Default::default()
+            })
+            .build();
+
+        let expressions = vec![VapExpression {
+            expression: "object.spec.replicas >= 0".into(),
+            message: Some("bad".into()),
+            message_expression: None,
+        }];
+
+        let compiled = evaluator.compile_expressions(&expressions);
+        assert!(compiled[0].is_ok());
+
+        let r1 = evaluator.evaluate_compiled(&compiled);
+        let r2 = evaluator.evaluate_compiled(&compiled);
+        assert!(r1[0].passed);
+        assert!(r2[0].passed);
+    }
+
+    #[test]
+    fn vap_compiled_error_preserved() {
+        let evaluator = VapEvaluator::builder()
+            .object(json!({}))
+            .request(AdmissionRequest::default())
+            .build();
+
+        let expressions = vec![VapExpression {
+            expression: "invalid >=".into(),
+            message: None,
+            message_expression: None,
+        }];
+
+        let compiled = evaluator.compile_expressions(&expressions);
+        assert!(compiled[0].is_err());
+
+        let results = evaluator.evaluate_compiled(&compiled);
+        assert!(!results[0].passed);
+        assert!(results[0].message.as_ref().unwrap().contains("compilation error"));
     }
 
     #[test]
