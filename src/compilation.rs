@@ -148,6 +148,12 @@ pub struct CompiledSchema {
     pub additional_properties: Option<Box<CompiledSchema>>,
     /// The `format` hint from the schema (e.g., `date-time`, `duration`).
     pub format: SchemaFormat,
+    /// Compiled `allOf` branch schemas.
+    pub all_of: Vec<CompiledSchema>,
+    /// Compiled `oneOf` branch schemas.
+    pub one_of: Vec<CompiledSchema>,
+    /// Compiled `anyOf` branch schemas.
+    pub any_of: Vec<CompiledSchema>,
 }
 
 impl CompiledSchema {
@@ -162,6 +168,14 @@ impl CompiledSchema {
     pub fn has_errors(&self) -> bool {
         self.validations.iter().any(|r| r.is_err())
     }
+}
+
+fn compile_schema_array(schema: &serde_json::Value, key: &str) -> Vec<CompiledSchema> {
+    schema
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().map(compile_schema).collect())
+        .unwrap_or_default()
 }
 
 /// Recursively compile all `x-kubernetes-validations` rules in a schema tree.
@@ -188,12 +202,19 @@ pub fn compile_schema(schema: &serde_json::Value) -> CompiledSchema {
 
     let format = SchemaFormat::from_schema(schema);
 
+    let all_of = compile_schema_array(schema, "allOf");
+    let one_of = compile_schema_array(schema, "oneOf");
+    let any_of = compile_schema_array(schema, "anyOf");
+
     CompiledSchema {
         validations,
         properties,
         items,
         additional_properties,
         format,
+        all_of,
+        one_of,
+        any_of,
     }
 }
 

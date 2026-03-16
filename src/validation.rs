@@ -172,6 +172,15 @@ impl Validator {
                 self.walk_schema(additional_schema, val, old_val, child_path, errors, base_ctx);
             }
         }
+
+        // Walk allOf/oneOf/anyOf branches — all treated identically for CEL evaluation
+        for keyword in &["allOf", "oneOf", "anyOf"] {
+            if let Some(branches) = schema.get(keyword).and_then(|v| v.as_array()) {
+                for branch in branches {
+                    self.walk_schema(branch, value, old_value, path.clone(), errors, base_ctx);
+                }
+            }
+        }
     }
 
     fn evaluate_validations(
@@ -243,6 +252,10 @@ impl Validator {
                 let child_path = join_path(&path, key);
                 self.walk_compiled(additional_compiled, val, old_val, child_path, errors, base_ctx);
             }
+        }
+
+        for branch in compiled.all_of.iter().chain(compiled.one_of.iter()).chain(compiled.any_of.iter()) {
+            self.walk_compiled(branch, value, old_value, path.clone(), errors, base_ctx);
         }
     }
 
@@ -912,5 +925,88 @@ mod tests {
         let errors = validate(&schema, &obj, None);
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].kind, ErrorKind::EvaluationError);
+    }
+
+    // ── allOf/oneOf/anyOf tests ──────────────────────────────────────
+
+    #[test]
+    fn all_of_validations_evaluated() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "x": {"type": "integer"},
+                "y": {"type": "integer"}
+            },
+            "allOf": [
+                {
+                    "x-kubernetes-validations": [
+                        {"rule": "self.x >= 0", "message": "x must be non-negative"}
+                    ]
+                },
+                {
+                    "x-kubernetes-validations": [
+                        {"rule": "self.y >= 0", "message": "y must be non-negative"}
+                    ]
+                }
+            ]
+        });
+        let obj = json!({"x": -1, "y": -1});
+        let errors = validate(&schema, &obj, None);
+        assert_eq!(errors.len(), 2);
+    }
+
+    #[test]
+    fn one_of_validations_evaluated() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"x": {"type": "integer"}},
+            "oneOf": [{
+                "x-kubernetes-validations": [
+                    {"rule": "self.x != 0", "message": "x must not be zero"}
+                ]
+            }]
+        });
+        let obj = json!({"x": 0});
+        let errors = validate(&schema, &obj, None);
+        assert_eq!(errors.len(), 1);
+    }
+
+    #[test]
+    fn nested_all_of_properties_walked() {
+        let schema = json!({
+            "type": "object",
+            "allOf": [{
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "x-kubernetes-validations": [
+                            {"rule": "self.size() > 0", "message": "name required"}
+                        ]
+                    }
+                }
+            }]
+        });
+        let obj = json!({"name": ""});
+        let errors = validate(&schema, &obj, None);
+        assert_eq!(errors.len(), 1);
+    }
+
+    #[test]
+    fn all_of_compiled_matches_schema() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"x": {"type": "integer"}},
+            "allOf": [{
+                "x-kubernetes-validations": [
+                    {"rule": "self.x >= 0", "message": "x must be non-negative"}
+                ]
+            }]
+        });
+        let obj = json!({"x": -1});
+        let errors_schema = validate(&schema, &obj, None);
+        let compiled = compile_schema(&schema);
+        let errors_compiled = validate_compiled(&compiled, &obj, None);
+        assert_eq!(errors_schema.len(), errors_compiled.len());
+        assert_eq!(errors_schema[0].message, errors_compiled[0].message);
     }
 }
