@@ -2,8 +2,10 @@
 //!
 //! Run with: `cargo run --example static_analysis --features validation`
 
-use kube_cel::analysis::{self, ScopeContext};
-use kube_cel::compilation::compile_schema;
+use kube_cel::{
+    analysis::{self, ScopeContext},
+    compilation::compile_schema,
+};
 use serde_json::json;
 
 fn main() {

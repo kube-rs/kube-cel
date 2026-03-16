@@ -52,11 +52,13 @@ fn main() {
             expression: "object.spec.replicas <= params.maxReplicas".into(),
             message: Some("replicas exceeds maximum allowed".into()),
             message_expression: Some(
-                "'replicas ' + string(object.spec.replicas) + ' exceeds max ' + string(params.maxReplicas)".into(),
+                "'replicas ' + string(object.spec.replicas) + ' exceeds max ' + string(params.maxReplicas)"
+                    .into(),
             ),
         },
         VapExpression {
-            expression: "has(object.metadata.labels) && params.requiredLabel in object.metadata.labels".into(),
+            expression: "has(object.metadata.labels) && params.requiredLabel in object.metadata.labels"
+                .into(),
             message: Some("required label missing".into()),
             message_expression: None,
         },
@@ -79,5 +81,9 @@ fn main() {
     }
 
     let failures: Vec<_> = results.iter().filter(|r| !r.passed).collect();
-    println!("\n{} passed, {} failed", results.len() - failures.len(), failures.len());
+    println!(
+        "\n{} passed, {} failed",
+        results.len() - failures.len(),
+        failures.len()
+    );
 }
