@@ -57,3 +57,15 @@ required-features = ["validation"]
 [[example]]
 name = "timestamp_duration"
 required-features = ["validation"]
+
+[[example]]
+name = "vap_evaluation"
+required-features = ["validation"]
+
+[[example]]
+name = "static_analysis"
+required-features = ["validation"]
+
+[[example]]
+name = "defaults_and_context"
+required-features = ["validation"]
