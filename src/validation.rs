@@ -199,23 +199,30 @@ impl Validator {
             }
         }
 
-        if let (Some(additional_schema), Some(obj)) = (
-            schema.get("additionalProperties").filter(|a| a.is_object()),
-            value.as_object(),
-        ) {
-            let known: std::collections::HashSet<&str> = schema
-                .get("properties")
-                .and_then(|p| p.as_object())
-                .map(|p| p.keys().map(|k| k.as_str()).collect())
-                .unwrap_or_default();
+        let preserve_unknown = schema
+            .get("x-kubernetes-preserve-unknown-fields")
+            .and_then(|v| v.as_bool())
+            == Some(true);
 
-            for (key, val) in obj {
-                if known.contains(key.as_str()) {
-                    continue;
+        if !preserve_unknown {
+            if let (Some(additional_schema), Some(obj)) = (
+                schema.get("additionalProperties").filter(|a| a.is_object()),
+                value.as_object(),
+            ) {
+                let known: std::collections::HashSet<&str> = schema
+                    .get("properties")
+                    .and_then(|p| p.as_object())
+                    .map(|p| p.keys().map(|k| k.as_str()).collect())
+                    .unwrap_or_default();
+
+                for (key, val) in obj {
+                    if known.contains(key.as_str()) {
+                        continue;
+                    }
+                    let old_val = old_value.and_then(|o| o.get(key));
+                    let child_path = join_path(&path, key);
+                    self.walk_schema(additional_schema, val, old_val, child_path, errors, base_ctx, None);
                 }
-                let old_val = old_value.and_then(|o| o.get(key));
-                let child_path = join_path(&path, key);
-                self.walk_schema(additional_schema, val, old_val, child_path, errors, base_ctx, None);
             }
         }
 
@@ -293,14 +300,18 @@ impl Validator {
             }
         }
 
-        if let (Some(additional_compiled), Some(obj)) = (&compiled.additional_properties, value.as_object()) {
-            for (key, val) in obj {
-                if compiled.properties.contains_key(key) {
-                    continue;
+        if !compiled.preserve_unknown_fields {
+            if let (Some(additional_compiled), Some(obj)) =
+                (&compiled.additional_properties, value.as_object())
+            {
+                for (key, val) in obj {
+                    if compiled.properties.contains_key(key) {
+                        continue;
+                    }
+                    let old_val = old_value.and_then(|o| o.get(key));
+                    let child_path = join_path(&path, key);
+                    self.walk_compiled(additional_compiled, val, old_val, child_path, errors, base_ctx, None);
                 }
-                let old_val = old_value.and_then(|o| o.get(key));
-                let child_path = join_path(&path, key);
-                self.walk_compiled(additional_compiled, val, old_val, child_path, errors, base_ctx, None);
             }
         }
 
@@ -1076,6 +1087,41 @@ mod tests {
         let errors_compiled = validate_compiled(&compiled, &obj, None);
         assert_eq!(errors_schema.len(), errors_compiled.len());
         assert_eq!(errors_schema[0].message, errors_compiled[0].message);
+    }
+
+    // ── x-kubernetes-preserve-unknown-fields tests ──────────────────
+
+    #[test]
+    fn preserve_unknown_fields_skips_additional_properties_walk() {
+        let schema = json!({
+            "type": "object",
+            "x-kubernetes-preserve-unknown-fields": true,
+            "additionalProperties": {
+                "type": "integer",
+                "x-kubernetes-validations": [
+                    {"rule": "self >= 0", "message": "must be non-negative"}
+                ]
+            }
+        });
+        let obj = json!({"unknown_field": -1});
+        let errors = validate(&schema, &obj, None);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn without_preserve_unknown_fields_additional_properties_still_walked() {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": {
+                "type": "integer",
+                "x-kubernetes-validations": [
+                    {"rule": "self >= 0", "message": "must be non-negative"}
+                ]
+            }
+        });
+        let obj = json!({"unknown_field": -1});
+        let errors = validate(&schema, &obj, None);
+        assert_eq!(errors.len(), 1);
     }
 
     // ── RootContext tests ────────────────────────────────────────────

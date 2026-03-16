@@ -154,6 +154,13 @@ pub struct CompiledSchema {
     pub one_of: Vec<CompiledSchema>,
     /// Compiled `anyOf` branch schemas.
     pub any_of: Vec<CompiledSchema>,
+    /// Whether `x-kubernetes-preserve-unknown-fields: true` is set on this node.
+    /// When true, `additionalProperties` walking is skipped.
+    pub preserve_unknown_fields: bool,
+    /// Whether `x-kubernetes-embedded-resource: true` is set on this node.
+    /// When true, `apiVersion`, `kind`, and `metadata` keys are injected with
+    /// defaults if absent during value conversion.
+    pub embedded_resource: bool,
 }
 
 impl CompiledSchema {
@@ -206,6 +213,16 @@ pub fn compile_schema(schema: &serde_json::Value) -> CompiledSchema {
     let one_of = compile_schema_array(schema, "oneOf");
     let any_of = compile_schema_array(schema, "anyOf");
 
+    let preserve_unknown_fields = schema
+        .get("x-kubernetes-preserve-unknown-fields")
+        .and_then(|v| v.as_bool())
+        == Some(true);
+
+    let embedded_resource = schema
+        .get("x-kubernetes-embedded-resource")
+        .and_then(|v| v.as_bool())
+        == Some(true);
+
     CompiledSchema {
         validations,
         properties,
@@ -215,6 +232,8 @@ pub fn compile_schema(schema: &serde_json::Value) -> CompiledSchema {
         all_of,
         one_of,
         any_of,
+        preserve_unknown_fields,
+        embedded_resource,
     }
 }
 
