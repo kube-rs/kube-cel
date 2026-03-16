@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.5.1] - 2026-03-16
+### Added
+- **Schema composition walking** — `allOf`/`oneOf`/`anyOf` branches are now walked for `x-kubernetes-validations` rules
+- **Root-level variables** — `RootContext` struct for binding `apiVersion`, `apiGroup`, `kind` at the CRD root level
+  - `Validator::validate_with_context()` / `validate_compiled_with_context()`
+- **`x-kubernetes-preserve-unknown-fields`** — `additionalProperties` walking is skipped when this flag is set
+- **`x-kubernetes-embedded-resource`** — `apiVersion`, `kind`, `metadata` fields are injected as defaults for embedded resource nodes
+- **`SchemaFormat::IntOrString`** — `x-kubernetes-int-or-string` annotation is now recognized (prevents `format:` from being misinterpreted)
+- **Default value injection** — `defaults::apply_defaults()` pre-processes objects with schema `default` values
+  - `Validator::validate_with_defaults()` convenience method
+- **Static analysis** (`analysis` module)
+  - `check_rule_scope()` — detect variables not available in the given scope (CRD validation vs admission policy)
+  - `estimate_rule_cost()` — heuristic cost estimation warning when rules may exceed K8s budget (1M cost units)
+  - `ScopeContext::CrdValidation` / `ScopeContext::AdmissionPolicy`
+- **ValidatingAdmissionPolicy evaluator** (`vap` module)
+  - `VapEvaluator` with builder pattern — client-side evaluation of VAP CEL expressions
+  - `AdmissionRequest`, `GroupVersionKind`, `GroupVersionResource` types with serde support
+  - Binds `object`, `oldObject`, `request`, `params`, `namespaceObject` variables
+  - `messageExpression` support with static message fallback
+- **Schema bounds in `CompiledSchema`** — `max_length`, `max_items`, `max_properties` fields for cost estimation
+- `#[non_exhaustive]` on `SchemaFormat` enum (future-proofing)
+
+### Changed
+
+- `AnalysisWarning` now derives `PartialEq, Eq`
+
+
 ## [0.5.0] - 2026-03-13
 
 ### Changed

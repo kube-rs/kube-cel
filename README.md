@@ -14,7 +14,7 @@ Implements the Kubernetes-specific CEL libraries defined in [`k8s.io/apiserver/p
 ```toml
 [dependencies]
 kube-cel = "0.5"
-cel = "0.12"
+cel = "0.13"
 ```
 
 ## Usage
