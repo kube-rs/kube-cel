@@ -106,10 +106,11 @@ pub fn json_to_cel_with_schema(value: &serde_json::Value, schema: &serde_json::V
         serde_json::Value::Number(n) => convert_number(n),
         serde_json::Value::String(s) => convert_string_with_format(s, &format),
         serde_json::Value::Array(arr) => {
+            let items_schema = schema.get("items");
             let items: Vec<Value> = arr
                 .iter()
-                .map(|item| match schema.get("items") {
-                    Some(items_schema) => json_to_cel_with_schema(item, items_schema),
+                .map(|item| match items_schema {
+                    Some(s) => json_to_cel_with_schema(item, s),
                     None => json_to_cel(item),
                 })
                 .collect();
