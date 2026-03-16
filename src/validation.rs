@@ -188,6 +188,22 @@ impl Validator {
         self.validate(schema, &defaulted, defaulted_old.as_ref())
     }
 
+    /// Validate with schema defaults applied and root context variables bound.
+    ///
+    /// Combines [`crate::defaults::apply_defaults`] with [`validate_with_context`].
+    #[must_use]
+    pub fn validate_with_defaults_and_context(
+        &self,
+        schema: &serde_json::Value,
+        object: &serde_json::Value,
+        old_object: Option<&serde_json::Value>,
+        root_ctx: Option<&RootContext>,
+    ) -> Vec<ValidationError> {
+        let defaulted = crate::defaults::apply_defaults(schema, object);
+        let defaulted_old = old_object.map(|o| crate::defaults::apply_defaults(schema, o));
+        self.validate_with_context(schema, &defaulted, defaulted_old.as_ref(), root_ctx)
+    }
+
     // ── Schema-based walking (compiles on each call) ────────────────
 
     #[allow(clippy::too_many_arguments)]
@@ -1347,6 +1363,35 @@ mod tests {
 
         // With defaults, replicas=1 is injected -> validation runs and passes
         let errors = Validator::new().validate_with_defaults(&schema, &json!({}), None);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validate_with_defaults_and_context_combined() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "replicas": {
+                    "type": "integer",
+                    "default": 1,
+                    "x-kubernetes-validations": [
+                        {"rule": "self >= 0", "message": "must be non-negative"}
+                    ]
+                }
+            },
+            "x-kubernetes-validations": [
+                {"rule": "kind == 'Deployment'", "message": "wrong kind"}
+            ]
+        });
+        let root_ctx = RootContext {
+            api_version: "apps/v1".into(),
+            api_group: "apps".into(),
+            kind: "Deployment".into(),
+        };
+        // Empty object: defaults fill replicas=1, root context provides kind
+        let errors = Validator::new().validate_with_defaults_and_context(
+            &schema, &json!({}), None, Some(&root_ctx)
+        );
         assert!(errors.is_empty());
     }
 }
