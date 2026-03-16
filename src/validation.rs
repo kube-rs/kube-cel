@@ -76,16 +76,23 @@ impl std::error::Error for ValidationError {}
 ///
 /// # Thread Safety
 ///
-/// `Validator` is `Send + Sync` and can be shared across threads.
-#[derive(Clone, Debug)]
+/// `Validator` is `Send` and can be moved across threads.
 pub struct Validator {
-    _private: (),
+    base_ctx: Context<'static>,
+}
+
+impl std::fmt::Debug for Validator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Validator").finish()
+    }
 }
 
 impl Validator {
-    /// Create a new `Validator`.
+    /// Create a new `Validator` with all K8s CEL functions pre-registered.
     pub fn new() -> Self {
-        Self { _private: () }
+        let mut ctx = Context::default();
+        crate::register_all(&mut ctx);
+        Self { base_ctx: ctx }
     }
 
     /// Validate an object against a CRD schema's CEL validation rules.
@@ -114,8 +121,6 @@ impl Validator {
         old_object: Option<&serde_json::Value>,
         root_ctx: Option<&RootContext>,
     ) -> Vec<ValidationError> {
-        let mut base_ctx = Context::default();
-        crate::register_all(&mut base_ctx);
         let mut errors = Vec::new();
         self.walk_schema(
             schema,
@@ -123,7 +128,7 @@ impl Validator {
             old_object,
             String::new(),
             &mut errors,
-            &base_ctx,
+            &self.base_ctx,
             root_ctx,
         );
         errors
@@ -155,8 +160,6 @@ impl Validator {
         old_object: Option<&serde_json::Value>,
         root_ctx: Option<&RootContext>,
     ) -> Vec<ValidationError> {
-        let mut base_ctx = Context::default();
-        crate::register_all(&mut base_ctx);
         let mut errors = Vec::new();
         self.walk_compiled(
             compiled,
@@ -164,7 +167,7 @@ impl Validator {
             old_object,
             String::new(),
             &mut errors,
-            &base_ctx,
+            &self.base_ctx,
             root_ctx,
         );
         errors
@@ -532,6 +535,8 @@ impl Default for Validator {
 
 /// Convenience function to validate without creating a [`Validator`] instance.
 ///
+/// Uses a thread-local [`Validator`] to avoid re-registering CEL functions on each call.
+///
 /// See [`Validator::validate`] for details.
 #[must_use]
 pub fn validate(
@@ -539,10 +544,15 @@ pub fn validate(
     object: &serde_json::Value,
     old_object: Option<&serde_json::Value>,
 ) -> Vec<ValidationError> {
-    Validator::new().validate(schema, object, old_object)
+    thread_local! {
+        static VALIDATOR: Validator = Validator::new();
+    }
+    VALIDATOR.with(|v| v.validate(schema, object, old_object))
 }
 
 /// Convenience function to validate using a pre-compiled schema.
+///
+/// Uses a thread-local [`Validator`] to avoid re-registering CEL functions on each call.
 ///
 /// See [`Validator::validate_compiled`] for details.
 #[must_use]
@@ -551,7 +561,10 @@ pub fn validate_compiled(
     object: &serde_json::Value,
     old_object: Option<&serde_json::Value>,
 ) -> Vec<ValidationError> {
-    Validator::new().validate_compiled(compiled, object, old_object)
+    thread_local! {
+        static VALIDATOR: Validator = Validator::new();
+    }
+    VALIDATOR.with(|v| v.validate_compiled(compiled, object, old_object))
 }
 
 // ── Path helpers ────────────────────────────────────────────────────
