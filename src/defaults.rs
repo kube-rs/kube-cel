@@ -21,9 +21,9 @@ pub fn apply_defaults(schema: &serde_json::Value, value: &serde_json::Value) -> 
             };
 
             // Check if any work needs to be done before cloning
-            let has_missing_defaults = props.iter().any(|(key, prop_schema)| {
-                !obj.contains_key(key) && prop_schema.get("default").is_some()
-            });
+            let has_missing_defaults = props
+                .iter()
+                .any(|(key, prop_schema)| !obj.contains_key(key) && prop_schema.get("default").is_some());
             let has_children_to_recurse = props.keys().any(|key| obj.contains_key(key));
 
             if !has_missing_defaults && !has_children_to_recurse {

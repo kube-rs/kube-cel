@@ -233,8 +233,8 @@ impl VapEvaluator {
         expressions
             .iter()
             .map(|expr| {
-                let program = Program::compile(&expr.expression)
-                    .map_err(|e| format!("compilation error: {e}"))?;
+                let program =
+                    Program::compile(&expr.expression).map_err(|e| format!("compilation error: {e}"))?;
                 let message_program = expr
                     .message_expression
                     .as_deref()
@@ -255,10 +255,7 @@ impl VapEvaluator {
     /// against it. Expressions that failed compilation (represented as
     /// `Err`) are returned as failed [`VapResult`]s.
     #[must_use]
-    pub fn evaluate_compiled(
-        &self,
-        compiled: &[Result<CompiledVapExpression, String>],
-    ) -> Vec<VapResult> {
+    pub fn evaluate_compiled(&self, compiled: &[Result<CompiledVapExpression, String>]) -> Vec<VapResult> {
         let ctx = self.build_context();
 
         compiled

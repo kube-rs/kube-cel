@@ -118,11 +118,7 @@ pub fn estimate_rule_cost(rule: &str, schema: &CompiledSchema) -> Vec<AnalysisWa
 /// Compiles the rule once and performs both scope validation and cost estimation.
 /// More efficient than calling [`check_rule_scope`] and [`estimate_rule_cost`] separately.
 #[must_use]
-pub fn analyze_rule(
-    rule: &str,
-    schema: &CompiledSchema,
-    scope: ScopeContext,
-) -> Vec<AnalysisWarning> {
+pub fn analyze_rule(rule: &str, schema: &CompiledSchema, scope: ScopeContext) -> Vec<AnalysisWarning> {
     let program = match Program::compile(rule) {
         Ok(p) => p,
         Err(_) => return vec![],
@@ -376,7 +372,11 @@ mod tests {
             ScopeContext::CrdValidation,
         );
         // `self` should not be flagged as a scope violation
-        assert!(!warnings.iter().any(|w| w.kind == WarningKind::WrongScope && w.message.contains("'self'")));
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.kind == WarningKind::WrongScope && w.message.contains("'self'"))
+        );
         // Missing maxItems bound should be reported
         assert!(warnings.iter().any(|w| w.kind == WarningKind::MissingBounds));
     }
