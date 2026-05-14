@@ -148,4 +148,82 @@ mod tests {
     fn test_equivalent_with_duplicates() {
         assert_eq!(eval("sets.equivalent([1, 1, 2], [2, 2, 1])"), Value::Bool(true));
     }
+
+    // --- Issue #5 reproduction: cel-go parity for numeric coercion & nested lists ---
+    // Mirrors cases from cel-go ext/sets_test.go. All MUST return true to match
+    // cel-go's standard-equality semantics used by traits.Lister.Contains().
+
+    #[test]
+    fn test_equivalent_numeric_coercion_unit() {
+        // clux issue: [1] vs [1u, 1.0] — same numeric value, different types
+        assert_eq!(eval("sets.equivalent([1], [1u, 1.0])"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_equivalent_numeric_coercion_full() {
+        // cel-go sets_test.go: [1, 2, 3] vs [3u, 2.0, 1]
+        assert_eq!(eval("sets.equivalent([1, 2, 3], [3u, 2.0, 1])"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_contains_numeric_coercion() {
+        // cel-go sets_test.go
+        assert_eq!(eval("sets.contains([1, 2], [2u, 2.0])"), Value::Bool(true));
+        assert_eq!(eval("sets.contains([1, 2u], [2, 2.0])"), Value::Bool(true));
+        assert_eq!(eval("sets.contains([1, 2.0, 3u], [1.0, 2u, 3])"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_intersects_numeric_coercion() {
+        // Coercion-only — no element in lhs has an exact-type match in rhs.
+        assert_eq!(eval("sets.intersects([1u], [1.0])"), Value::Bool(true));
+        assert_eq!(eval("sets.intersects([1.0], [1])"), Value::Bool(true));
+        // cel-go ext/sets_test.go cases (also contain a same-type 2 element).
+        assert_eq!(eval("sets.intersects([1, 2], [2u, 2, 2.0])"), Value::Bool(true));
+        assert_eq!(eval("sets.intersects([1, 2], [1u, 2, 2.3])"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_equivalent_nested_list_identity() {
+        // Real defect exposed: any nested-list pair currently compares unequal.
+        assert_eq!(eval("sets.equivalent([['a']], [['a']])"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_equivalent_nested_list_with_numeric_coercion() {
+        // cel-go sets_test.go: [[1.0], [2, 3]] vs [[1], [2, 3.0]]
+        assert_eq!(
+            eval("sets.equivalent([[1.0], [2, 3]], [[1], [2, 3.0]])"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn test_contains_nested_list() {
+        // cel-go sets_test.go: [[1], [2, 3]] contains [[2, 3.0]]
+        assert_eq!(
+            eval("sets.contains([[1], [2, 3]], [[2, 3.0]])"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn test_intersects_nested_list() {
+        // cel-go sets_test.go: [[1], [2, 3]] intersects [[1, 2], [2, 3.0]]
+        assert_eq!(
+            eval("sets.intersects([[1], [2, 3]], [[1, 2], [2, 3.0]])"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn test_equivalent_nested_list_genuinely_different() {
+        // clux's literal example: sets ARE different ({'a',['b']} vs {'b',['a']}).
+        // cel-go also returns false here. Kept as a "right answer for the right
+        // reason" regression after the val_eq fix.
+        assert_eq!(
+            eval("sets.equivalent(['a', ['b']], ['b', ['a']])"),
+            Value::Bool(false)
+        );
+    }
 }

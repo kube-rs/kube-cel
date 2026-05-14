@@ -600,4 +600,61 @@ mod tests {
             Value::String(Arc::new("c".into()))
         );
     }
+
+    // --- Issue #5: cel-go equality parity (val_eq) ---
+
+    #[test]
+    fn test_index_of_cross_numeric() {
+        // Int 2 should match Float 2.0 — cel-go standard equality coerces.
+        assert_eq!(eval("[1, 2.0, 3u].indexOf(2)"), Value::Int(1));
+    }
+
+    #[test]
+    fn test_last_index_of_cross_numeric() {
+        // UInt 1 should match Float 1.0 at index 0 and Int 1 at index 2;
+        // lastIndexOf returns the last match.
+        assert_eq!(eval("[1.0, 2, 1].lastIndexOf(1u)"), Value::Int(2));
+    }
+
+    #[test]
+    fn test_distinct_nested_list() {
+        // Currently keeps all three because val_eq returns false for any
+        // (List, List) pair. After the fix, duplicate inner lists collapse.
+        assert_eq!(
+            eval("[[1], [1], [2]].distinct()"),
+            Value::List(Arc::new(vec![
+                Value::List(Arc::new(vec![Value::Int(1)])),
+                Value::List(Arc::new(vec![Value::Int(2)])),
+            ]))
+        );
+    }
+
+    // --- Issue #5: cel-go ordering parity (val_lt / val_le / compare_values) ---
+
+    #[test]
+    fn test_is_sorted_cross_numeric() {
+        // cel-go's `<=` coerces across Int/UInt/Float.
+        assert_eq!(eval("[1, 2u, 3.0].isSorted()"), Value::Bool(true));
+        assert_eq!(eval("[1.0, 2, 3u].isSorted()"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_min_cross_numeric() {
+        // min([3u, 1, 2.0]) — comparing UInt 3, Int 1, Float 2.0
+        assert_eq!(eval("[3u, 1, 2.0].min()"), Value::Int(1));
+    }
+
+    #[test]
+    fn test_max_cross_numeric() {
+        assert_eq!(eval("[1, 2.0, 3u].max()"), Value::UInt(3));
+    }
+
+    #[test]
+    fn test_sort_cross_numeric() {
+        // Result preserves original element types; order follows numeric value.
+        assert_eq!(
+            eval("[3u, 1, 2.0].sort()"),
+            Value::List(Arc::new(vec![Value::Int(1), Value::Float(2.0), Value::UInt(3),]))
+        );
+    }
 }
