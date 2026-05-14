@@ -1,6 +1,6 @@
 [package]
 name = "kube-cel"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -10,7 +10,7 @@ documentation = "https://docs.rs/kube-cel"
 homepage = "https://kube.rs"
 keywords = ["kubernetes", "cel", "kube", "validation"]
 categories = ["api-bindings"]
-exclude = ["PLAN.md", "justfile"]
+exclude = ["justfile"]
 
 [dependencies]
 cel = "0.13"

@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.5.4] - 2026-05-14
+
+### Fixed
+- `sets.contains` / `sets.equivalent` / `sets.intersects`, `lists.indexOf` / `lastIndexOf` / `distinct` now match cel-go's standard equality: cross-type numeric coercion across `Int`/`UInt`/`Float` (e.g. `sets.equivalent([1, 2, 3], [3u, 2.0, 1])` → `true`) and structural equality for nested `List` / `Map` elements (e.g. `sets.equivalent([['a']], [['a']])` → `true`). Previously every cross-type or nested comparison fell through a catch-all and returned `false`. ([#5](https://github.com/kube-rs/kube-cel/issues/5))
+- `lists.isSorted` / `min` / `max` / `sort` now coerce across `Int`/`UInt`/`Float` instead of erroring on mixed numeric types (e.g. `[1, 2u, 3.0].isSorted()` → `true`).
+
+### Changed
+- Internal `value_ops::{val_eq, val_lt, val_le, compare_values}` helpers now delegate to `cel::Value`'s `PartialEq` / `PartialOrd`. Behavior note: `[NaN, 1.0].isSorted()` previously returned `false`; it now errors (`"cannot compare"`), matching IEEE 754 / cel-go semantics around undefined NaN ordering.
+
+
 ## [0.5.3] - 2026-03-16
 ### Added
 - `Validator::validate_with_defaults_and_context()` — combines schema defaults + root context in one call
