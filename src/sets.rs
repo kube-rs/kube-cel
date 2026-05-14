@@ -162,7 +162,10 @@ mod tests {
     #[test]
     fn test_equivalent_numeric_coercion_full() {
         // cel-go sets_test.go: [1, 2, 3] vs [3u, 2.0, 1]
-        assert_eq!(eval("sets.equivalent([1, 2, 3], [3u, 2.0, 1])"), Value::Bool(true));
+        assert_eq!(
+            eval("sets.equivalent([1, 2, 3], [3u, 2.0, 1])"),
+            Value::Bool(true)
+        );
     }
 
     #[test]
@@ -170,7 +173,10 @@ mod tests {
         // cel-go sets_test.go
         assert_eq!(eval("sets.contains([1, 2], [2u, 2.0])"), Value::Bool(true));
         assert_eq!(eval("sets.contains([1, 2u], [2, 2.0])"), Value::Bool(true));
-        assert_eq!(eval("sets.contains([1, 2.0, 3u], [1.0, 2u, 3])"), Value::Bool(true));
+        assert_eq!(
+            eval("sets.contains([1, 2.0, 3u], [1.0, 2u, 3])"),
+            Value::Bool(true)
+        );
     }
 
     #[test]

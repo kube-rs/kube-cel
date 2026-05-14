@@ -12,9 +12,8 @@ use cel::{ExecutionError, objects::Value};
 use std::cmp::Ordering;
 
 pub(crate) fn compare_values(a: &Value, b: &Value) -> Result<Ordering, ExecutionError> {
-    a.partial_cmp(b).ok_or_else(|| {
-        ExecutionError::function_error("compare", "cannot compare values of different types")
-    })
+    a.partial_cmp(b)
+        .ok_or_else(|| ExecutionError::function_error("compare", "cannot compare values of different types"))
 }
 
 pub(crate) fn val_eq(a: &Value, b: &Value) -> bool {
