@@ -1,6 +1,10 @@
 //! Shared value comparison and arithmetic helpers.
 //!
-//! Used by `lists` and `sets` modules to avoid code duplication.
+//! Equality and ordering delegate to `cel::Value`'s own `PartialEq` and
+//! `PartialOrd`. Those upstream impls provide cross-type numeric coercion
+//! (Int/UInt/Float) and recurse structurally through List/Map, matching
+//! cel-go's standard equality/ordering semantics used by
+//! `traits.Lister.Contains()` and the `==` / `<` operators.
 
 #![allow(dead_code)]
 
@@ -8,46 +12,21 @@ use cel::{ExecutionError, objects::Value};
 use std::cmp::Ordering;
 
 pub(crate) fn compare_values(a: &Value, b: &Value) -> Result<Ordering, ExecutionError> {
-    match (a, b) {
-        (Value::Int(a), Value::Int(b)) => Ok(a.cmp(b)),
-        (Value::UInt(a), Value::UInt(b)) => Ok(a.cmp(b)),
-        (Value::Float(a), Value::Float(b)) => Ok(a.partial_cmp(b).unwrap_or(Ordering::Equal)),
-        (Value::String(a), Value::String(b)) => Ok(a.cmp(b)),
-        (Value::Bool(a), Value::Bool(b)) => Ok(a.cmp(b)),
-        _ => Err(ExecutionError::function_error(
-            "compare",
-            "cannot compare values of different types",
-        )),
-    }
+    a.partial_cmp(b).ok_or_else(|| {
+        ExecutionError::function_error("compare", "cannot compare values of different types")
+    })
 }
 
 pub(crate) fn val_eq(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Int(a), Value::Int(b)) => a == b,
-        (Value::UInt(a), Value::UInt(b)) => a == b,
-        (Value::Float(a), Value::Float(b)) => a == b,
-        (Value::String(a), Value::String(b)) => a == b,
-        (Value::Bool(a), Value::Bool(b)) => a == b,
-        _ => false,
-    }
+    a == b
 }
 
 pub(crate) fn val_lt(a: &Value, b: &Value) -> Result<bool, ExecutionError> {
-    match (a, b) {
-        (Value::Int(a), Value::Int(b)) => Ok(a < b),
-        (Value::UInt(a), Value::UInt(b)) => Ok(a < b),
-        (Value::Float(a), Value::Float(b)) => Ok(a < b),
-        (Value::String(a), Value::String(b)) => Ok(a < b),
-        (Value::Bool(a), Value::Bool(b)) => Ok(!a & b),
-        _ => Err(ExecutionError::function_error(
-            "compare",
-            "cannot compare values of different types",
-        )),
-    }
+    Ok(compare_values(a, b)? == Ordering::Less)
 }
 
 pub(crate) fn val_le(a: &Value, b: &Value) -> Result<bool, ExecutionError> {
-    Ok(val_eq(a, b) || val_lt(a, b)?)
+    Ok(compare_values(a, b)? != Ordering::Greater)
 }
 
 pub(crate) fn val_add(a: &Value, b: &Value) -> Result<Value, ExecutionError> {
