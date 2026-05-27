@@ -54,7 +54,9 @@ pub struct GroupVersionResource {
 /// A request context for VAP evaluation.
 ///
 /// Mirrors the `request` variable available in Kubernetes ValidatingAdmissionPolicy
-/// CEL expressions.
+/// CEL expressions. This is a flat projection for CEL binding, **not** the admission
+/// webhook wire type; if you have a `kube_core::admission::AdmissionRequest<T>`,
+/// convert it via `to_cel_request()`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdmissionRequest {
