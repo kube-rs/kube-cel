@@ -2,10 +2,7 @@
 //!
 //! Run with: `cargo run --example defaults_and_context --features validation`
 
-use kube_cel::{
-    defaults::apply_defaults,
-    validation::{RootContext, Validator},
-};
+use kube_cel::{RootContext, Validator, apply_defaults};
 use serde_json::json;
 
 fn main() {

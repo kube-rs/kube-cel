@@ -2,10 +2,7 @@
 //!
 //! Run with: `cargo run --example static_analysis --features validation`
 
-use kube_cel::{
-    analysis::{self, ScopeContext},
-    compilation::compile_schema,
-};
+use kube_cel::{ScopeContext, analyze_rule, compile_schema};
 use serde_json::json;
 
 fn main() {
@@ -40,7 +37,7 @@ fn main() {
         println!("Rule: {rule}");
 
         // Combined analysis: scope + cost in one compilation
-        let warnings = analysis::analyze_rule(rule, &compiled, ScopeContext::CrdValidation);
+        let warnings = analyze_rule(rule, &compiled, ScopeContext::CrdValidation);
 
         if warnings.is_empty() {
             println!("  OK — no issues found\n");

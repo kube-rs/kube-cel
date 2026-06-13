@@ -5,7 +5,7 @@
 //! # Example
 //!
 //! ```rust
-//! use kube_cel::vap::{AdmissionRequest, VapEvaluator, VapExpression};
+//! use kube_cel::{AdmissionRequest, VapEvaluator, VapExpression};
 //! use serde_json::json;
 //!
 //! let evaluator = VapEvaluator::builder()

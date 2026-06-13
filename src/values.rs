@@ -60,7 +60,7 @@ impl SchemaFormat {
 /// 2. `u64` — if the number fits in an unsigned 64-bit integer (but not `i64`)
 /// 3. `f64` — for all other numeric values (floating-point)
 #[must_use]
-pub fn json_to_cel(value: &serde_json::Value) -> Value {
+pub(crate) fn json_to_cel(value: &serde_json::Value) -> Value {
     match value {
         serde_json::Value::Null => Value::Null,
         serde_json::Value::Bool(b) => Value::Bool(*b),
@@ -99,7 +99,7 @@ fn convert_number(n: &serde_json::Number) -> Value {
 /// the corresponding CEL type (`Timestamp` or `Duration`). On parse failure,
 /// the value falls back to `Value::String`.
 #[must_use]
-pub fn json_to_cel_with_schema(value: &serde_json::Value, schema: &serde_json::Value) -> Value {
+pub(crate) fn json_to_cel_with_schema(value: &serde_json::Value, schema: &serde_json::Value) -> Value {
     let format = SchemaFormat::from_schema(schema);
     match value {
         serde_json::Value::Null => Value::Null,
@@ -160,7 +160,7 @@ pub fn json_to_cel_with_schema(value: &serde_json::Value, schema: &serde_json::V
 /// Behaves like [`json_to_cel_with_schema`] but uses the format metadata stored
 /// in the compiled schema tree instead of parsing the raw JSON schema.
 #[must_use]
-pub fn json_to_cel_with_compiled(value: &serde_json::Value, compiled: &CompiledSchema) -> Value {
+pub(crate) fn json_to_cel_with_compiled(value: &serde_json::Value, compiled: &CompiledSchema) -> Value {
     match value {
         serde_json::Value::Null => Value::Null,
         serde_json::Value::Bool(b) => Value::Bool(*b),
@@ -655,5 +655,164 @@ mod tests {
         // Even with format: date-time, int-or-string takes precedence
         let schema = json!({"x-kubernetes-int-or-string": true, "format": "date-time"});
         assert_eq!(SchemaFormat::from_schema(&schema), SchemaFormat::IntOrString);
+    }
+}
+
+/// End-to-end tests of the internal `json_to_cel` conversion through real CEL
+/// compilation + evaluation. Relocated from `tests/cel_evaluation.rs` when
+/// `json_to_cel` became `pub(crate)` — an integration test can no longer reach
+/// it, so its coverage lives here in-crate.
+#[cfg(test)]
+mod cel_evaluation_tests {
+    use std::sync::Arc;
+
+    use cel::{Context, Program, Value};
+    use serde_json::json;
+
+    use super::json_to_cel;
+    use crate::register_all;
+
+    /// Build a context with kube-cel functions, bind `self` from JSON, compile,
+    /// and return the evaluation result.
+    fn eval_self(json_val: serde_json::Value, expr: &str) -> Value {
+        let mut ctx = Context::default();
+        register_all(&mut ctx);
+        ctx.add_variable_from_value("self", json_to_cel(&json_val));
+        Program::compile(expr).unwrap().execute(&ctx).unwrap()
+    }
+
+    /// Same as `eval_self` but also binds `oldSelf`.
+    fn eval_transition(json_self: serde_json::Value, json_old: serde_json::Value, expr: &str) -> Value {
+        let mut ctx = Context::default();
+        register_all(&mut ctx);
+        ctx.add_variable_from_value("self", json_to_cel(&json_self));
+        ctx.add_variable_from_value("oldSelf", json_to_cel(&json_old));
+        Program::compile(expr).unwrap().execute(&ctx).unwrap()
+    }
+
+    #[test]
+    fn scalar_comparison() {
+        assert_eq!(eval_self(json!(10), "self >= 0"), Value::Bool(true));
+        assert_eq!(eval_self(json!(-1), "self >= 0"), Value::Bool(false));
+    }
+
+    #[test]
+    fn field_access_int() {
+        let obj = json!({"replicas": 3});
+        assert_eq!(eval_self(obj, "self.replicas"), Value::Int(3));
+    }
+
+    #[test]
+    fn field_access_string() {
+        let obj = json!({"name": "my-app"});
+        assert_eq!(
+            eval_self(obj, "self.name"),
+            Value::String(Arc::new("my-app".into()))
+        );
+    }
+
+    #[test]
+    fn nested_field_comparison() {
+        let obj = json!({"spec": {"replicas": 5, "minReplicas": 2}});
+        assert_eq!(
+            eval_self(obj, "self.spec.replicas >= self.spec.minReplicas"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn transition_rule_oldself() {
+        let new = json!({"replicas": 5});
+        let old = json!({"replicas": 3});
+        assert_eq!(
+            eval_transition(new, old, "self.replicas >= oldSelf.replicas"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn transition_rule_downscale_rejected() {
+        let new = json!({"replicas": 1});
+        let old = json!({"replicas": 3});
+        assert_eq!(
+            eval_transition(new, old, "self.replicas >= oldSelf.replicas"),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn detect_oldself_reference() {
+        let prog1 = Program::compile("self.replicas >= oldSelf.replicas").unwrap();
+        assert!(prog1.references().has_variable("oldSelf"));
+        assert!(prog1.references().has_variable("self"));
+
+        let prog2 = Program::compile("self.replicas >= 0").unwrap();
+        assert!(!prog2.references().has_variable("oldSelf"));
+        assert!(prog2.references().has_variable("self"));
+    }
+
+    #[test]
+    #[cfg(feature = "strings")]
+    fn extension_trim_lower_ascii() {
+        let obj = json!({"name": "  Hello World  "});
+        assert_eq!(
+            eval_self(obj, "self.name.trim().lowerAscii()"),
+            Value::String(Arc::new("hello world".into()))
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "lists")]
+    fn extension_is_sorted() {
+        let obj = json!({"items": [1, 2, 3, 4]});
+        assert_eq!(eval_self(obj, "self.items.isSorted()"), Value::Bool(true));
+
+        let obj2 = json!({"items": [3, 1, 2]});
+        assert_eq!(eval_self(obj2, "self.items.isSorted()"), Value::Bool(false));
+    }
+
+    #[test]
+    fn array_indexing() {
+        let obj = json!({"containers": [{"name": "nginx"}, {"name": "sidecar"}]});
+        assert_eq!(
+            eval_self(obj, "self.containers[0].name"),
+            Value::String(Arc::new("nginx".into()))
+        );
+    }
+
+    #[test]
+    fn null_comparison() {
+        let obj = json!({"extra": null});
+        assert_eq!(eval_self(obj, "self.extra == null"), Value::Bool(true));
+    }
+
+    #[test]
+    fn non_null_comparison() {
+        let obj = json!({"extra": "present"});
+        assert_eq!(eval_self(obj, "self.extra == null"), Value::Bool(false));
+    }
+
+    #[test]
+    fn has_macro_present() {
+        let obj = json!({"name": "test"});
+        assert_eq!(eval_self(obj, "has(self.name)"), Value::Bool(true));
+    }
+
+    #[test]
+    fn has_macro_missing() {
+        let obj = json!({"name": "test"});
+        assert_eq!(eval_self(obj, "has(self.missing)"), Value::Bool(false));
+    }
+
+    #[test]
+    fn size_of_list() {
+        let obj = json!({"items": [1, 2, 3]});
+        assert_eq!(eval_self(obj, "size(self.items)"), Value::Int(3));
+    }
+
+    #[test]
+    fn size_of_string() {
+        let obj = json!({"name": "hello"});
+        assert_eq!(eval_self(obj, "size(self.name)"), Value::Int(5));
     }
 }

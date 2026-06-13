@@ -92,8 +92,7 @@ assert_eq!(errors.len(), 1);
 ```
 
 For repeated validation against the same schema, pre-compile with
-[`compile_schema`](compilation::compile_schema) and use
-[`Validator::validate_compiled`](validation::Validator::validate_compiled).
+[`compile_schema`] and use [`Validator::validate_compiled`].
 "#
 )]
 
@@ -128,19 +127,22 @@ pub use cel;
 
 #[cfg(feature = "encoders")] mod encoders;
 
-#[cfg(feature = "validation")] pub mod escaping;
+// The validation pipeline is exposed as a flat set of crate-root re-exports
+// (below), not as public submodules — the internal file layout is not part of
+// the public API. See the "Versioning and stability" docs (Tier 2).
+#[cfg(feature = "validation")] mod escaping;
 
-#[cfg(feature = "validation")] pub mod values;
+#[cfg(feature = "validation")] mod values;
 
-#[cfg(feature = "validation")] pub mod compilation;
+#[cfg(feature = "validation")] mod compilation;
 
-#[cfg(feature = "validation")] pub mod validation;
+#[cfg(feature = "validation")] mod validation;
 
-#[cfg(feature = "validation")] pub mod defaults;
+#[cfg(feature = "validation")] mod defaults;
 
-#[cfg(feature = "validation")] pub mod analysis;
+#[cfg(feature = "validation")] mod analysis;
 
-#[cfg(feature = "validation")] pub mod vap;
+#[cfg(feature = "validation")] mod vap;
 
 mod dispatch;
 mod ext;
@@ -148,10 +150,20 @@ mod value_ops;
 
 pub use ext::KubeCelExt;
 
-#[cfg(feature = "validation")] pub use compilation::CompiledSchema;
-#[cfg(feature = "validation")] pub use validation::{ValidationError, Validator};
-#[cfg(feature = "validation")] pub use values::SchemaFormat;
-#[cfg(feature = "validation")] pub use vap::VapEvaluator;
+#[cfg(feature = "validation")]
+pub use crate::{
+    analysis::{
+        AnalysisWarning, ScopeContext, WarningKind, analyze_rule, check_rule_scope, estimate_rule_cost,
+    },
+    compilation::{CompilationError, CompilationResult, CompiledSchema, Rule, compile_schema},
+    defaults::apply_defaults,
+    validation::{ErrorKind, RootContext, ValidationError, Validator, validate, validate_compiled},
+    values::SchemaFormat,
+    vap::{
+        AdmissionRequest, CompiledVapExpression, GroupVersionKind, GroupVersionResource, VapEvaluator,
+        VapEvaluatorBuilder, VapExpression, VapResult,
+    },
+};
 
 /// Registers all compiled-in Kubernetes CEL extension functions into `ctx`.
 ///

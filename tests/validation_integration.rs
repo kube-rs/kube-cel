@@ -5,7 +5,7 @@
 //! End-to-end tests with realistic CRD schemas, matching the plan's
 //! usage example and covering nested schemas, transition rules, and arrays.
 
-use kube_cel::validation::{ErrorKind, Validator, validate};
+use kube_cel::{ErrorKind, Validator, validate};
 use serde_json::json;
 
 #[test]
@@ -727,7 +727,7 @@ fn optional_old_self_create_end_to_end() {
 
 #[test]
 fn compiled_schema_end_to_end() {
-    use kube_cel::{compilation::compile_schema, validation::validate_compiled};
+    use kube_cel::{compile_schema, validate_compiled};
 
     let schema = json!({
         "type": "object",
@@ -764,7 +764,7 @@ fn compiled_schema_end_to_end() {
 
 #[test]
 fn compiled_schema_with_message_expression() {
-    use kube_cel::{compilation::compile_schema, validation::validate_compiled};
+    use kube_cel::{compile_schema, validate_compiled};
 
     let schema = json!({
         "type": "object",
@@ -785,7 +785,7 @@ fn compiled_schema_with_message_expression() {
 
 #[test]
 fn compiled_schema_with_transition_rule() {
-    use kube_cel::{compilation::compile_schema, validation::validate_compiled};
+    use kube_cel::{compile_schema, validate_compiled};
 
     let schema = json!({
         "type": "object",
@@ -810,7 +810,7 @@ fn compiled_schema_with_transition_rule() {
 
 #[test]
 fn compiled_schema_matches_schema_validation() {
-    use kube_cel::{compilation::compile_schema, validation::validate_compiled};
+    use kube_cel::{compile_schema, validate_compiled};
 
     // Complex schema with nested properties, arrays, and multiple rules
     let schema = json!({
@@ -880,7 +880,7 @@ fn compiled_schema_matches_schema_validation() {
 
 #[test]
 fn kube_core_rule_json_compatibility() {
-    use kube_cel::compilation::compile_schema;
+    use kube_cel::compile_schema;
 
     // JSON format matching kube-core's Rule serialization output
     let schema = json!({
@@ -929,7 +929,7 @@ fn kube_core_rule_json_compatibility() {
 
 #[test]
 fn kube_core_reason_values() {
-    use kube_cel::compilation::compile_schema;
+    use kube_cel::compile_schema;
 
     // All Reason variants from kube-core
     let schema = json!({
@@ -1103,7 +1103,7 @@ fn timestamp_transition_rule() {
 
 #[test]
 fn compiled_schema_timestamp_comparison() {
-    use kube_cel::{compilation::compile_schema, validation::validate_compiled};
+    use kube_cel::{compile_schema, validate_compiled};
 
     let schema = json!({
         "type": "object",
@@ -1134,7 +1134,7 @@ fn compiled_schema_timestamp_comparison() {
 
 #[test]
 fn compiled_schema_duration_comparison() {
-    use kube_cel::{compilation::compile_schema, validation::validate_compiled};
+    use kube_cel::{compile_schema, validate_compiled};
 
     let schema = json!({
         "type": "object",
@@ -1307,7 +1307,7 @@ fn underscore_in_field_name() {
 
 #[test]
 fn escaped_field_with_compiled_schema() {
-    use kube_cel::{compilation::compile_schema, validation::validate_compiled};
+    use kube_cel::{compile_schema, validate_compiled};
 
     let schema = json!({
         "type": "object",
@@ -1381,7 +1381,7 @@ fn deep_schema_must_not_silently_pass() {
 /// ([`Validator::validate_compiled`]) — it must fail closed identically.
 #[test]
 fn deep_schema_fails_closed_when_precompiled() {
-    use kube_cel::compilation::compile_schema;
+    use kube_cel::compile_schema;
     let (schema, object) = deeply_nested(70);
     let compiled = compile_schema(&schema);
     let errors = Validator::new().validate_compiled(&compiled, &object, None);

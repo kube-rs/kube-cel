@@ -49,7 +49,7 @@ kube-cel = { version = "0.6", features = ["validation"] }
 ```
 
 ```rust
-use kube_cel::validation::Validator;
+use kube_cel::Validator;
 use serde_json::json;
 
 let schema = json!({
@@ -121,7 +121,7 @@ JSON field names that are CEL reserved words or contain special characters are a
 Apply schema `default` values before validation, matching K8s API server behavior:
 
 ```rust
-use kube_cel::defaults::apply_defaults;
+use kube_cel::apply_defaults;
 
 let schema = json!({
     "type": "object",
@@ -147,7 +147,7 @@ let errors = Validator::new().validate_with_defaults(&schema, &object, None);
 Bind CRD-level `apiVersion`, `apiGroup`, `kind` variables for root-level rules:
 
 ```rust
-use kube_cel::validation::{Validator, RootContext};
+use kube_cel::{Validator, RootContext};
 
 let root_ctx = RootContext {
     api_version: "apps/v1".into(),
@@ -162,7 +162,7 @@ let errors = Validator::new().validate_with_context(&schema, &object, None, Some
 Evaluate [ValidatingAdmissionPolicy](https://kubernetes.io/docs/reference/access-authn-authz/validating-admission-policy/) CEL expressions client-side — no API server required. Supports all VAP variables except `authorizer`.
 
 ```rust
-use kube_cel::vap::{VapEvaluator, VapExpression, AdmissionRequest};
+use kube_cel::{VapEvaluator, VapExpression, AdmissionRequest};
 
 let evaluator = VapEvaluator::builder()
     .object(json!({"spec": {"replicas": 3}}))
@@ -195,8 +195,8 @@ let results = evaluator.evaluate_compiled(&compiled); // no re-parsing
 Catch CEL rule issues before deployment — variable scope violations and cost budget warnings:
 
 ```rust
-use kube_cel::analysis::{analyze_rule, ScopeContext};
-use kube_cel::compilation::compile_schema;
+use kube_cel::{analyze_rule, ScopeContext};
+use kube_cel::compile_schema;
 
 let compiled = compile_schema(&schema);
 

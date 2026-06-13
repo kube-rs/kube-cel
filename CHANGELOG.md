@@ -21,6 +21,17 @@ hygiene. See [#6](https://github.com/kube-rs/kube-cel/issues/6).
   subtree. Objects that previously passed validation against a too-deep schema
   (the deep rules were never evaluated) now report an error. This closes a
   fail-*open* false-negative against the crate's apiserver-equivalence claim.
+- The validation submodules (`values`, `analysis`, `escaping`, `defaults`,
+  `compilation`, `validation`, `vap`) are now **private**; the public API is a
+  flat set of crate-root re-exports. Replace `kube_cel::<module>::Item` with
+  `kube_cel::Item` (e.g. `kube_cel::vap::AdmissionRequest` →
+  `kube_cel::AdmissionRequest`, `kube_cel::compilation::compile_schema` →
+  `kube_cel::compile_schema`). The internal file layout is no longer part of the
+  API. **Downstream note (kube-core):** the `cel` feature's `to_cel_request`
+  bridge must update `kube_cel::vap::AdmissionRequest` → `kube_cel::AdmissionRequest`.
+- `json_to_cel`, `json_to_cel_with_schema`, `json_to_cel_with_compiled`, and
+  `escape_field_name` are no longer public — they are internal conversion helpers
+  that returned the pre-1.0 `cel::Value` type, and had no external callers.
 
 ### Added
 - `ErrorKind::SchemaTooDeep` and `CompilationError::SchemaTooDeep { depth }`

@@ -21,7 +21,7 @@
 //! supported rule.
 #![cfg(feature = "validation")]
 
-use kube_cel::validation::{ErrorKind, Validator};
+use kube_cel::{ErrorKind, Validator};
 use serde_json::json;
 
 /// Runs a single `x-kubernetes-validations` rule against `{"items": [3,1,2]}`

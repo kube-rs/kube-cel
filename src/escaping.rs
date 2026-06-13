@@ -44,7 +44,7 @@ const CEL_RESERVED_WORDS: &[&str] = &[
 /// - `/` → `__slash__`
 #[must_use]
 #[inline]
-pub fn escape_field_name(name: &str) -> String {
+pub(crate) fn escape_field_name(name: &str) -> String {
     // Rule 1: exact match against reserved words
     if CEL_RESERVED_WORDS.contains(&name) {
         return format!("__{name}__");

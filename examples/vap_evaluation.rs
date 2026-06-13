@@ -2,7 +2,7 @@
 //!
 //! Run with: `cargo run --example vap_evaluation --features validation`
 
-use kube_cel::vap::{AdmissionRequest, GroupVersionKind, VapEvaluator, VapExpression};
+use kube_cel::{AdmissionRequest, GroupVersionKind, VapEvaluator, VapExpression};
 use serde_json::json;
 
 fn main() {

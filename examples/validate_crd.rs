@@ -2,7 +2,7 @@
 //!
 //! Run with: `cargo run --example validate_crd --features validation`
 
-use kube_cel::validation::Validator;
+use kube_cel::Validator;
 use serde_json::json;
 
 fn main() {

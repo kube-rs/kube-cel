@@ -2,10 +2,7 @@
 //!
 //! Run with: `cargo run --example timestamp_duration --features validation`
 
-use kube_cel::{
-    compilation::compile_schema,
-    validation::{validate, validate_compiled},
-};
+use kube_cel::{compile_schema, validate, validate_compiled};
 use serde_json::json;
 
 fn main() {
