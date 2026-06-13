@@ -53,7 +53,12 @@ pub enum ErrorKind {
 }
 
 /// An error produced when a CEL validation rule fails.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+///
+/// `#[non_exhaustive]`: this is an output type the crate constructs, never the
+/// caller. New fields may be added without a breaking change; downstream code
+/// reads the public fields and the cause chain via [`std::error::Error::source`].
+#[derive(Clone, Debug, serde::Serialize)]
+#[non_exhaustive]
 pub struct ValidationError {
     /// The CEL expression that failed.
     pub rule: String,
@@ -65,6 +70,20 @@ pub struct ValidationError {
     pub reason: Option<String>,
     /// Classification of the error.
     pub kind: ErrorKind,
+    /// The underlying cause, exposed via [`std::error::Error::source`].
+    ///
+    /// `Arc` (not `Box`) so `ValidationError` stays `Clone`; skipped during
+    /// serialization because `dyn Error` is not `Serialize`. Carried only for
+    /// runtime evaluation failures ([`ErrorKind::EvaluationError`] /
+    /// [`ErrorKind::UnsupportedReference`]), where the owned `cel`
+    /// `ExecutionError` is the cause. Compile-time causes (parse/JSON errors)
+    /// are not chained here: `cel::ParseErrors` is `!Clone` and reached only
+    /// behind a shared borrow, so they cannot be moved into an owned
+    /// `ValidationError` — their detail is preserved in `message`, and the
+    /// typed cause remains reachable via
+    /// [`CompiledSchema::compilation_errors`](crate::CompiledSchema::compilation_errors).
+    #[serde(skip)]
+    source: Option<std::sync::Arc<dyn std::error::Error + Send + Sync>>,
 }
 
 impl std::fmt::Display for ValidationError {
@@ -77,7 +96,27 @@ impl std::fmt::Display for ValidationError {
     }
 }
 
-impl std::error::Error for ValidationError {}
+// Manual `PartialEq`/`Eq`: the `source` cause is auxiliary metadata (and
+// `dyn Error` is not `PartialEq`), so equality is decided by the data fields.
+impl PartialEq for ValidationError {
+    fn eq(&self, other: &Self) -> bool {
+        self.rule == other.rule
+            && self.message == other.message
+            && self.field_path == other.field_path
+            && self.reason == other.reason
+            && self.kind == other.kind
+    }
+}
+
+impl Eq for ValidationError {}
+
+impl std::error::Error for ValidationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_ref()
+            .map(|s| &**s as &(dyn std::error::Error + 'static))
+    }
+}
 
 /// Builds the fail-closed error emitted when schema nesting exceeds
 /// [`MAX_SCHEMA_DEPTH`](crate::compilation::MAX_SCHEMA_DEPTH). Surfacing this —
@@ -93,6 +132,7 @@ fn schema_too_deep_error(path: &str) -> ValidationError {
         field_path: path.to_string(),
         reason: None,
         kind: ErrorKind::SchemaTooDeep,
+        source: None,
     }
 }
 
@@ -532,6 +572,9 @@ impl Validator {
                         field_path: path.to_string(),
                         reason: None,
                         kind: ErrorKind::CompilationFailure,
+                        // `cel::ParseErrors` is `!Clone` and only borrowed here,
+                        // so the typed cause cannot be owned; detail is in `message`.
+                        source: None,
                     });
                 }
                 Err(CompilationError::InvalidRule(e)) => {
@@ -541,6 +584,9 @@ impl Validator {
                         field_path: path.to_string(),
                         reason: None,
                         kind: ErrorKind::InvalidRule,
+                        // `serde_json::Error` is borrowed from the shared
+                        // results slice and `!Clone`; detail is in `message`.
+                        source: None,
                     });
                 }
                 Err(CompilationError::SchemaTooDeep { .. }) => {
@@ -592,6 +638,7 @@ impl Validator {
                     field_path: error_path,
                     reason: cr.rule.reason.clone(),
                     kind: ErrorKind::ValidationFailure,
+                    source: None,
                 });
             }
             Ok(_) => {
@@ -601,32 +648,35 @@ impl Validator {
                     field_path: error_path,
                     reason: None,
                     kind: ErrorKind::InvalidResult,
-                });
-            }
-            Err(cel::ExecutionError::UndeclaredReference(name)) => {
-                // The rule compiled but references something this build does not
-                // provide — a cel-gated macro (sortBy/cel.bind/two-arg
-                // comprehensions) or a disabled feature. Classify it distinctly
-                // so callers can tell a coverage gap from a real runtime error.
-                errors.push(ValidationError {
-                    rule: cr.rule.rule.clone(),
-                    message: format!(
-                        "rule references '{name}', which this kube-cel build does not support \
-                         (an unsupported CEL macro, or a feature disabled at compile time); \
-                         it cannot be evaluated client-side"
-                    ),
-                    field_path: error_path,
-                    reason: None,
-                    kind: ErrorKind::UnsupportedReference,
+                    source: None,
                 });
             }
             Err(e) => {
+                // The rule compiled but evaluation failed. An
+                // `UndeclaredReference` means the rule references something this
+                // build does not provide — a cel-gated macro (sortBy/cel.bind/
+                // two-arg comprehensions) or a disabled feature — classified
+                // distinctly so callers can tell a coverage gap from a real
+                // runtime error. Either way the owned `ExecutionError` is the
+                // cause and is preserved via `source()`.
+                let (kind, message) = match &e {
+                    cel::ExecutionError::UndeclaredReference(name) => (
+                        ErrorKind::UnsupportedReference,
+                        format!(
+                            "rule references '{name}', which this kube-cel build does not support \
+                             (an unsupported CEL macro, or a feature disabled at compile time); \
+                             it cannot be evaluated client-side"
+                        ),
+                    ),
+                    _ => (ErrorKind::EvaluationError, format!("rule evaluation error: {e}")),
+                };
                 errors.push(ValidationError {
                     rule: cr.rule.rule.clone(),
-                    message: format!("rule evaluation error: {e}"),
+                    message,
                     field_path: error_path,
                     reason: None,
-                    kind: ErrorKind::EvaluationError,
+                    kind,
+                    source: Some(std::sync::Arc::new(e)),
                 });
             }
         }
@@ -926,6 +976,7 @@ mod tests {
             field_path: "spec.replicas".into(),
             reason: None,
             kind: ErrorKind::ValidationFailure,
+            source: None,
         };
         assert_eq!(err.to_string(), "spec.replicas: must be non-negative");
     }
@@ -938,6 +989,7 @@ mod tests {
             field_path: String::new(),
             reason: None,
             kind: ErrorKind::ValidationFailure,
+            source: None,
         };
         assert_eq!(err.to_string(), "must be non-negative");
     }
@@ -1504,6 +1556,7 @@ mod tests {
             field_path: "spec.x".into(),
             reason: Some("FieldValueInvalid".into()),
             kind: ErrorKind::ValidationFailure,
+            source: None,
         };
         let json = serde_json::to_value(&err).unwrap();
         assert_eq!(json["rule"], "self.x >= 0");

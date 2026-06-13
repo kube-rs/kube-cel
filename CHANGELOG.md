@@ -32,10 +32,30 @@ hygiene. See [#6](https://github.com/kube-rs/kube-cel/issues/6).
 - `json_to_cel`, `json_to_cel_with_schema`, `json_to_cel_with_compiled`, and
   `escape_field_name` are no longer public — they are internal conversion helpers
   that returned the pre-1.0 `cel::Value` type, and had no external callers.
+- `#[non_exhaustive]` added to the output structs `ValidationError`,
+  `AnalysisWarning`, `VapResult`, `CompiledSchema`, and `CompilationResult`.
+  These are constructed by the crate, never by callers, so no usable API is lost;
+  downstream code still reads their fields (and may need `..` in any destructuring
+  pattern). Future fields can now be added without a breaking change. `RootContext`
+  stays exhaustive on purpose — it is a caller-constructed *input* type.
+- `VapEvaluator::compile_expressions` and `evaluate_compiled` now use the typed
+  `VapError` instead of `String` in their `Result` error type. A bare `String`
+  does not implement `std::error::Error`, could not be a `source()`, and clashed
+  with the structured `CompilationError` the crate already ships.
 
 ### Added
 - `ErrorKind::SchemaTooDeep` and `CompilationError::SchemaTooDeep { depth }`
   variants, emitted when schema nesting exceeds the depth cap (see Breaking).
+- `VapError`: a typed compile error for the VAP path, carrying the offending
+  expression and chaining the underlying `cel` parse error via
+  `std::error::Error::source()`.
+- `ValidationError` now implements `std::error::Error::source()`, chaining the
+  underlying `cel` `ExecutionError` for runtime evaluation failures
+  (`EvaluationError` / `UnsupportedReference`). Previously the `Error` impl was
+  empty and the cause was only flattened into the message string. (Compile-time
+  causes are not chained: `cel::ParseErrors` is `!Clone` and reached only behind
+  a shared borrow; its detail stays in the message and the typed cause remains
+  reachable via `CompiledSchema::compilation_errors`.)
 - `ErrorKind::UnsupportedReference`: a rule that references a CEL macro the
   `cel` crate does not implement (`sortBy`, `cel.bind`, two-arg comprehensions)
   or a feature disabled at compile time now reports this distinct kind instead

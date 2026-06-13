@@ -34,7 +34,11 @@ pub struct Rule {
 }
 
 /// The result of successfully compiling a [`Rule`].
+///
+/// `#[non_exhaustive]`: an output type the crate constructs; new fields may be
+/// added without a breaking change.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct CompilationResult {
     /// The compiled CEL program.
     pub program: Program,
@@ -151,7 +155,12 @@ pub(crate) fn compile_schema_validations(
 ///
 /// `CompiledSchema` is not `Clone` because [`cel::Program`] is `!Clone`.
 /// Wrap in [`Arc`](std::sync::Arc) for shared ownership across threads.
+///
+/// `#[non_exhaustive]`: an output type the crate constructs; new fields may be
+/// added without a breaking change. Read its fields directly or via the
+/// accessor methods below.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct CompiledSchema {
     /// Compiled validation rules at this schema node.
     pub validations: Vec<Result<CompilationResult, CompilationError>>,

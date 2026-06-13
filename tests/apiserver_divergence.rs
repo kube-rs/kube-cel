@@ -102,6 +102,23 @@ fn runtime_error_is_not_an_unsupported_reference() {
     );
 }
 
+/// A runtime evaluation failure preserves the underlying `cel` error in the
+/// `ValidationError` cause chain (`std::error::Error::source()`), rather than
+/// flattening it into the message string and dropping the typed cause.
+#[test]
+fn runtime_error_chains_its_cause() {
+    use std::error::Error;
+    let errors = run_rule("self.items[0] > 'a'");
+    let err = errors
+        .iter()
+        .find(|e| e.kind == ErrorKind::EvaluationError)
+        .expect("expected an EvaluationError");
+    assert!(
+        err.source().is_some(),
+        "EvaluationError should chain the underlying cel cause via source()"
+    );
+}
+
 // ── Schema depth cap — fails CLOSED since S4 (P1-A); used to fail OPEN ───────
 // apiserver: enforces deep rules (and rejects over-limit schemas at registration).
 // kube-cel:  SchemaTooDeep error past MAX_SCHEMA_DEPTH (64).

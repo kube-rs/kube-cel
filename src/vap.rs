@@ -100,7 +100,11 @@ pub struct VapExpression {
 }
 
 /// The result of evaluating a single [`VapExpression`].
+///
+/// `#[non_exhaustive]`: an output type the crate constructs; new fields may be
+/// added without a breaking change.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct VapResult {
     /// The original CEL expression.
     pub expression: String,
@@ -128,6 +132,39 @@ impl std::fmt::Debug for CompiledVapExpression {
             .field("message", &self.message)
             .field("has_message_program", &self.message_program.is_some())
             .finish_non_exhaustive()
+    }
+}
+
+/// An error produced when a VAP expression fails to compile.
+///
+/// Returned in the `Err` arm of [`VapEvaluator::compile_expressions`]. The
+/// underlying `cel` parse error is available via [`std::error::Error::source`];
+/// the concrete `cel` type is kept out of the public surface (held behind a
+/// boxed `dyn Error`) so it is not frozen into the API.
+///
+/// `#[non_exhaustive]`: VAP compilation has a single failure mode today; new
+/// fields may be added without a breaking change.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct VapError {
+    /// The VAP expression that failed to compile.
+    pub expression: String,
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+impl std::fmt::Display for VapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "failed to compile VAP expression \"{}\": {}",
+            self.expression, self.source
+        )
+    }
+}
+
+impl std::error::Error for VapError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&*self.source)
     }
 }
 
@@ -243,17 +280,21 @@ impl VapEvaluator {
     /// Pre-compile validation expressions for repeated evaluation.
     ///
     /// Returns one entry per input expression. Failed compilations are
-    /// represented as `Err(String)` containing the error message.
+    /// represented as `Err(`[`VapError`]`)`, which carries the offending
+    /// expression and the underlying `cel` parse error (via
+    /// [`source`](std::error::Error::source)).
     #[must_use]
     pub fn compile_expressions(
         &self,
         expressions: &[VapExpression],
-    ) -> Vec<Result<CompiledVapExpression, String>> {
+    ) -> Vec<Result<CompiledVapExpression, VapError>> {
         expressions
             .iter()
             .map(|expr| {
-                let program =
-                    Program::compile(&expr.expression).map_err(|e| format!("compilation error: {e}"))?;
+                let program = Program::compile(&expr.expression).map_err(|e| VapError {
+                    expression: expr.expression.clone(),
+                    source: Box::new(e),
+                })?;
                 let message_program = expr
                     .message_expression
                     .as_deref()
@@ -274,7 +315,7 @@ impl VapEvaluator {
     /// against it. Expressions that failed compilation (represented as
     /// `Err`) are returned as failed [`VapResult`]s.
     #[must_use]
-    pub fn evaluate_compiled(&self, compiled: &[Result<CompiledVapExpression, String>]) -> Vec<VapResult> {
+    pub fn evaluate_compiled(&self, compiled: &[Result<CompiledVapExpression, VapError>]) -> Vec<VapResult> {
         let ctx = self.build_context();
 
         compiled
@@ -316,9 +357,9 @@ impl VapEvaluator {
                     },
                 },
                 Err(e) => VapResult {
-                    expression: String::new(),
+                    expression: e.expression.clone(),
                     passed: false,
-                    message: Some(e.clone()),
+                    message: Some(e.to_string()),
                 },
             })
             .collect()
@@ -462,6 +503,28 @@ mod tests {
     }
 
     #[test]
+    fn compile_failure_yields_vap_error_with_cause() {
+        use std::error::Error;
+        let evaluator = VapEvaluator::builder().build();
+        let compiled = evaluator.compile_expressions(&[VapExpression {
+            expression: "this is ((( not valid".into(),
+            message: None,
+            message_expression: None,
+        }]);
+        let err = compiled[0].as_ref().unwrap_err();
+        assert_eq!(err.expression, "this is ((( not valid");
+        assert!(
+            err.source().is_some(),
+            "VapError should chain the cel parse error"
+        );
+
+        // And evaluate_compiled surfaces the failure with the real expression.
+        let results = evaluator.evaluate_compiled(&compiled);
+        assert!(!results[0].passed);
+        assert_eq!(results[0].expression, "this is ((( not valid");
+    }
+
+    #[test]
     fn vap_validation_fails_with_message() {
         let evaluator = VapEvaluator::builder()
             .object(json!({"spec": {"replicas": -1}}))
@@ -591,7 +654,13 @@ mod tests {
 
         let results = evaluator.evaluate_compiled(&compiled);
         assert!(!results[0].passed);
-        assert!(results[0].message.as_ref().unwrap().contains("compilation error"));
+        assert!(
+            results[0]
+                .message
+                .as_ref()
+                .unwrap()
+                .contains("failed to compile VAP expression")
+        );
     }
 
     #[test]

@@ -160,8 +160,8 @@ pub use crate::{
     validation::{ErrorKind, RootContext, ValidationError, Validator, validate, validate_compiled},
     values::SchemaFormat,
     vap::{
-        AdmissionRequest, CompiledVapExpression, GroupVersionKind, GroupVersionResource, VapEvaluator,
-        VapEvaluatorBuilder, VapExpression, VapResult,
+        AdmissionRequest, CompiledVapExpression, GroupVersionKind, GroupVersionResource, VapError,
+        VapEvaluator, VapEvaluatorBuilder, VapExpression, VapResult,
     },
 };
 

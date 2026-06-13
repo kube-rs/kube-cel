@@ -18,7 +18,11 @@ pub enum ScopeContext {
 }
 
 /// A warning produced by static analysis.
+///
+/// `#[non_exhaustive]`: an output type the crate constructs; new fields may be
+/// added without a breaking change.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
 pub struct AnalysisWarning {
     /// The CEL rule the warning applies to.
     pub rule: String,
