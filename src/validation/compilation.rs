@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use cel::{ParseErrors, Program};
+use cel::Program;
 
 use crate::validation::values::SchemaFormat;
 
@@ -59,8 +59,11 @@ pub enum CompilationError {
     Parse {
         /// The original CEL expression that failed to compile.
         rule: String,
-        /// The parse errors reported by the CEL compiler.
-        source: ParseErrors,
+        /// The boxed parse error reported by the CEL compiler. Boxed (rather
+        /// than carrying the concrete `cel::ParseErrors`) so the pre-1.0 `cel`
+        /// type is not frozen into this public enum variant; reach it via
+        /// [`Error::source`](std::error::Error::source).
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
     /// JSON value could not be deserialized into a [`Rule`].
     InvalidRule(serde_json::Error),
@@ -95,7 +98,7 @@ impl std::fmt::Display for CompilationError {
 impl std::error::Error for CompilationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            CompilationError::Parse { source, .. } => Some(source),
+            CompilationError::Parse { source, .. } => Some(source.as_ref()),
             CompilationError::InvalidRule(err) => Some(err),
             CompilationError::SchemaTooDeep { .. } => None,
         }
@@ -108,7 +111,7 @@ impl std::error::Error for CompilationError {
 pub(crate) fn compile_rule(rule: &Rule) -> Result<CompilationResult, CompilationError> {
     let program = Program::compile(&rule.rule).map_err(|e| CompilationError::Parse {
         rule: rule.rule.clone(),
-        source: e,
+        source: Box::new(e),
     })?;
     let is_transition_rule = program.references().has_variable("oldSelf");
 

@@ -42,6 +42,13 @@ hygiene. See [#6](https://github.com/kube-rs/kube-cel/issues/6).
   `VapError` instead of `String` in their `Result` error type. A bare `String`
   does not implement `std::error::Error`, could not be a `source()`, and clashed
   with the structured `CompilationError` the crate already ships.
+- `CompilationError::Parse`'s `source` field is now
+  `Box<dyn std::error::Error + Send + Sync>` instead of the concrete pre-1.0
+  `cel::ParseErrors`, so that `cel` type is no longer frozen into a public,
+  matchable enum-variant field (reachable via `CompiledSchema`). The parse cause
+  is still reachable through `std::error::Error::source()`. (`InvalidRule` keeps
+  its `serde_json::Error` payload: `serde_json` is a stable 1.0 public dependency,
+  not a freeze hazard.)
 
 ### Added
 - `ErrorKind::SchemaTooDeep` and `CompilationError::SchemaTooDeep { depth }`
