@@ -5,7 +5,7 @@
 //! variable binding and kube-cel extension functions.
 
 use cel::{Context, Program, Value};
-use kube_cel::values::json_to_cel;
+use kube_cel::{KubeCelExt, values::json_to_cel};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -13,7 +13,7 @@ use std::sync::Arc;
 /// compile the expression, and return the evaluation result.
 fn eval_self(json_val: serde_json::Value, expr: &str) -> Value {
     let mut ctx = Context::default();
-    kube_cel::register_all(&mut ctx);
+    ctx.register_all();
     ctx.add_variable_from_value("self", json_to_cel(&json_val));
     Program::compile(expr).unwrap().execute(&ctx).unwrap()
 }
@@ -21,7 +21,7 @@ fn eval_self(json_val: serde_json::Value, expr: &str) -> Value {
 /// Helper: same as `eval_self` but also binds `oldSelf`.
 fn eval_transition(json_self: serde_json::Value, json_old: serde_json::Value, expr: &str) -> Value {
     let mut ctx = Context::default();
-    kube_cel::register_all(&mut ctx);
+    ctx.register_all();
     ctx.add_variable_from_value("self", json_to_cel(&json_self));
     ctx.add_variable_from_value("oldSelf", json_to_cel(&json_old));
     Program::compile(expr).unwrap().execute(&ctx).unwrap()

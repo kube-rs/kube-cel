@@ -5,68 +5,117 @@
 //!
 //! # Usage
 //!
-//! ```rust
-//! use cel::Context;
-//! use kube_cel::register_all;
+//! Register the compiled-in functions onto a [`cel::Context`] via the
+//! [`KubeCelExt`] extension trait:
 //!
-//! let mut ctx = Context::default();
-//! register_all(&mut ctx);
+//! ```rust
+//! use kube_cel::{cel, KubeCelExt};
+//!
+//! let ctx = cel::Context::default().with_all();
+//! # let _ = ctx;
 //! ```
 //!
-//! # CRD Validation Pipeline (feature = `validation`)
+//! See [`KubeCelExt`] for the borrowed-context form and the
+//! function-group → upstream-source table.
 //!
-//! Compile and evaluate `x-kubernetes-validations` CEL rules client-side,
-//! without an API server.
+//! # Version coherence
+//!
+//! This crate's public signatures use [`cel::Context`] and [`cel::Value`], so a
+//! `cel` version mismatch between your crate and `kube-cel` surfaces as a cryptic
+//! `Context` type mismatch. To avoid it, import `cel` **through** this crate
+//! rather than declaring a separate `cel` dependency:
+//!
+//! ```rust
+//! use kube_cel::cel; // re-export guaranteed to match kube-cel's `cel`
+//! # let _ = cel::Context::default();
+//! ```
+//!
+//! # Feature model
+//!
+//! Granularity is controlled at compile time through cargo features — there is
+//! no runtime per-library registration method. The `default` feature set enables
+//! every extension-function group. To narrow the surface you must disable the
+//! defaults explicitly, otherwise the listed features are simply added on top of
+//! the (already complete) default set and have no narrowing effect:
 //!
 //! ```toml
-//! kube-cel = { version = "0.5", features = ["validation"] }
+//! # Only the string + list helpers:
+//! kube-cel = { version = "0.6", default-features = false, features = ["strings", "lists"] }
 //! ```
 //!
-//! ```rust,ignore
-//! use kube_cel::validation::Validator;
-//! use serde_json::json;
-//!
-//! let schema = json!({
-//!     "type": "object",
-//!     "x-kubernetes-validations": [
-//!         {"rule": "self.replicas >= 0", "message": "must be non-negative"}
-//!     ],
-//!     "properties": { "replicas": {"type": "integer"} }
-//! });
-//!
-//! let object = json!({"replicas": -1});
-//! let errors = Validator::new().validate(&schema, &object, None);
-//! assert_eq!(errors.len(), 1);
-//! ```
-//!
-//! For repeated validation against the same schema, pre-compile with
-//! [`compilation::compile_schema`] and use [`validation::Validator::validate_compiled`].
+//! The validation pipeline (CRD `x-kubernetes-validations`, VAP, static analysis)
+//! lives behind the `validation` feature (see below when it is enabled).
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+#![deny(missing_docs)]
+// The validation-pipeline section links to feature-gated items, so it is only
+// emitted when `validation` is enabled. Keeping it out of the always-compiled
+// `//!` block is what keeps `cargo doc --no-deps` (default features) free of
+// broken intra-doc links.
+#![cfg_attr(
+    feature = "validation",
+    doc = r#"
+# CRD Validation Pipeline (feature = `validation`)
 
-#[cfg(feature = "strings")] pub mod strings;
+Compile and evaluate `x-kubernetes-validations` CEL rules client-side,
+without an API server.
 
-#[cfg(feature = "lists")] pub mod lists;
+```toml
+kube-cel = { version = "0.6", features = ["validation"] }
+```
 
-#[cfg(feature = "sets")] pub mod sets;
+```rust,ignore
+use kube_cel::Validator;
+use serde_json::json;
 
-#[cfg(feature = "regex_funcs")] pub mod regex_funcs;
+let schema = json!({
+    "type": "object",
+    "x-kubernetes-validations": [
+        {"rule": "self.replicas >= 0", "message": "must be non-negative"}
+    ],
+    "properties": { "replicas": {"type": "integer"} }
+});
 
-#[cfg(feature = "urls")] pub mod urls;
+let object = json!({"replicas": -1});
+let errors = Validator::new().validate(&schema, &object, None);
+assert_eq!(errors.len(), 1);
+```
 
-#[cfg(feature = "ip")] pub mod ip;
+For repeated validation against the same schema, pre-compile with
+[`compile_schema`](compilation::compile_schema) and use
+[`Validator::validate_compiled`](validation::Validator::validate_compiled).
+"#
+)]
 
-#[cfg(feature = "semver_funcs")] pub mod semver_funcs;
+/// Re-export of the [`cel`] crate, for version coherence (see the crate-level
+/// docs). Importing `cel` types via `kube_cel::cel` guarantees they match the
+/// `cel` version this crate was built against.
+pub use cel;
 
-#[cfg(feature = "format")] pub mod format;
+#[cfg(feature = "strings")] mod strings;
 
-#[cfg(feature = "quantity")] pub mod quantity;
+#[cfg(feature = "lists")] mod lists;
 
-#[cfg(feature = "jsonpatch")] pub mod jsonpatch;
+#[cfg(feature = "sets")] mod sets;
 
-#[cfg(feature = "named_format")] pub mod named_format;
+#[cfg(feature = "regex_funcs")] mod regex_funcs;
 
-#[cfg(feature = "math")] pub mod math;
+#[cfg(feature = "urls")] mod urls;
 
-#[cfg(feature = "encoders")] pub mod encoders;
+#[cfg(feature = "ip")] mod ip;
+
+#[cfg(feature = "semver_funcs")] mod semver_funcs;
+
+#[cfg(feature = "format")] mod format;
+
+#[cfg(feature = "quantity")] mod quantity;
+
+#[cfg(feature = "jsonpatch")] mod jsonpatch;
+
+#[cfg(feature = "named_format")] mod named_format;
+
+#[cfg(feature = "math")] mod math;
+
+#[cfg(feature = "encoders")] mod encoders;
 
 #[cfg(feature = "validation")] pub mod escaping;
 
@@ -83,10 +132,22 @@
 #[cfg(feature = "validation")] pub mod vap;
 
 mod dispatch;
+mod ext;
 mod value_ops;
 
-/// Register all available Kubernetes CEL extension functions into the given context.
-pub fn register_all(ctx: &mut cel::Context<'_>) {
+pub use ext::KubeCelExt;
+
+#[cfg(feature = "validation")] pub use compilation::CompiledSchema;
+#[cfg(feature = "validation")] pub use validation::{ValidationError, Validator};
+#[cfg(feature = "validation")] pub use values::SchemaFormat;
+#[cfg(feature = "validation")] pub use vap::VapEvaluator;
+
+/// Registers all compiled-in Kubernetes CEL extension functions into `ctx`.
+///
+/// Internal implementation behind [`KubeCelExt::register_all`]; kept as a free
+/// function so the in-crate callers (dispatch, vap, validation, …) can invoke it
+/// without importing the trait.
+pub(crate) fn register_all(ctx: &mut cel::Context<'_>) {
     #[cfg(feature = "strings")]
     strings::register(ctx);
 
@@ -142,8 +203,7 @@ mod tests {
 
     #[allow(dead_code)]
     fn eval(expr: &str) -> Value {
-        let mut ctx = Context::default();
-        register_all(&mut ctx);
+        let ctx = Context::default().with_all();
         Program::compile(expr).unwrap().execute(&ctx).unwrap()
     }
 

@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.6.0] - 2026-06-13
+
+Breaking release that reshapes the registration surface around two user
+journeys (register functions / validate a CRD) and tightens 1.0-grade API
+hygiene. See [#6](https://github.com/kube-rs/kube-cel/issues/6).
+
+### Breaking
+- `register_all(&mut ctx)` free function removed; register via the new
+  `KubeCelExt` trait instead.
+- The 13 extension-function modules (`strings`, `lists`, `sets`, `regex_funcs`,
+  `urls`, `ip`, `semver_funcs`, `format`, `quantity`, `jsonpatch`,
+  `named_format`, `math`, `encoders`) are now private. They only ever exposed a
+  `register` function plus opaque CEL newtypes, so no usable API is lost.
+- `#[non_exhaustive]` added to the public `ScopeContext`, `WarningKind`,
+  `ErrorKind`, and `CompilationError` enums. Downstream `match` on these now
+  needs a wildcard arm.
+
+### Added
+- `KubeCelExt` trait: `register_all(&mut self) -> &mut Self` and the builder
+  sugar `with_all(self) -> Self`. This is the single registration entry point.
+- `pub use cel;` — the `cel` crate is re-exported at the crate root for version
+  coherence. Import `cel` types via `kube_cel::cel`.
+- Crate-root re-exports for the validation journey: `Validator`,
+  `ValidationError`, `CompiledSchema`, `VapEvaluator`, `SchemaFormat`.
+
+### Fixed
+- Broken crate-root intra-doc links on docs.rs: `[package.metadata.docs.rs]`
+  now builds all features, and CI gained a default-feature doc check so the
+  links can no longer regress.
+
+### Migration
+- Registration:
+  - Before: `kube_cel::register_all(&mut ctx);`
+  - After:  `use kube_cel::KubeCelExt;` then
+    `let ctx = cel::Context::default().with_all();`
+    (or `ctx.register_all();` for an existing borrowed context).
+- `cel` is now re-exported: prefer `use kube_cel::cel;` over a separate `cel`
+  dependency to guarantee a matching version.
+- Feature narrowing requires `default-features = false`; listing features
+  without it just re-adds them on top of the (complete) default set.
+
+
 ## [0.5.4] - 2026-05-14
 
 ### Fixed

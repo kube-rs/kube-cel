@@ -32,8 +32,11 @@ feature-check:
         cargo check --no-default-features --features "$feature"
     done
 
-# Build docs (warnings = errors)
+# Build docs (warnings = errors). Both feature sets: the all-features build is
+# what hid the broken crate-root intra-doc links, so the default build is the
+# guard that catches them.
 doc:
+    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 
 # --- Development helpers ---

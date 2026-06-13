@@ -38,16 +38,22 @@ use crate::values::json_to_cel;
 /// Group/Version/Kind identifier.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GroupVersionKind {
+    /// API group (e.g., `"apps"`). Empty string for the core group.
     pub group: String,
+    /// API version (e.g., `"v1"`).
     pub version: String,
+    /// Resource kind (e.g., `"Deployment"`).
     pub kind: String,
 }
 
 /// Group/Version/Resource identifier.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GroupVersionResource {
+    /// API group (e.g., `"apps"`). Empty string for the core group.
     pub group: String,
+    /// API version (e.g., `"v1"`).
     pub version: String,
+    /// Resource name (e.g., `"deployments"`).
     pub resource: String,
 }
 

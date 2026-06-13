@@ -49,6 +49,7 @@ pub struct CompilationResult {
 
 /// Errors that can occur during rule compilation.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum CompilationError {
     /// CEL expression failed to parse.
     Parse {

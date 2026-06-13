@@ -9,6 +9,7 @@ use crate::compilation::CompiledSchema;
 
 /// The context in which a CEL rule is evaluated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ScopeContext {
     /// CRD `x-kubernetes-validations` — only `self`, `oldSelf`, and root vars.
     CrdValidation,
@@ -19,12 +20,17 @@ pub enum ScopeContext {
 /// A warning produced by static analysis.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct AnalysisWarning {
+    /// The CEL rule the warning applies to.
     pub rule: String,
+    /// Human-readable description of the warning.
     pub message: String,
+    /// Classification of the warning.
     pub kind: WarningKind,
 }
 
+/// The kind of warning produced by static analysis.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
 pub enum WarningKind {
     /// Variable not available in the given scope.
     WrongScope,

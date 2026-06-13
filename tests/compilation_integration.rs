@@ -7,6 +7,7 @@
 
 use cel::{Context, Value};
 use kube_cel::{
+    KubeCelExt,
     compilation::{CompilationError, compile_schema},
     values::json_to_cel,
 };
@@ -19,7 +20,7 @@ fn compile_and_eval_first(schema: serde_json::Value, self_val: serde_json::Value
     let cr = compiled.validations.into_iter().next().unwrap().unwrap();
 
     let mut ctx = Context::default();
-    kube_cel::register_all(&mut ctx);
+    ctx.register_all();
     ctx.add_variable_from_value("self", json_to_cel(&self_val));
     cr.program.execute(&ctx).unwrap()
 }
@@ -60,7 +61,7 @@ fn crd_schema_end_to_end() {
     );
 
     let mut ctx = Context::default();
-    kube_cel::register_all(&mut ctx);
+    ctx.register_all();
     ctx.add_variable_from_value("self", json_to_cel(&self_val));
     assert_eq!(compiled.program.execute(&ctx).unwrap(), Value::Bool(true));
 }
@@ -97,14 +98,14 @@ fn transition_rule_compile_and_eval() {
 
     // Evaluate with self and oldSelf
     let mut ctx = Context::default();
-    kube_cel::register_all(&mut ctx);
+    ctx.register_all();
     ctx.add_variable_from_value("self", json_to_cel(&json!({"replicas": 5})));
     ctx.add_variable_from_value("oldSelf", json_to_cel(&json!({"replicas": 3})));
     assert_eq!(compiled.program.execute(&ctx).unwrap(), Value::Bool(true));
 
     // Scale down should fail
     let mut ctx2 = Context::default();
-    kube_cel::register_all(&mut ctx2);
+    ctx2.register_all();
     ctx2.add_variable_from_value("self", json_to_cel(&json!({"replicas": 1})));
     ctx2.add_variable_from_value("oldSelf", json_to_cel(&json!({"replicas": 3})));
     assert_eq!(compiled.program.execute(&ctx2).unwrap(), Value::Bool(false));
@@ -152,7 +153,7 @@ fn multiple_rules_mixed_results() {
     // First rule: valid, evaluate it
     let cr = compiled.validations[0].as_ref().unwrap();
     let mut ctx = Context::default();
-    kube_cel::register_all(&mut ctx);
+    ctx.register_all();
     ctx.add_variable_from_value("self", json_to_cel(&json!({"a": 5})));
     assert_eq!(cr.program.execute(&ctx).unwrap(), Value::Bool(true));
 
@@ -199,7 +200,7 @@ fn realistic_crd_with_multiple_validation_levels() {
     let spec_cr = spec_compiled.validations.into_iter().next().unwrap().unwrap();
 
     let mut ctx = Context::default();
-    kube_cel::register_all(&mut ctx);
+    ctx.register_all();
     ctx.add_variable_from_value(
         "self",
         json_to_cel(&json!({"replicas": 3, "template": {"name": "web"}})),
@@ -212,13 +213,13 @@ fn realistic_crd_with_multiple_validation_levels() {
     let tmpl_cr = tmpl_compiled.validations.into_iter().next().unwrap().unwrap();
 
     let mut ctx2 = Context::default();
-    kube_cel::register_all(&mut ctx2);
+    ctx2.register_all();
     ctx2.add_variable_from_value("self", json_to_cel(&json!({"name": "web"})));
     assert_eq!(tmpl_cr.program.execute(&ctx2).unwrap(), Value::Bool(true));
 
     // Empty name should fail
     let mut ctx3 = Context::default();
-    kube_cel::register_all(&mut ctx3);
+    ctx3.register_all();
     ctx3.add_variable_from_value("self", json_to_cel(&json!({"name": ""})));
     assert_eq!(tmpl_cr.program.execute(&ctx3).unwrap(), Value::Bool(false));
 }
