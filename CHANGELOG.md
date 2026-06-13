@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.6.0] - 2026-06-13
+## [Unreleased]
 
 Breaking release that reshapes the registration surface around two user
 journeys (register functions / validate a CRD) and tightens 1.0-grade API
