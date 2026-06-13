@@ -11,6 +11,15 @@
 /// missing fields filled in.
 ///
 /// This is a recursive pre-processing pass. It does not modify the input.
+///
+/// # Limits
+///
+/// Defaulting stops at the same maximum nesting depth the validators use;
+/// fields nested deeper are returned unchanged. Unlike the validators this pass
+/// has no error channel, so the cap is silent here. The cap is shared, so a
+/// subsequent [`Validator`](crate::Validator) pass over the same schema fails
+/// closed with [`ErrorKind::SchemaTooDeep`](crate::validation::ErrorKind::SchemaTooDeep)
+/// at the same boundary.
 #[must_use]
 pub fn apply_defaults(schema: &serde_json::Value, value: &serde_json::Value) -> serde_json::Value {
     apply_defaults_inner(schema, value, 0)

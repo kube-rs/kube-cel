@@ -5,7 +5,7 @@
 //! End-to-end tests with realistic CRD schemas, matching the plan's
 //! usage example and covering nested schemas, transition rules, and arrays.
 
-use kube_cel::validation::{Validator, validate};
+use kube_cel::validation::{ErrorKind, Validator, validate};
 use serde_json::json;
 
 #[test]
@@ -1340,5 +1340,69 @@ fn escaped_field_with_compiled_schema() {
         errors
             .iter()
             .any(|e| e.message == "my-value must be non-negative")
+    );
+}
+
+/// Build a schema/object pair nested `depth` levels deep, with a violated
+/// `self >= 0` rule at the innermost leaf (object value `-1`).
+fn deeply_nested(depth: usize) -> (serde_json::Value, serde_json::Value) {
+    let mut schema = json!({
+        "type": "integer",
+        "x-kubernetes-validations": [
+            {"rule": "self >= 0", "message": "leaf must be non-negative"}
+        ]
+    });
+    let mut object = json!(-1);
+    for _ in 0..depth {
+        schema = json!({ "type": "object", "properties": { "c": schema } });
+        object = json!({ "c": object });
+    }
+    (schema, object)
+}
+
+/// S4 / P1-A: a schema nested past `MAX_SCHEMA_DEPTH` (64) must **not** silently
+/// report success. The deep `self >= 0` rule is violated by `-1`, but the schema
+/// walker returns early at the depth cap and never evaluates it, so today the
+/// object passes validation it should fail — a fail-OPEN false negative. Failing
+/// closed means surfacing at least one error rather than dropping the rule.
+///
+#[test]
+fn deep_schema_must_not_silently_pass() {
+    let (schema, object) = deeply_nested(70);
+    let errors = Validator::new().validate(&schema, &object, None);
+    assert!(
+        errors.iter().any(|e| e.kind == ErrorKind::SchemaTooDeep),
+        "schema nested past the depth cap must fail closed with SchemaTooDeep; \
+         got {errors:?}"
+    );
+}
+
+/// Mirror of the above through the pre-compiled path
+/// ([`Validator::validate_compiled`]) — it must fail closed identically.
+#[test]
+fn deep_schema_fails_closed_when_precompiled() {
+    use kube_cel::compilation::compile_schema;
+    let (schema, object) = deeply_nested(70);
+    let compiled = compile_schema(&schema);
+    let errors = Validator::new().validate_compiled(&compiled, &object, None);
+    assert!(
+        errors.iter().any(|e| e.kind == ErrorKind::SchemaTooDeep),
+        "pre-compiled path must fail closed with SchemaTooDeep; got {errors:?}"
+    );
+}
+
+/// A schema within the cap is unaffected: the deep `self >= 0` rule is still
+/// evaluated and fails as an ordinary `ValidationFailure`, never `SchemaTooDeep`.
+#[test]
+fn schema_within_depth_cap_validates_normally() {
+    let (schema, object) = deeply_nested(60);
+    let errors = Validator::new().validate(&schema, &object, None);
+    assert!(
+        errors.iter().any(|e| e.kind == ErrorKind::ValidationFailure),
+        "within-cap schema should evaluate the deep rule; got {errors:?}"
+    );
+    assert!(
+        !errors.iter().any(|e| e.kind == ErrorKind::SchemaTooDeep),
+        "within-cap schema must not report SchemaTooDeep; got {errors:?}"
     );
 }

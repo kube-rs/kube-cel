@@ -38,6 +38,10 @@ pub enum ErrorKind {
     InvalidResult,
     /// Runtime evaluation error.
     EvaluationError,
+    /// Schema nesting exceeded the maximum supported depth.
+    /// The over-deep subtree was refused rather than skipped, so validation
+    /// fails closed instead of silently passing rules it never evaluated.
+    SchemaTooDeep,
 }
 
 /// An error produced when a CEL validation rule fails.
@@ -66,6 +70,23 @@ impl std::fmt::Display for ValidationError {
 }
 
 impl std::error::Error for ValidationError {}
+
+/// Builds the fail-closed error emitted when schema nesting exceeds
+/// [`MAX_SCHEMA_DEPTH`](crate::compilation::MAX_SCHEMA_DEPTH). Surfacing this —
+/// rather than silently skipping the over-deep subtree — is what keeps the
+/// validator fail-closed: a too-deep schema cannot quietly report success.
+fn schema_too_deep_error(path: &str) -> ValidationError {
+    ValidationError {
+        rule: String::new(),
+        message: format!(
+            "schema nesting exceeds the maximum depth of {}",
+            crate::compilation::MAX_SCHEMA_DEPTH
+        ),
+        field_path: path.to_string(),
+        reason: None,
+        kind: ErrorKind::SchemaTooDeep,
+    }
+}
 
 /// Validates Kubernetes objects against CRD schema CEL validation rules.
 ///
@@ -222,6 +243,7 @@ impl Validator {
         depth: usize,
     ) {
         if depth > crate::compilation::MAX_SCHEMA_DEPTH {
+            errors.push(schema_too_deep_error(&path));
             return;
         }
 
@@ -361,6 +383,7 @@ impl Validator {
         depth: usize,
     ) {
         if depth > crate::compilation::MAX_SCHEMA_DEPTH {
+            errors.push(schema_too_deep_error(&path));
             return;
         }
 
@@ -511,6 +534,9 @@ impl Validator {
                         reason: None,
                         kind: ErrorKind::InvalidRule,
                     });
+                }
+                Err(CompilationError::SchemaTooDeep { .. }) => {
+                    errors.push(schema_too_deep_error(path));
                 }
             }
         }

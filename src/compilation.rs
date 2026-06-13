@@ -60,6 +60,13 @@ pub enum CompilationError {
     },
     /// JSON value could not be deserialized into a [`Rule`].
     InvalidRule(serde_json::Error),
+    /// Schema nesting exceeded the maximum depth. The over-deep subtree was
+    /// refused rather than silently truncated, so a too-deep schema cannot
+    /// quietly drop the validation rules nested beneath the cap (fail-closed).
+    SchemaTooDeep {
+        /// The nesting depth at which the limit was exceeded.
+        depth: usize,
+    },
 }
 
 impl std::fmt::Display for CompilationError {
@@ -71,6 +78,12 @@ impl std::fmt::Display for CompilationError {
             CompilationError::InvalidRule(err) => {
                 write!(f, "invalid rule definition: {err}")
             }
+            CompilationError::SchemaTooDeep { depth } => {
+                write!(
+                    f,
+                    "schema nesting depth {depth} exceeds the maximum of {MAX_SCHEMA_DEPTH}"
+                )
+            }
         }
     }
 }
@@ -80,6 +93,7 @@ impl std::error::Error for CompilationError {
         match self {
             CompilationError::Parse { source, .. } => Some(source),
             CompilationError::InvalidRule(err) => Some(err),
+            CompilationError::SchemaTooDeep { .. } => None,
         }
     }
 }
@@ -209,8 +223,11 @@ pub fn compile_schema(schema: &serde_json::Value) -> CompiledSchema {
 
 fn compile_schema_inner(schema: &serde_json::Value, depth: usize) -> CompiledSchema {
     if depth > MAX_SCHEMA_DEPTH {
+        // Fail-closed: carry a SchemaTooDeep marker rather than returning a
+        // silently-empty node, so `compilation_errors()` and the validators
+        // surface the truncation instead of dropping the deep rules.
         return CompiledSchema {
-            validations: Vec::new(),
+            validations: vec![Err(CompilationError::SchemaTooDeep { depth })],
             properties: HashMap::new(),
             items: None,
             additional_properties: None,

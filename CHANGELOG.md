@@ -16,8 +16,15 @@ hygiene. See [#6](https://github.com/kube-rs/kube-cel/issues/6).
 - `#[non_exhaustive]` added to the public `ScopeContext`, `WarningKind`,
   `ErrorKind`, and `CompilationError` enums. Downstream `match` on these now
   needs a wildcard arm.
+- Schema nesting deeper than the depth cap (64) now **fails closed**: validation
+  surfaces a `SchemaTooDeep` error instead of silently skipping the over-deep
+  subtree. Objects that previously passed validation against a too-deep schema
+  (the deep rules were never evaluated) now report an error. This closes a
+  fail-*open* false-negative against the crate's apiserver-equivalence claim.
 
 ### Added
+- `ErrorKind::SchemaTooDeep` and `CompilationError::SchemaTooDeep { depth }`
+  variants, emitted when schema nesting exceeds the depth cap (see Breaking).
 - `KubeCelExt` trait: `register_all(&mut self) -> &mut Self` and the builder
   sugar `with_all(self) -> Self`. This is the single registration entry point.
   The trait is sealed (implemented only for `cel::Context`) so methods can be
