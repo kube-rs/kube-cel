@@ -67,7 +67,7 @@ fn main() {
 
     let compiled = compile_schema(&schema);
 
-    let objects = vec![
+    let objects = [
         json!({"spec": {"expiresAt": "2025-01-01T00:00:00Z", "timeout": "30s"}}),
         json!({"spec": {"expiresAt": "2023-12-31T23:59:59Z", "timeout": "45m"}}),
         json!({"spec": {"expiresAt": "2025-06-15T00:00:00Z", "timeout": "90m"}}),

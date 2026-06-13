@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn test_float() {
-        assert_eq!(json_to_cel(&json!(3.14)), Value::Float(3.14));
+        assert_eq!(json_to_cel(&json!(2.5)), Value::Float(2.5));
         assert_eq!(json_to_cel(&json!(0.0)), Value::Float(0.0));
     }
 

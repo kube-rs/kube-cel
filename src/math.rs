@@ -317,8 +317,8 @@ mod tests {
 
     #[test]
     fn test_abs_float() {
-        assert_eq!(eval("math.abs(-3.14)"), Value::Float(3.14));
-        assert_eq!(eval("math.abs(3.14)"), Value::Float(3.14));
+        assert_eq!(eval("math.abs(-2.5)"), Value::Float(2.5));
+        assert_eq!(eval("math.abs(2.5)"), Value::Float(2.5));
     }
 
     #[test]

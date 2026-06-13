@@ -34,7 +34,7 @@ fn main() {
     println!("Schema compiled successfully.\n");
 
     // Validate many objects
-    let objects = vec![
+    let objects = [
         json!({"spec": {"replicas": 3, "minReplicas": 1}}),
         json!({"spec": {"replicas": -1, "minReplicas": 0}}),
         json!({"spec": {"replicas": 1, "minReplicas": 5}}),
