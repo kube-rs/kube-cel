@@ -88,3 +88,7 @@ required-features = ["validation"]
 [[example]]
 name = "kube_workflow"
 required-features = ["validation"]
+
+[[example]]
+name = "error_chain"
+required-features = ["validation"]
