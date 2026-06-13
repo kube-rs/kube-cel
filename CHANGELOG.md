@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.1] - 2026-06-13
+
+### Fixed
+- docs.rs build for 0.6.0 failed: the crate gated `feature(doc_auto_cfg)` behind
+  `#![cfg_attr(docsrs, …)]`, and that nightly feature was removed in Rust 1.92.0
+  (merged into `doc_cfg`), so the docs.rs build (nightly + `--cfg docsrs`)
+  aborted with `error[E0557]: feature has been removed`. Switched to
+  `feature(doc_cfg)`. Library builds were unaffected — `docsrs` is only set by
+  docs.rs — so this is a documentation-only fix. The `just doc` recipe now also
+  reproduces the docs.rs build (nightly + `--cfg docsrs`) so this class of
+  docsrs-only breakage can no longer pass a stable `cargo doc`.
+
+
 ## [0.6.0] - 2026-06-13
 
 Breaking release that reshapes the registration surface around two user

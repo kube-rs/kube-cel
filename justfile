@@ -34,10 +34,15 @@ feature-check:
 
 # Build docs (warnings = errors). Both feature sets: the all-features build is
 # what hid the broken crate-root intra-doc links, so the default build is the
-# guard that catches them.
+# guard that catches them. The final line reproduces the docs.rs build exactly
+# (nightly + `--cfg docsrs`, all features, per [package.metadata.docs.rs]): a
+# stable `cargo doc` never exercises the `#![cfg_attr(docsrs, feature(...))]`
+# attrs, so docsrs-only breakage (e.g. a nightly feature removed upstream) slips
+# through every stable doc build. This is the guard that catches it.
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+    RUSTDOCFLAGS="--cfg docsrs" cargo +nightly doc --no-deps --all-features
 
 # --- Development helpers ---
 

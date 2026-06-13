@@ -65,7 +65,7 @@
 //! registration surface — [`KubeCelExt`] and the `cel` re-export; **Tier 2**
 //! (evolving, `validation` feature) is the validation engine, whose surface may
 //! still change across pre-1.0 minors. See the README for details.
-#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![deny(missing_docs)]
 // The validation-pipeline section links to feature-gated items, so it is only
 // emitted when `validation` is enabled. Keeping it out of the always-compiled
