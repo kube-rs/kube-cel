@@ -302,14 +302,28 @@ kube-cel = { version = "0.6", features = ["strings", "lists"] }
 | `encoders` | `base64` | Base64 encode/decode |
 | `validation` | `serde_json`, `serde`, `chrono` | CRD validation pipeline, VAP evaluation, static analysis, schema defaults |
 
-## Known Limitations
+## apiserver divergence
 
-| Feature | Reason |
-|---------|--------|
-| `cel.bind(var, init, expr)` | CEL compiler macro — requires `cel` crate support |
-| `<list>.sortBy(var, expr)` | Lambda evaluation — requires `cel` crate support |
-| TwoVarComprehensions (`all(i,v,...)`, `transformList`, etc.) | CEL compiler macro — K8s 1.33+ |
-| Authz library | Requires API server connection — outside client library scope |
+The validation pipeline aims to return the same verdict the Kubernetes API
+server would, client-side. Where it cannot today, it diverges **fail-closed** —
+it reports an error rather than silently accepting — so a passing result is
+always at least as strict as the API server, never less. These divergences are
+pinned by `tests/apiserver_divergence.rs`.
+
+| Feature | API server | kube-cel | Direction |
+|---------|-----------|----------|-----------|
+| `<list>.sortBy(var, expr)` | evaluates | `EvaluationError` | fail-closed |
+| `cel.bind(var, init, expr)` | evaluates | `EvaluationError` | fail-closed |
+| Two-arg comprehensions (`all(i, v, …)`, `transformList`, `transformMap`; K8s 1.33+) | evaluates | `EvaluationError` | fail-closed |
+| Schema nesting deeper than 64 levels | enforces (rejects over-limit schemas at registration) | `SchemaTooDeep` error | fail-closed |
+| Authz library (`authorizer.*`) | evaluates against the cluster | not available | out of scope |
+
+The unsupported CEL macros above **parse** successfully but error at evaluation
+(`cel` 0.13 has no such reference), so they surface as `EvaluationError`, not a
+compile error. Single-argument comprehensions (`list.all(x, …)`, `map(x, …)`,
+etc.) are fully supported and do not diverge. The macro gaps lift once the `cel`
+crate gains compiler-macro support; the authz library requires a live API server
+and is out of scope for a client library.
 
 ## Related
 

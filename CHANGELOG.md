@@ -25,6 +25,14 @@ hygiene. See [#6](https://github.com/kube-rs/kube-cel/issues/6).
 ### Added
 - `ErrorKind::SchemaTooDeep` and `CompilationError::SchemaTooDeep { depth }`
   variants, emitted when schema nesting exceeds the depth cap (see Breaking).
+
+### Documentation
+- README gained an "apiserver divergence" table mapping every known way the
+  validator's verdict differs from the API server, with direction (all
+  fail-closed). Pinned by `tests/apiserver_divergence.rs`. Notably, unsupported
+  CEL macros (`sortBy`, `cel.bind`, two-arg comprehensions) surface as
+  `EvaluationError`, not a compile error, because they parse but lack a `cel`
+  0.13 implementation.
 - `KubeCelExt` trait: `register_all(&mut self) -> &mut Self` and the builder
   sugar `with_all(self) -> Self`. This is the single registration entry point.
   The trait is sealed (implemented only for `cel::Context`) so methods can be
