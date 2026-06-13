@@ -172,7 +172,7 @@ mod tests {
     fn eval(expr: &str) -> Value {
         let mut ctx = Context::default();
         register(&mut ctx);
-        crate::dispatch::register(&mut ctx);
+        crate::functions::dispatch::register(&mut ctx);
         Program::compile(expr).unwrap().execute(&ctx).unwrap()
     }
 
@@ -267,7 +267,7 @@ mod tests {
     fn eval_err(expr: &str) -> cel::ExecutionError {
         let mut ctx = Context::default();
         register(&mut ctx);
-        crate::dispatch::register(&mut ctx);
+        crate::functions::dispatch::register(&mut ctx);
         Program::compile(expr).unwrap().execute(&ctx).unwrap_err()
     }
 

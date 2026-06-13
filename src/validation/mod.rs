@@ -1,10 +1,19 @@
-//! Schema tree walking and CEL rule evaluation for Kubernetes CRD validation.
+//! Client-side CRD validation engine (Tier 2 — the oracle).
 //!
-//! This module provides [`Validator`] which recursively walks an OpenAPI schema,
-//! compiles `x-kubernetes-validations` rules, evaluates them against object data,
-//! and collects [`ValidationError`]s.
+//! The crate root re-exports this module's public items flatly; the submodules
+//! here are internal. This file is the engine entry: [`Validator`] recursively
+//! walks an OpenAPI schema, compiles `x-kubernetes-validations` rules, evaluates
+//! them against object data, and collects [`ValidationError`]s. See the
+//! crate-level "Versioning and stability" docs (Tier 2 — evolving).
 
-use crate::{
+pub(crate) mod analysis;
+pub(crate) mod compilation;
+pub(crate) mod defaults;
+pub(crate) mod escaping;
+pub(crate) mod values;
+pub(crate) mod vap;
+
+use crate::validation::{
     compilation::{CompilationError, CompilationResult, CompiledSchema, compile_schema_validations},
     values::{json_to_cel_with_compiled, json_to_cel_with_schema},
 };
@@ -119,7 +128,7 @@ impl std::error::Error for ValidationError {
 }
 
 /// Builds the fail-closed error emitted when schema nesting exceeds
-/// [`MAX_SCHEMA_DEPTH`](crate::compilation::MAX_SCHEMA_DEPTH). Surfacing this —
+/// [`MAX_SCHEMA_DEPTH`](crate::validation::compilation::MAX_SCHEMA_DEPTH). Surfacing this —
 /// rather than silently skipping the over-deep subtree — is what keeps the
 /// validator fail-closed: a too-deep schema cannot quietly report success.
 fn schema_too_deep_error(path: &str) -> ValidationError {
@@ -127,7 +136,7 @@ fn schema_too_deep_error(path: &str) -> ValidationError {
         rule: String::new(),
         message: format!(
             "schema nesting exceeds the maximum depth of {}",
-            crate::compilation::MAX_SCHEMA_DEPTH
+            crate::validation::compilation::MAX_SCHEMA_DEPTH
         ),
         field_path: path.to_string(),
         reason: None,
@@ -247,7 +256,7 @@ impl Validator {
 
     /// Validate with schema defaults applied to the object first.
     ///
-    /// Equivalent to calling [`crate::defaults::apply_defaults`] followed by [`validate`].
+    /// Equivalent to calling [`crate::validation::defaults::apply_defaults`] followed by [`validate`].
     #[must_use]
     pub fn validate_with_defaults(
         &self,
@@ -255,14 +264,14 @@ impl Validator {
         object: &serde_json::Value,
         old_object: Option<&serde_json::Value>,
     ) -> Vec<ValidationError> {
-        let defaulted = crate::defaults::apply_defaults(schema, object);
-        let defaulted_old = old_object.map(|o| crate::defaults::apply_defaults(schema, o));
+        let defaulted = crate::validation::defaults::apply_defaults(schema, object);
+        let defaulted_old = old_object.map(|o| crate::validation::defaults::apply_defaults(schema, o));
         self.validate(schema, &defaulted, defaulted_old.as_ref())
     }
 
     /// Validate with schema defaults applied and root context variables bound.
     ///
-    /// Combines [`crate::defaults::apply_defaults`] with [`Self::validate_with_context`].
+    /// Combines [`crate::validation::defaults::apply_defaults`] with [`Self::validate_with_context`].
     #[must_use]
     pub fn validate_with_defaults_and_context(
         &self,
@@ -271,8 +280,8 @@ impl Validator {
         old_object: Option<&serde_json::Value>,
         root_ctx: Option<&RootContext>,
     ) -> Vec<ValidationError> {
-        let defaulted = crate::defaults::apply_defaults(schema, object);
-        let defaulted_old = old_object.map(|o| crate::defaults::apply_defaults(schema, o));
+        let defaulted = crate::validation::defaults::apply_defaults(schema, object);
+        let defaulted_old = old_object.map(|o| crate::validation::defaults::apply_defaults(schema, o));
         self.validate_with_context(schema, &defaulted, defaulted_old.as_ref(), root_ctx)
     }
 
@@ -290,7 +299,7 @@ impl Validator {
         root_ctx: Option<&RootContext>,
         depth: usize,
     ) {
-        if depth > crate::compilation::MAX_SCHEMA_DEPTH {
+        if depth > crate::validation::compilation::MAX_SCHEMA_DEPTH {
             errors.push(schema_too_deep_error(&path));
             return;
         }
@@ -430,7 +439,7 @@ impl Validator {
         root_ctx: Option<&RootContext>,
         depth: usize,
     ) {
-        if depth > crate::compilation::MAX_SCHEMA_DEPTH {
+        if depth > crate::validation::compilation::MAX_SCHEMA_DEPTH {
             errors.push(schema_too_deep_error(&path));
             return;
         }
@@ -768,7 +777,7 @@ fn join_path_index(base: &str, index: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compilation::compile_schema;
+    use crate::validation::compilation::compile_schema;
     use serde_json::json;
 
     fn make_schema(validations: serde_json::Value) -> serde_json::Value {
@@ -1492,7 +1501,7 @@ mod tests {
             api_group: "example.com".into(),
             kind: "MyResource".into(),
         };
-        let compiled = crate::compilation::compile_schema(&schema);
+        let compiled = crate::validation::compilation::compile_schema(&schema);
         let errors = Validator::new().validate_compiled_with_context(&compiled, &obj, None, Some(&root_ctx));
         assert!(errors.is_empty());
     }

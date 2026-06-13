@@ -6,7 +6,7 @@
 use cel::{Context, ResolveResult, objects::Value};
 use std::sync::Arc;
 
-use crate::value_ops::val_eq;
+use crate::functions::value_ops::val_eq;
 
 /// Register all set extension functions.
 pub(crate) fn register(ctx: &mut Context<'_>) {

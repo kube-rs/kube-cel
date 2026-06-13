@@ -101,63 +101,30 @@ For repeated validation against the same schema, pre-compile with
 /// `cel` version this crate was built against.
 pub use cel;
 
-#[cfg(feature = "strings")] mod strings;
-
-#[cfg(feature = "lists")] mod lists;
-
-#[cfg(feature = "sets")] mod sets;
-
-#[cfg(feature = "regex_funcs")] mod regex_funcs;
-
-#[cfg(feature = "urls")] mod urls;
-
-#[cfg(feature = "ip")] mod ip;
-
-#[cfg(feature = "semver_funcs")] mod semver_funcs;
-
-#[cfg(feature = "format")] mod format;
-
-#[cfg(feature = "quantity")] mod quantity;
-
-#[cfg(feature = "jsonpatch")] mod jsonpatch;
-
-#[cfg(feature = "named_format")] mod named_format;
-
-#[cfg(feature = "math")] mod math;
-
-#[cfg(feature = "encoders")] mod encoders;
-
-// The validation pipeline is exposed as a flat set of crate-root re-exports
-// (below), not as public submodules — the internal file layout is not part of
-// the public API. See the "Versioning and stability" docs (Tier 2).
-#[cfg(feature = "validation")] mod escaping;
-
-#[cfg(feature = "validation")] mod values;
-
-#[cfg(feature = "validation")] mod compilation;
-
-#[cfg(feature = "validation")] mod validation;
-
-#[cfg(feature = "validation")] mod defaults;
-
-#[cfg(feature = "validation")] mod analysis;
-
-#[cfg(feature = "validation")] mod vap;
-
-mod dispatch;
+// Source is grouped by the crate's two tiers (see the "Versioning and
+// stability" docs). Both are internal module trees; the public API is the flat
+// set of crate-root re-exports below, not the file layout.
+//
+// `functions/` — Tier 1, the Kubernetes CEL extension-function port (always on,
+// each library behind its own feature). Public entry point: `KubeCelExt`.
 mod ext;
-mod value_ops;
+mod functions;
+
+// `validation/` — Tier 2, the client-side validation engine (`validation`
+// feature). Its public items are re-exported flatly below.
+#[cfg(feature = "validation")] mod validation;
 
 pub use ext::KubeCelExt;
 
 #[cfg(feature = "validation")]
-pub use crate::{
+pub use crate::validation::{
+    ErrorKind, RootContext, ValidationError, Validator,
     analysis::{
         AnalysisWarning, ScopeContext, WarningKind, analyze_rule, check_rule_scope, estimate_rule_cost,
     },
     compilation::{CompilationError, CompilationResult, CompiledSchema, Rule, compile_schema},
     defaults::apply_defaults,
-    validation::{ErrorKind, RootContext, ValidationError, Validator, validate, validate_compiled},
+    validate, validate_compiled,
     values::SchemaFormat,
     vap::{
         AdmissionRequest, CompiledVapExpression, GroupVersionKind, GroupVersionResource, VapError,
@@ -167,54 +134,9 @@ pub use crate::{
 
 /// Registers all compiled-in Kubernetes CEL extension functions into `ctx`.
 ///
-/// Internal implementation behind [`KubeCelExt::register_all`]; kept as a free
-/// function so the in-crate callers (dispatch, vap, validation, …) can invoke it
-/// without importing the trait.
-pub(crate) fn register_all(ctx: &mut cel::Context<'_>) {
-    #[cfg(feature = "strings")]
-    strings::register(ctx);
-
-    #[cfg(feature = "lists")]
-    lists::register(ctx);
-
-    #[cfg(feature = "sets")]
-    sets::register(ctx);
-
-    #[cfg(feature = "regex_funcs")]
-    regex_funcs::register(ctx);
-
-    #[cfg(feature = "urls")]
-    urls::register(ctx);
-
-    #[cfg(feature = "ip")]
-    ip::register(ctx);
-
-    #[cfg(feature = "semver_funcs")]
-    semver_funcs::register(ctx);
-
-    #[cfg(feature = "format")]
-    format::register(ctx);
-
-    #[cfg(feature = "quantity")]
-    quantity::register(ctx);
-
-    #[cfg(feature = "jsonpatch")]
-    jsonpatch::register(ctx);
-
-    #[cfg(feature = "named_format")]
-    named_format::register(ctx);
-
-    #[cfg(feature = "math")]
-    math::register(ctx);
-
-    #[cfg(feature = "encoders")]
-    encoders::register(ctx);
-
-    // Dispatch: registers functions with name collisions (indexOf, reverse,
-    // min/max, string, ip, isGreaterThan, etc.). Order-independent since
-    // individual modules no longer register these conflicting names.
-    dispatch::register(ctx);
-}
+/// Re-exported from [`functions`] so in-crate callers can keep writing
+/// `crate::register_all`.
+pub(crate) use functions::register_all;
 
 #[cfg(test)]
 mod tests {

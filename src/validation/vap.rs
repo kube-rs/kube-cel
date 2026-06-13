@@ -33,7 +33,7 @@ use cel::{
     objects::{Key, Map},
 };
 
-use crate::values::json_to_cel;
+use crate::validation::values::json_to_cel;
 
 /// Group/Version/Kind identifier.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

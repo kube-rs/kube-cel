@@ -5,7 +5,7 @@
 
 use cel::{Program, common::ast::Expr};
 
-use crate::compilation::CompiledSchema;
+use crate::validation::compilation::CompiledSchema;
 
 /// The context in which a CEL rule is evaluated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -269,7 +269,7 @@ fn check_missing_bounds(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compilation::compile_schema;
+    use crate::validation::compilation::compile_schema;
     use serde_json::json;
 
     #[test]

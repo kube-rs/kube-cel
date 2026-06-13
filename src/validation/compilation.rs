@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use cel::{ParseErrors, Program};
 
-use crate::values::SchemaFormat;
+use crate::validation::values::SchemaFormat;
 
 /// A single CRD `x-kubernetes-validations` rule.
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -581,7 +581,7 @@ mod end_to_end_tests {
     use serde_json::json;
 
     use super::{CompilationError, compile_schema};
-    use crate::{register_all, values::json_to_cel};
+    use crate::{register_all, validation::values::json_to_cel};
 
     /// Compile rules from a schema, bind `self`, evaluate the first program.
     fn compile_and_eval_first(schema: serde_json::Value, self_val: serde_json::Value) -> Value {

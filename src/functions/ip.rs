@@ -507,7 +507,7 @@ mod tests {
     fn test_ip_string() {
         let mut ctx = Context::default();
         register(&mut ctx);
-        crate::dispatch::register(&mut ctx);
+        crate::functions::dispatch::register(&mut ctx);
         let result = Program::compile("ip('192.168.1.1').string()")
             .unwrap()
             .execute(&ctx)
@@ -519,7 +519,7 @@ mod tests {
     fn test_ip_string_v6() {
         let mut ctx = Context::default();
         register(&mut ctx);
-        crate::dispatch::register(&mut ctx);
+        crate::functions::dispatch::register(&mut ctx);
         let result = Program::compile("ip('::1').string()")
             .unwrap()
             .execute(&ctx)
@@ -531,7 +531,7 @@ mod tests {
     fn test_cidr_string() {
         let mut ctx = Context::default();
         register(&mut ctx);
-        crate::dispatch::register(&mut ctx);
+        crate::functions::dispatch::register(&mut ctx);
         let result = Program::compile("cidr('192.168.0.0/24').string()")
             .unwrap()
             .execute(&ctx)
@@ -546,7 +546,7 @@ mod tests {
         // cidr_ip is tested via dispatch, but also directly
         let mut ctx = Context::default();
         register(&mut ctx);
-        crate::dispatch::register(&mut ctx);
+        crate::functions::dispatch::register(&mut ctx);
         let result = Program::compile("cidr('192.168.0.0/24').ip() == ip('192.168.0.0')")
             .unwrap()
             .execute(&ctx)
@@ -558,7 +558,7 @@ mod tests {
     fn test_cidr_ip_v6() {
         let mut ctx = Context::default();
         register(&mut ctx);
-        crate::dispatch::register(&mut ctx);
+        crate::functions::dispatch::register(&mut ctx);
         let result = Program::compile("cidr('fd00::/64').ip() == ip('fd00::')")
             .unwrap()
             .execute(&ctx)
@@ -602,7 +602,7 @@ mod tests {
     fn test_cidr_contains_slash32() {
         let mut ctx = Context::default();
         register(&mut ctx);
-        crate::dispatch::register(&mut ctx);
+        crate::functions::dispatch::register(&mut ctx);
         assert_eq!(
             Program::compile("cidr('192.168.0.0/24').containsCIDR(cidr('192.168.0.1/32'))")
                 .unwrap()
@@ -623,7 +623,7 @@ mod tests {
     fn test_cidr_ipv6_containment() {
         let mut ctx = Context::default();
         register(&mut ctx);
-        crate::dispatch::register(&mut ctx);
+        crate::functions::dispatch::register(&mut ctx);
         assert_eq!(
             Program::compile("cidr('2001:db8::/32').containsCIDR(cidr('2001:db8::/33'))")
                 .unwrap()
@@ -638,7 +638,7 @@ mod tests {
         // masking 192.168.1.5/24 should give 192.168.1.0/24
         let mut ctx = Context::default();
         register(&mut ctx);
-        crate::dispatch::register(&mut ctx);
+        crate::functions::dispatch::register(&mut ctx);
         assert_eq!(
             Program::compile("cidr('192.168.1.5/24').masked().containsIP('192.168.1.0')")
                 .unwrap()
@@ -672,7 +672,7 @@ mod tests {
     fn test_cidr_string_v6() {
         let mut ctx = Context::default();
         register(&mut ctx);
-        crate::dispatch::register(&mut ctx);
+        crate::functions::dispatch::register(&mut ctx);
         let result = Program::compile("cidr('fd00::/8').string()")
             .unwrap()
             .execute(&ctx)

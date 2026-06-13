@@ -54,10 +54,10 @@ pub(crate) fn register(ctx: &mut Context<'_>) {
 fn index_of(This(this): This<Value>, Arguments(args): Arguments) -> ResolveResult {
     match this {
         #[cfg(feature = "strings")]
-        Value::String(s) => crate::strings::string_index_of(This(s), Arguments(args)),
+        Value::String(s) => crate::functions::strings::string_index_of(This(s), Arguments(args)),
 
         #[cfg(feature = "lists")]
-        Value::List(list) => crate::lists::list_index_of(&list, &args),
+        Value::List(list) => crate::functions::lists::list_index_of(&list, &args),
 
         _ => Err(ExecutionError::function_error(
             "indexOf",
@@ -70,10 +70,10 @@ fn index_of(This(this): This<Value>, Arguments(args): Arguments) -> ResolveResul
 fn last_index_of(This(this): This<Value>, Arguments(args): Arguments) -> ResolveResult {
     match this {
         #[cfg(feature = "strings")]
-        Value::String(s) => crate::strings::string_last_index_of(This(s), Arguments(args)),
+        Value::String(s) => crate::functions::strings::string_last_index_of(This(s), Arguments(args)),
 
         #[cfg(feature = "lists")]
-        Value::List(list) => crate::lists::list_last_index_of(&list, &args),
+        Value::List(list) => crate::functions::lists::list_last_index_of(&list, &args),
 
         _ => Err(ExecutionError::function_error(
             "lastIndexOf",
@@ -98,13 +98,16 @@ macro_rules! opaque_comparison_dispatch {
             match &this {
                 #[cfg(feature = "semver_funcs")]
                 Value::Opaque(o)
-                    if o.downcast_ref::<crate::semver_funcs::KubeSemver>()
+                    if o.downcast_ref::<crate::functions::semver_funcs::KubeSemver>()
                         .is_some() =>
                 {
                     $semver_fn(This(this), arg)
                 }
                 #[cfg(feature = "quantity")]
-                Value::Opaque(o) if o.downcast_ref::<crate::quantity::KubeQuantity>().is_some() => {
+                Value::Opaque(o)
+                    if o.downcast_ref::<crate::functions::quantity::KubeQuantity>()
+                        .is_some() =>
+                {
                     $quantity_fn(This(this), arg)
                 }
                 _ => Err(ExecutionError::function_error(
@@ -119,20 +122,20 @@ macro_rules! opaque_comparison_dispatch {
 opaque_comparison_dispatch!(
     is_greater_than,
     "isGreaterThan",
-    crate::semver_funcs::semver_is_greater_than,
-    crate::quantity::cel_is_greater_than
+    crate::functions::semver_funcs::semver_is_greater_than,
+    crate::functions::quantity::cel_is_greater_than
 );
 opaque_comparison_dispatch!(
     is_less_than,
     "isLessThan",
-    crate::semver_funcs::semver_is_less_than,
-    crate::quantity::cel_is_less_than
+    crate::functions::semver_funcs::semver_is_less_than,
+    crate::functions::quantity::cel_is_less_than
 );
 opaque_comparison_dispatch!(
     compare_to,
     "compareTo",
-    crate::semver_funcs::semver_compare_to,
-    crate::quantity::cel_compare_to
+    crate::functions::semver_funcs::semver_compare_to,
+    crate::functions::quantity::cel_compare_to
 );
 
 // ---------------------------------------------------------------------------
@@ -142,8 +145,8 @@ opaque_comparison_dispatch!(
 #[cfg(feature = "ip")]
 fn ip_dispatch(This(this): This<Value>, Arguments(args): Arguments) -> ResolveResult {
     match &this {
-        Value::Opaque(o) if o.downcast_ref::<crate::ip::KubeCIDR>().is_some() => {
-            crate::ip::cidr_ip(This(this))
+        Value::Opaque(o) if o.downcast_ref::<crate::functions::ip::KubeCIDR>().is_some() => {
+            crate::functions::ip::cidr_ip(This(this))
         }
         _ => {
             // Fallback: treat first argument (or this for global call) as string
@@ -159,8 +162,11 @@ fn ip_dispatch(This(this): This<Value>, Arguments(args): Arguments) -> ResolveRe
                     }
                 },
             };
-            let addr = crate::ip::parse_ip_addr(&s).map_err(|e| ExecutionError::function_error("ip", e))?;
-            Ok(Value::Opaque(std::sync::Arc::new(crate::ip::KubeIP::new(addr))))
+            let addr = crate::functions::ip::parse_ip_addr(&s)
+                .map_err(|e| ExecutionError::function_error("ip", e))?;
+            Ok(Value::Opaque(std::sync::Arc::new(
+                crate::functions::ip::KubeIP::new(addr),
+            )))
         }
     }
 }
@@ -182,11 +188,11 @@ fn ip_dispatch(This(this): This<Value>, Arguments(args): Arguments) -> ResolveRe
 fn string_dispatch(This(this): This<Value>) -> ResolveResult {
     match &this {
         // Opaque types: K8s CEL extensions
-        Value::Opaque(o) if o.downcast_ref::<crate::ip::KubeIP>().is_some() => {
-            crate::ip::ip_string(This(this))
+        Value::Opaque(o) if o.downcast_ref::<crate::functions::ip::KubeIP>().is_some() => {
+            crate::functions::ip::ip_string(This(this))
         }
-        Value::Opaque(o) if o.downcast_ref::<crate::ip::KubeCIDR>().is_some() => {
-            crate::ip::cidr_string(This(this))
+        Value::Opaque(o) if o.downcast_ref::<crate::functions::ip::KubeCIDR>().is_some() => {
+            crate::functions::ip::cidr_string(This(this))
         }
         // Standard types: mirrors cel::functions::string (cel 0.12)
         _ => builtin_string_fallback(this),
@@ -282,10 +288,10 @@ fn format_cel_duration(total_nanos: i64) -> String {
 fn reverse(This(this): This<Value>) -> ResolveResult {
     match this {
         #[cfg(feature = "strings")]
-        Value::String(s) => crate::strings::string_reverse(This(s)),
+        Value::String(s) => crate::functions::strings::string_reverse(This(s)),
 
         #[cfg(feature = "lists")]
-        Value::List(list) => crate::lists::list_reverse_value(This(list)),
+        Value::List(list) => crate::functions::lists::list_reverse_value(This(list)),
 
         _ => Err(ExecutionError::function_error(
             "reverse",
@@ -301,7 +307,7 @@ fn reverse(This(this): This<Value>) -> ResolveResult {
 #[cfg(feature = "lists")]
 fn min_dispatch(This(this): This<Value>, Arguments(args): Arguments) -> ResolveResult {
     match this {
-        Value::List(list) if args.is_empty() => crate::lists::list_min(This(list)),
+        Value::List(list) if args.is_empty() => crate::functions::lists::list_min(This(list)),
         _ => {
             let mut all_args = vec![this];
             all_args.extend(args.iter().cloned());
@@ -313,7 +319,7 @@ fn min_dispatch(This(this): This<Value>, Arguments(args): Arguments) -> ResolveR
 #[cfg(feature = "lists")]
 fn max_dispatch(This(this): This<Value>, Arguments(args): Arguments) -> ResolveResult {
     match this {
-        Value::List(list) if args.is_empty() => crate::lists::list_max(This(list)),
+        Value::List(list) if args.is_empty() => crate::functions::lists::list_max(This(list)),
         _ => {
             let mut all_args = vec![this];
             all_args.extend(args.iter().cloned());

@@ -16,7 +16,7 @@ use cel::{
     objects::{Key, Map},
 };
 
-use crate::{compilation::CompiledSchema, escaping::escape_field_name};
+use crate::validation::{compilation::CompiledSchema, escaping::escape_field_name};
 
 /// The `format` hint from an OpenAPI schema property.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

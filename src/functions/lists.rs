@@ -10,7 +10,7 @@ use cel::{
 };
 use std::{cmp::Ordering, sync::Arc};
 
-use crate::value_ops::{compare_values, val_add, val_eq, val_le, val_lt};
+use crate::functions::value_ops::{compare_values, val_add, val_eq, val_le, val_lt};
 
 /// Register all list extension functions.
 pub(crate) fn register(ctx: &mut Context<'_>) {
@@ -271,7 +271,7 @@ mod tests {
     fn eval(expr: &str) -> Value {
         let mut ctx = Context::default();
         register(&mut ctx);
-        crate::dispatch::register(&mut ctx);
+        crate::functions::dispatch::register(&mut ctx);
         Program::compile(expr).unwrap().execute(&ctx).unwrap()
     }
 
@@ -373,7 +373,7 @@ mod tests {
     fn eval_err(expr: &str) -> cel::ExecutionError {
         let mut ctx = Context::default();
         register(&mut ctx);
-        crate::dispatch::register(&mut ctx);
+        crate::functions::dispatch::register(&mut ctx);
         Program::compile(expr).unwrap().execute(&ctx).unwrap_err()
     }
 
