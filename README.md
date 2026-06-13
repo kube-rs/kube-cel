@@ -337,6 +337,7 @@ pinned by `tests/apiserver_divergence.rs`.
 | `cel.bind(var, init, expr)` | evaluates | `UnsupportedReference` | fail-closed |
 | Two-arg comprehensions (`all(i, v, …)`, `transformList`, `transformMap`; K8s 1.33+) | evaluates | `UnsupportedReference` | fail-closed |
 | Schema nesting deeper than 64 levels | enforces (rejects over-limit schemas at registration) | `SchemaTooDeep` error | fail-closed |
+| Rule whose `messageExpression` does not compile | rejects the CRD at registration | `CompilationFailure` (the rule is rejected, not just its message) | fail-closed |
 | Authz library (`authorizer.*`) | evaluates against the cluster | not available | out of scope |
 
 The unsupported CEL macros above **parse** successfully but error at evaluation

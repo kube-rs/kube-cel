@@ -46,8 +46,9 @@ pub struct CompilationResult {
     pub rule: Rule,
     /// Whether the rule references `oldSelf` (transition rule).
     pub is_transition_rule: bool,
-    /// Pre-compiled `messageExpression` program (if present and valid).
-    /// `None` if no `messageExpression` was specified or if it failed to compile.
+    /// Pre-compiled `messageExpression` program, or `None` if the rule had no
+    /// `messageExpression`. A `messageExpression` that fails to compile yields a
+    /// [`CompilationError::MessageExpressionParse`] instead of a `None` here.
     pub message_program: Option<Program>,
 }
 
@@ -59,6 +60,21 @@ pub enum CompilationError {
     Parse {
         /// The original CEL expression that failed to compile.
         rule: String,
+        /// The boxed parse error reported by the CEL compiler. Boxed (rather
+        /// than carrying the concrete `cel::ParseErrors`) so the pre-1.0 `cel`
+        /// type is not frozen into this public enum variant; reach it via
+        /// [`Error::source`](std::error::Error::source).
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// A rule's `messageExpression` failed to parse. The `rule` itself is
+    /// well-formed, but its dynamic error message cannot be compiled. Surfaced as
+    /// a compilation error (rather than silently dropped) so the rule fails
+    /// closed, mirroring the apiserver, which rejects such a CRD at registration.
+    MessageExpressionParse {
+        /// The rule whose `messageExpression` failed to compile.
+        rule: String,
+        /// The `messageExpression` that failed to compile.
+        message_expression: String,
         /// The boxed parse error reported by the CEL compiler. Boxed (rather
         /// than carrying the concrete `cel::ParseErrors`) so the pre-1.0 `cel`
         /// type is not frozen into this public enum variant; reach it via
@@ -82,6 +98,16 @@ impl std::fmt::Display for CompilationError {
             CompilationError::Parse { rule, source } => {
                 write!(f, "failed to compile CEL rule \"{rule}\": {source}")
             }
+            CompilationError::MessageExpressionParse {
+                rule,
+                message_expression,
+                source,
+            } => {
+                write!(
+                    f,
+                    "failed to compile messageExpression \"{message_expression}\" for rule \"{rule}\": {source}"
+                )
+            }
             CompilationError::InvalidRule(err) => {
                 write!(f, "invalid rule definition: {err}")
             }
@@ -99,6 +125,7 @@ impl std::error::Error for CompilationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             CompilationError::Parse { source, .. } => Some(source.as_ref()),
+            CompilationError::MessageExpressionParse { source, .. } => Some(source.as_ref()),
             CompilationError::InvalidRule(err) => Some(err),
             CompilationError::SchemaTooDeep { .. } => None,
         }
@@ -107,7 +134,8 @@ impl std::error::Error for CompilationError {
 
 /// Compile a single [`Rule`] into a [`CompilationResult`].
 ///
-/// Returns [`CompilationError::Parse`] if the CEL expression is invalid.
+/// Returns [`CompilationError::Parse`] if the rule expression is invalid, or
+/// [`CompilationError::MessageExpressionParse`] if its `messageExpression` is.
 pub(crate) fn compile_rule(rule: &Rule) -> Result<CompilationResult, CompilationError> {
     let program = Program::compile(&rule.rule).map_err(|e| CompilationError::Parse {
         rule: rule.rule.clone(),
@@ -115,11 +143,19 @@ pub(crate) fn compile_rule(rule: &Rule) -> Result<CompilationResult, Compilation
     })?;
     let is_transition_rule = program.references().has_variable("oldSelf");
 
-    // Best-effort: compile messageExpression if present, ignore failures
-    let message_program = rule
-        .message_expression
-        .as_deref()
-        .and_then(|expr| Program::compile(expr).ok());
+    // Compile messageExpression if present. A failure fails closed (the apiserver
+    // rejects such a CRD at registration), mirroring the `rule` path above rather
+    // than silently dropping the dynamic message.
+    let message_program = match rule.message_expression.as_deref() {
+        Some(expr) => Some(
+            Program::compile(expr).map_err(|e| CompilationError::MessageExpressionParse {
+                rule: rule.rule.clone(),
+                message_expression: expr.to_string(),
+                source: Box::new(e),
+            })?,
+        ),
+        None => None,
+    };
 
     Ok(CompilationResult {
         program,
@@ -467,9 +503,10 @@ mod tests {
         // the rule path + the apiserver, which rejects such a CRD at
         // registration), not be silently dropped with a fall-back to the static
         // message.
+        let err = compile_rule(&rule).unwrap_err();
         assert!(
-            compile_rule(&rule).is_err(),
-            "broken messageExpression must surface as a compilation error"
+            matches!(err, CompilationError::MessageExpressionParse { .. }),
+            "expected MessageExpressionParse, got {err:?}"
         );
     }
 

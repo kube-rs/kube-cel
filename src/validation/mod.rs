@@ -586,6 +586,24 @@ impl Validator {
                         source: None,
                     });
                 }
+                Err(CompilationError::MessageExpressionParse {
+                    rule,
+                    message_expression,
+                    source,
+                }) => {
+                    errors.push(ValidationError {
+                        rule: rule.clone(),
+                        message: format!(
+                            "failed to compile messageExpression \"{message_expression}\" for rule \"{rule}\": {source}"
+                        ),
+                        field_path: path.to_string(),
+                        reason: None,
+                        kind: ErrorKind::CompilationFailure,
+                        // `cel::ParseErrors` is `!Clone` and only borrowed here,
+                        // so the typed cause cannot be owned; detail is in `message`.
+                        source: None,
+                    });
+                }
                 Err(CompilationError::InvalidRule(e)) => {
                     errors.push(ValidationError {
                         rule: String::new(),
@@ -1044,17 +1062,20 @@ mod tests {
     }
 
     #[test]
-    fn message_expression_falls_back_to_static() {
+    fn invalid_message_expression_fails_closed() {
         let schema = make_schema(json!([{
             "rule": "self.replicas >= 0",
             "message": "static message",
             "messageExpression": "invalid >="
         }]));
-        let obj = json!({"replicas": -1, "name": "app"});
+        // The object *satisfies* the rule, yet a messageExpression that fails to
+        // compile fails closed (CompilationFailure) — mirroring the apiserver,
+        // which rejects such a CRD at registration — rather than being silently
+        // dropped and the rule evaluated with the static message.
+        let obj = json!({"replicas": 5, "name": "app"});
         let errors = validate(&schema, &obj, None);
         assert_eq!(errors.len(), 1);
-        // messageExpression failed to compile → falls back to static message
-        assert_eq!(errors[0].message, "static message");
+        assert_eq!(errors[0].kind, ErrorKind::CompilationFailure);
     }
 
     #[test]

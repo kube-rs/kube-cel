@@ -670,7 +670,7 @@ fn message_expression_end_to_end() {
 }
 
 #[test]
-fn message_expression_fallback_to_static_end_to_end() {
+fn invalid_message_expression_fails_closed_end_to_end() {
     let schema = json!({
         "type": "object",
         "x-kubernetes-validations": [{
@@ -683,11 +683,14 @@ fn message_expression_fallback_to_static_end_to_end() {
         }
     });
 
-    let obj = json!({"x": -1});
+    // The object satisfies the rule, yet a messageExpression that fails to
+    // compile fails closed (CompilationFailure) — mirroring the apiserver, which
+    // rejects such a CRD at registration — rather than being silently dropped and
+    // the rule evaluated with the static message.
+    let obj = json!({"x": 5});
     let errors = validate(&schema, &obj, None);
     assert_eq!(errors.len(), 1);
-    // Invalid messageExpression → falls back to static message
-    assert_eq!(errors[0].message, "x must be positive");
+    assert_eq!(errors[0].kind, ErrorKind::CompilationFailure);
 }
 
 #[test]

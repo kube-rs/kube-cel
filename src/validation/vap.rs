@@ -295,10 +295,16 @@ impl VapEvaluator {
                     expression: expr.expression.clone(),
                     source: Box::new(e),
                 })?;
-                let message_program = expr
-                    .message_expression
-                    .as_deref()
-                    .and_then(|me| Program::compile(me).ok());
+                // A messageExpression that fails to compile fails closed (the
+                // apiserver rejects such a policy at registration), mirroring the
+                // expression path above rather than silently dropping it.
+                let message_program = match expr.message_expression.as_deref() {
+                    Some(me) => Some(Program::compile(me).map_err(|e| VapError {
+                        expression: me.to_string(),
+                        source: Box::new(e),
+                    })?),
+                    None => None,
+                };
                 Ok(CompiledVapExpression {
                     program,
                     expression: expr.expression.clone(),
@@ -526,6 +532,7 @@ mod tests {
 
     #[test]
     fn invalid_message_expression_fails_closed() {
+        use std::error::Error;
         // The expression itself is valid; only its messageExpression is broken.
         // The apiserver rejects such a policy at registration, so a broken
         // messageExpression must fail closed here too, not be silently dropped.
@@ -535,10 +542,14 @@ mod tests {
             message: Some("fallback".into()),
             message_expression: Some("invalid >=".into()),
         }]);
-        assert!(
-            compiled[0].is_err(),
-            "broken VAP messageExpression must surface as a compile error"
-        );
+        let err = compiled[0].as_ref().unwrap_err();
+        // The error points at the broken messageExpression and chains its cause.
+        assert_eq!(err.expression, "invalid >=");
+        assert!(err.source().is_some(), "VapError should chain the cel cause");
+
+        // And evaluate_compiled surfaces it as a failed result (fail closed).
+        let results = evaluator.evaluate_compiled(&compiled);
+        assert!(!results[0].passed);
     }
 
     #[test]

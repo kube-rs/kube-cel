@@ -21,6 +21,15 @@ hygiene. See [#6](https://github.com/kube-rs/kube-cel/issues/6).
   subtree. Objects that previously passed validation against a too-deep schema
   (the deep rules were never evaluated) now report an error. This closes a
   fail-*open* false-negative against the crate's apiserver-equivalence claim.
+- A rule whose `messageExpression` fails to compile now **fails closed**: it
+  surfaces a `CompilationFailure` (CRD path) / failed result (VAP path) instead
+  of being silently dropped and the rule evaluated with the static `message`.
+  The apiserver rejects such a CRD/policy at registration, so objects that
+  previously passed (the broken `messageExpression` only affected message text)
+  now report an error. Closes a second fail-*open* divergence, mirroring the
+  existing `rule`-compilation path. A new additive `CompilationError::MessageExpressionParse`
+  variant carries the rule, the offending `messageExpression`, and the cause via
+  `source()`.
 - The validation submodules (`values`, `analysis`, `escaping`, `defaults`,
   `compilation`, `validation`, `vap`) are now **private**; the public API is a
   flat set of crate-root re-exports. Replace `kube_cel::<module>::Item` with
