@@ -32,6 +32,9 @@ hygiene. See [#6](https://github.com/kube-rs/kube-cel/issues/6).
   apart from a genuine runtime error. Still fail-closed (the object is rejected).
 
 ### Documentation
+- "Versioning and stability" section (README + crate docs): kube-cel cannot reach
+  1.0 until `cel` does (C-STABLE), and a two-tier stability contract — Tier 1
+  (registration surface, committed) vs Tier 2 (validation engine, evolving).
 - README gained an "apiserver divergence" table mapping every known way the
   validator's verdict differs from the API server, with direction (all
   fail-closed). Pinned by `tests/apiserver_divergence.rs`. Notably, unsupported

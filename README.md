@@ -302,6 +302,27 @@ kube-cel = { version = "0.6", features = ["strings", "lists"] }
 | `encoders` | `base64` | Base64 encode/decode |
 | `validation` | `serde_json`, `serde`, `chrono` | CRD validation pipeline, VAP evaluation, static analysis, schema defaults |
 
+## Versioning and stability
+
+kube-cel is pre-1.0 and **cannot reach 1.0 until the `cel` crate does.** Its
+public signatures expose `cel::Context` and `cel::Value`, and a crate cannot be
+stable while its public dependencies are not ([Rust API Guidelines,
+C-STABLE](https://rust-lang.github.io/api-guidelines/necessities.html#c-stable)).
+Once `cel` reaches 1.0, kube-cel 1.x will track `cel` 1.y; a `cel` major bump
+forces a kube-cel major bump. While below 1.0, minor releases may contain
+breaking changes (the Cargo convention for `0.x`).
+
+Two stability tiers, by surface:
+
+- **Tier 1 — registration (committed).** The `KubeCelExt` trait
+  (`with_all`/`register_all`), the `pub use cel` re-export, and the set of
+  registered Kubernetes CEL functions. This is the crate's core identity and
+  changes only deliberately.
+- **Tier 2 — validation engine (evolving, `validation` feature).** `Validator`,
+  the VAP evaluator, static analysis, schema defaults, and the
+  `compilation`/`validation`/`vap`/`analysis` types. Still maturing; expect its
+  surface to change across pre-1.0 minors as the validation pipeline hardens.
+
 ## apiserver divergence
 
 The validation pipeline aims to return the same verdict the Kubernetes API

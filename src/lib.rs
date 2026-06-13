@@ -45,6 +45,17 @@
 //!
 //! The validation pipeline (CRD `x-kubernetes-validations`, VAP, static analysis)
 //! lives behind the `validation` feature (see below when it is enabled).
+//!
+//! # Versioning and stability
+//!
+//! kube-cel is pre-1.0 and **cannot reach 1.0 until the `cel` crate does** — its
+//! public surface exposes [`cel::Context`]/[`cel::Value`], and a crate cannot be
+//! stable while its public dependencies are not (Rust API Guidelines C-STABLE).
+//! After `cel` 1.0, kube-cel 1.x tracks `cel` 1.y; a `cel` major forces a
+//! kube-cel major. Two stability tiers: **Tier 1** (committed) is the
+//! registration surface — [`KubeCelExt`] and the `cel` re-export; **Tier 2**
+//! (evolving, `validation` feature) is the validation engine, whose surface may
+//! still change across pre-1.0 minors. See the README for details.
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 #![deny(missing_docs)]
 // The validation-pipeline section links to feature-gated items, so it is only
