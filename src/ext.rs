@@ -8,13 +8,21 @@
 
 use cel::Context;
 
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for cel::Context<'_> {}
+}
+
 /// Registers the compiled-in Kubernetes CEL extension functions onto a
 /// [`cel::Context`].
 ///
 /// Which functions are registered is determined by the enabled cargo features
 /// (see the [crate-level documentation](crate) for the feature model). This
-/// registers the **whole** compiled-in set in one call, mirroring the
-/// `KnownLibraries()` convention of the Kubernetes apiserver.
+/// registers the **whole** compiled-in set in one call, following the
+/// bundle-the-whole-set philosophy of the Kubernetes apiserver's
+/// `KnownLibraries()` (which enumerates the standard CEL libraries as one
+/// group; kube-cel likewise exposes its functions as a single batch rather
+/// than piecemeal).
 ///
 /// # Examples
 ///
@@ -63,7 +71,13 @@ use cel::Context;
 /// [cel-go `ext.Math`]: https://github.com/google/cel-go/blob/master/ext/README.md#math
 /// [cel-go `ext.Encoders`]: https://github.com/google/cel-go/blob/master/ext/README.md#encoders
 /// [k8s apiserver library]: https://pkg.go.dev/k8s.io/apiserver/pkg/cel/library
-pub trait KubeCelExt: Sized {
+///
+/// This trait is [sealed]: it is implemented only for [`cel::Context`] and
+/// cannot be implemented for downstream types, which lets kube-cel add methods
+/// in a non-breaking way.
+///
+/// [sealed]: https://rust-lang.github.io/api-guidelines/future-proofing.html#c-sealed
+pub trait KubeCelExt: sealed::Sealed + Sized {
     /// Registers all compiled-in Kubernetes CEL functions into this borrowed
     /// context, returning `&mut Self` for chaining.
     fn register_all(&mut self) -> &mut Self;

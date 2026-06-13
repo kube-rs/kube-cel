@@ -21,7 +21,7 @@ fn apply_defaults_inner(
     value: &serde_json::Value,
     depth: usize,
 ) -> serde_json::Value {
-    if depth > 64 {
+    if depth > crate::compilation::MAX_SCHEMA_DEPTH {
         return value.clone();
     }
 

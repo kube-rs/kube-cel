@@ -20,6 +20,12 @@ hygiene. See [#6](https://github.com/kube-rs/kube-cel/issues/6).
 ### Added
 - `KubeCelExt` trait: `register_all(&mut self) -> &mut Self` and the builder
   sugar `with_all(self) -> Self`. This is the single registration entry point.
+  The trait is sealed (implemented only for `cel::Context`) so methods can be
+  added later without a breaking change.
+- `Debug` for `VapEvaluator`, `VapEvaluatorBuilder`, and `CompiledVapExpression`
+  (the latter via a manual impl that skips the `!Debug` `cel::Program` fields).
+- `Hash` for `GroupVersionKind` and `GroupVersionResource` so they can be used
+  as `HashMap`/`HashSet` keys, as is idiomatic for k8s identifiers.
 - `pub use cel;` — the `cel` crate is re-exported at the crate root for version
   coherence. Import `cel` types via `kube_cel::cel`.
 - Crate-root re-exports for the validation journey: `Validator`,
@@ -29,6 +35,14 @@ hygiene. See [#6](https://github.com/kube-rs/kube-cel/issues/6).
 - Broken crate-root intra-doc links on docs.rs: `[package.metadata.docs.rs]`
   now builds all features, and CI gained a default-feature doc check so the
   links can no longer regress.
+- `KubeCelExt::register_all` rustdoc no longer claims to mirror the apiserver's
+  `KnownLibraries()` mechanism (which enumerates libraries, it does not
+  register); it now describes the shared bundle-the-whole-set philosophy.
+
+### Internal
+- The schema-depth guards in `compilation`, `validation`, and `defaults` now
+  share a single `MAX_SCHEMA_DEPTH` constant instead of three hardcoded `64`s,
+  so compile/validate/default depth limits can no longer silently diverge.
 
 ### Migration
 - Registration:

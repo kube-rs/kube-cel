@@ -36,7 +36,7 @@ use cel::{
 use crate::values::json_to_cel;
 
 /// Group/Version/Kind identifier.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct GroupVersionKind {
     /// API group (e.g., `"apps"`). Empty string for the core group.
     pub group: String,
@@ -47,7 +47,7 @@ pub struct GroupVersionKind {
 }
 
 /// Group/Version/Resource identifier.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct GroupVersionResource {
     /// API group (e.g., `"apps"`). Empty string for the core group.
     pub group: String,
@@ -121,6 +121,16 @@ pub struct CompiledVapExpression {
     message_program: Option<Program>,
 }
 
+impl std::fmt::Debug for CompiledVapExpression {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledVapExpression")
+            .field("expression", &self.expression)
+            .field("message", &self.message)
+            .field("has_message_program", &self.message_program.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Client-side evaluator for Kubernetes ValidatingAdmissionPolicy CEL expressions.
 ///
 /// Binds `object`, `oldObject`, `request`, and optionally `params` and
@@ -128,6 +138,7 @@ pub struct CompiledVapExpression {
 /// [`VapExpression`]s.
 ///
 /// Construct via [`VapEvaluator::builder()`].
+#[derive(Debug)]
 pub struct VapEvaluator {
     object: serde_json::Value,
     old_object: Option<serde_json::Value>,
@@ -137,7 +148,7 @@ pub struct VapEvaluator {
 }
 
 /// Builder for [`VapEvaluator`].
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct VapEvaluatorBuilder {
     object: Option<serde_json::Value>,
     old_object: Option<serde_json::Value>,

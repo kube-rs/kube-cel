@@ -185,7 +185,10 @@ impl CompiledSchema {
 }
 
 /// Maximum schema nesting depth to prevent unbounded recursion.
-const MAX_SCHEMA_DEPTH: usize = 64;
+///
+/// Shared across compile (`compilation`), validate (`validation`), and default
+/// injection (`defaults`) so the three depth guards stay in lockstep.
+pub(crate) const MAX_SCHEMA_DEPTH: usize = 64;
 
 fn compile_schema_array(schema: &serde_json::Value, key: &str, depth: usize) -> Vec<CompiledSchema> {
     schema

@@ -221,7 +221,7 @@ impl Validator {
         root_ctx: Option<&RootContext>,
         depth: usize,
     ) {
-        if depth > 64 {
+        if depth > crate::compilation::MAX_SCHEMA_DEPTH {
             return;
         }
 
@@ -360,7 +360,7 @@ impl Validator {
         root_ctx: Option<&RootContext>,
         depth: usize,
     ) {
-        if depth > 64 {
+        if depth > crate::compilation::MAX_SCHEMA_DEPTH {
             return;
         }
 
