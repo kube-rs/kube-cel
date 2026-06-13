@@ -454,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn message_expression_invalid_ignored() {
+    fn message_expression_invalid_rejected() {
         let rule = Rule {
             rule: "self.x > 0".into(),
             message: Some("fallback".into()),
@@ -463,9 +463,14 @@ mod tests {
             field_path: None,
             optional_old_self: None,
         };
-        let result = compile_rule(&rule).unwrap();
-        // Invalid messageExpression is silently ignored
-        assert!(result.message_program.is_none());
+        // A messageExpression that fails to compile must fail closed (mirroring
+        // the rule path + the apiserver, which rejects such a CRD at
+        // registration), not be silently dropped with a fall-back to the static
+        // message.
+        assert!(
+            compile_rule(&rule).is_err(),
+            "broken messageExpression must surface as a compilation error"
+        );
     }
 
     #[test]

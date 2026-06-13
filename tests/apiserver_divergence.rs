@@ -141,3 +141,31 @@ fn depth_cap_fails_closed() {
         "depth past the cap must fail closed with SchemaTooDeep, got {errors:?}"
     );
 }
+
+// ── messageExpression compile failure — fails CLOSED since S11; used to fail OPEN
+// apiserver: rejects the CRD at registration when `messageExpression` does not
+//            compile, so the type can never be created.
+// kube-cel:  CompilationFailure (the rule's dynamic message cannot compile),
+//            object rejected. Before S11 this was silently dropped and the rule
+//            evaluated with the static message — a fail-open divergence.
+
+#[test]
+fn invalid_message_expression_fails_closed() {
+    // The `rule` is valid and the object satisfies it; only the messageExpression
+    // is broken, so the only possible error is the messageExpression compilation.
+    let schema = json!({
+        "type": "object",
+        "properties": { "items": { "type": "array", "items": {"type": "integer"} } },
+        "x-kubernetes-validations": [{
+            "rule": "size(self.items) > 0",
+            "message": "needs items",
+            "messageExpression": "invalid >="
+        }]
+    });
+    let object = json!({"items": [1, 2, 3]});
+    let errors = Validator::new().validate(&schema, &object, None);
+    assert!(
+        errors.iter().any(|e| e.kind == ErrorKind::CompilationFailure),
+        "a rule whose messageExpression fails to compile must fail closed, got {errors:?}"
+    );
+}

@@ -525,6 +525,23 @@ mod tests {
     }
 
     #[test]
+    fn invalid_message_expression_fails_closed() {
+        // The expression itself is valid; only its messageExpression is broken.
+        // The apiserver rejects such a policy at registration, so a broken
+        // messageExpression must fail closed here too, not be silently dropped.
+        let evaluator = VapEvaluator::builder().object(json!({})).build();
+        let compiled = evaluator.compile_expressions(&[VapExpression {
+            expression: "true".into(),
+            message: Some("fallback".into()),
+            message_expression: Some("invalid >=".into()),
+        }]);
+        assert!(
+            compiled[0].is_err(),
+            "broken VAP messageExpression must surface as a compile error"
+        );
+    }
+
+    #[test]
     fn vap_validation_fails_with_message() {
         let evaluator = VapEvaluator::builder()
             .object(json!({"spec": {"replicas": -1}}))
