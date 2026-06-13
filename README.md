@@ -282,6 +282,10 @@ kube-cel = { version = "0.6", default-features = false, features = ["strings", "
 # No-op narrowing: without `default-features = false` the list is ADDED to the
 # already-complete default set, so you still get everything.
 kube-cel = { version = "0.6", features = ["strings", "lists"] }
+
+# Restore the whole surface (all 13 function groups + the validation engine)
+# in one flag, e.g. after narrowing for a downstream build profile.
+kube-cel = { version = "0.6", default-features = false, features = ["full"] }
 ```
 
 
@@ -301,6 +305,7 @@ kube-cel = { version = "0.6", features = ["strings", "lists"] }
 | `math` | - | Math functions (`math.ceil`, `math.abs`, bitwise, etc.) |
 | `encoders` | `base64` | Base64 encode/decode |
 | `validation` | `serde_json`, `serde`, `chrono` | CRD validation pipeline, VAP evaluation, static analysis, schema defaults |
+| `full` | *(all of the above)* | Umbrella: every extension-function group **plus** `validation`. Not in `default` (which is functions-only) |
 
 ## Versioning and stability
 

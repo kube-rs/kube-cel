@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.6.0] - 2026-06-13
 
 Breaking release that reshapes the registration surface around two user
 journeys (register functions / validate a CRD) and tightens 1.0-grade API
@@ -85,6 +85,9 @@ hygiene. See [#6](https://github.com/kube-rs/kube-cel/issues/6).
   `AnalysisWarning`, and `WarningKind` (they already derived `Serialize`),
   matching the round-trip support the VAP types already have. `ValidationError`'s
   non-serialized `source` cause deserializes to `None`.
+- Examples: `kube_workflow` (client-side validation before a kube-rs apply),
+  `error_chain` (walking `ErrorKind` + `source()`), `message_expression`
+  (CRD-path dynamic messages), `transition_rules` (`oldSelf` UPDATE semantics).
 
 ### Documentation
 - "Versioning and stability" section (README + crate docs): kube-cel cannot reach
