@@ -44,7 +44,16 @@
 //! ```
 //!
 //! The validation pipeline (CRD `x-kubernetes-validations`, VAP, static analysis)
-//! lives behind the `validation` feature (see below when it is enabled).
+//! lives behind the `validation` feature (see below when it is enabled); it is
+//! **not** part of `default`.
+//!
+//! The `full` umbrella feature enables everything — all extension-function
+//! groups *and* the `validation` engine. Use it to restore the whole surface
+//! after narrowing, or to opt into validation alongside the default functions:
+//!
+//! ```toml
+//! kube-cel = { version = "0.6", features = ["full"] }
+//! ```
 //!
 //! # Versioning and stability
 //!
@@ -74,7 +83,7 @@ without an API server.
 kube-cel = { version = "0.6", features = ["validation"] }
 ```
 
-```rust,ignore
+```rust
 use kube_cel::Validator;
 use serde_json::json;
 

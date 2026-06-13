@@ -21,7 +21,7 @@ pub enum ScopeContext {
 ///
 /// `#[non_exhaustive]`: an output type the crate constructs; new fields may be
 /// added without a breaking change.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct AnalysisWarning {
     /// The CEL rule the warning applies to.
@@ -33,7 +33,7 @@ pub struct AnalysisWarning {
 }
 
 /// The kind of warning produced by static analysis.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum WarningKind {
     /// Variable not available in the given scope.

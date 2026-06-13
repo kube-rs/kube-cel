@@ -68,6 +68,14 @@ hygiene. See [#6](https://github.com/kube-rs/kube-cel/issues/6).
   or a feature disabled at compile time now reports this distinct kind instead
   of a generic `EvaluationError`, so callers can tell a kube-cel coverage gap
   apart from a genuine runtime error. Still fail-closed (the object is rejected).
+- `full` umbrella feature, enabling every extension-function group **and** the
+  `validation` engine. `default` enables the 13 function groups only (not
+  `validation`); use `default-features = false` to narrow, then `full` to
+  restore the whole surface in one flag.
+- `Deserialize` for the validation output types `ValidationError`, `ErrorKind`,
+  `AnalysisWarning`, and `WarningKind` (they already derived `Serialize`),
+  matching the round-trip support the VAP types already have. `ValidationError`'s
+  non-serialized `source` cause deserializes to `None`.
 
 ### Documentation
 - "Versioning and stability" section (README + crate docs): kube-cel cannot reach

@@ -34,7 +34,7 @@ pub struct RootContext {
 }
 
 /// The kind of error that occurred during validation.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum ErrorKind {
     /// CEL expression syntax error.
@@ -66,7 +66,7 @@ pub enum ErrorKind {
 /// `#[non_exhaustive]`: this is an output type the crate constructs, never the
 /// caller. New fields may be added without a breaking change; downstream code
 /// reads the public fields and the cause chain via [`std::error::Error::source`].
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct ValidationError {
     /// The CEL expression that failed.

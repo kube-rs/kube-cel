@@ -24,6 +24,14 @@ mod sealed {
 /// group; kube-cel likewise exposes its functions as a single batch rather
 /// than piecemeal).
 ///
+/// `all` means "all **compiled-in**", not "all Kubernetes functions". In a
+/// narrowed build (`default-features = false, features = ["strings"]`),
+/// `with_all()` registers only the `strings` group — the call site still reads
+/// `with_all()`, but the set it registers shrinks with the feature flags. This
+/// is intentional (the name tracks the compiled surface, mirroring
+/// `KnownLibraries()`); enable the `full` feature to compile in the whole set
+/// (see the crate-level feature model).
+///
 /// # Examples
 ///
 /// Builder style (journey A one-liner):

@@ -17,6 +17,12 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
+# PUBLIC dependency: `cel` is re-exported (`pub use cel`) and appears in public
+# signatures (`Context`, `Value`, `Program`), so a `cel` semver bump is a
+# breaking change for kube-cel. The caret `^0.13` is intentional — it lets
+# downstreams pick up `cel` 0.13.x patches without a kube-cel release. Do not
+# switch to an exact `=0.13.x` pin (it would block that patch uptake), and bump
+# the major-coupling note in the versioning policy if this constraint changes.
 cel = "0.13"
 regex = { version = "1", optional = true }
 url = { version = "2", optional = true }
@@ -46,6 +52,11 @@ named_format = []
 math = []
 encoders = ["dep:base64"]
 validation = ["dep:serde_json", "dep:serde", "dep:chrono"]
+# Umbrella: every extension-function library (the 13 in `default`) plus the
+# `validation` engine. `default` enables the 13 functions only, NOT validation.
+# Use `default-features = false` to narrow to a subset, then `full` to restore
+# everything (functions + validation).
+full = ["strings", "lists", "sets", "regex_funcs", "urls", "ip", "semver_funcs", "format", "quantity", "jsonpatch", "named_format", "math", "encoders", "validation"]
 
 [[example]]
 name = "basic"
