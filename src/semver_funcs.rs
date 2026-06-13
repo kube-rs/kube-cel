@@ -21,7 +21,7 @@ impl Opaque for KubeSemver {
 }
 
 /// Register all semver extension functions.
-pub fn register(ctx: &mut Context<'_>) {
+pub(crate) fn register(ctx: &mut Context<'_>) {
     ctx.add_function("semver", parse_semver);
     ctx.add_function("isSemver", is_semver);
     ctx.add_function("major", semver_major);

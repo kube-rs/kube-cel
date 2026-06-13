@@ -7,7 +7,7 @@ use cel::{Context, ResolveResult, objects::Value};
 use std::sync::Arc;
 
 /// Register the jsonpatch extension functions.
-pub fn register(ctx: &mut Context<'_>) {
+pub(crate) fn register(ctx: &mut Context<'_>) {
     ctx.add_function("jsonpatch.escapeKey", escape_key);
 }
 

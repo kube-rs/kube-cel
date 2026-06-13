@@ -9,11 +9,11 @@
 #![allow(dead_code, unused_imports)]
 
 use cel::{Context, Program, Value};
+use kube_cel::KubeCelExt;
 use std::sync::Arc;
 
 fn eval(expr: &str) -> Value {
-    let mut ctx = Context::default();
-    kube_cel::register_all(&mut ctx);
+    let ctx = Context::default().with_all();
     Program::compile(expr).unwrap().execute(&ctx).unwrap()
 }
 
@@ -38,8 +38,7 @@ fn assert_string(expr: &str, expected: &str) {
 }
 
 fn assert_runtime_err(expr: &str) {
-    let mut ctx = Context::default();
-    kube_cel::register_all(&mut ctx);
+    let ctx = Context::default().with_all();
     let result = Program::compile(expr).unwrap().execute(&ctx);
     assert!(result.is_err(), "expected runtime error: {expr}");
 }

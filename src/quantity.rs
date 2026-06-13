@@ -301,7 +301,7 @@ fn parse_suffix(suffix: &str) -> Result<(i32, Option<i128>), String> {
 // ---------------------------------------------------------------------------
 
 /// Register all quantity extension functions.
-pub fn register(ctx: &mut Context<'_>) {
+pub(crate) fn register(ctx: &mut Context<'_>) {
     ctx.add_function("quantity", cel_quantity);
     ctx.add_function("isQuantity", cel_is_quantity);
     ctx.add_function("isInteger", cel_is_integer);

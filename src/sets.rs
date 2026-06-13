@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::value_ops::val_eq;
 
 /// Register all set extension functions.
-pub fn register(ctx: &mut Context<'_>) {
+pub(crate) fn register(ctx: &mut Context<'_>) {
     ctx.add_function("sets.contains", sets_contains);
     ctx.add_function("sets.equivalent", sets_equivalent);
     ctx.add_function("sets.intersects", sets_intersects);

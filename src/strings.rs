@@ -11,7 +11,7 @@ use cel::{
 use std::sync::Arc;
 
 /// Register all string extension functions.
-pub fn register(ctx: &mut Context<'_>) {
+pub(crate) fn register(ctx: &mut Context<'_>) {
     ctx.add_function("charAt", char_at);
     // indexOf/lastIndexOf are registered in lists.rs with runtime type dispatch
     // to avoid name collisions between string and list versions.

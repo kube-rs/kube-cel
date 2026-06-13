@@ -11,7 +11,7 @@ use cel::{
 use std::sync::Arc;
 
 /// Register the format function.
-pub fn register(ctx: &mut Context<'_>) {
+pub(crate) fn register(ctx: &mut Context<'_>) {
     ctx.add_function("format", format_string);
 }
 

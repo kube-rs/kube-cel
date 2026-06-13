@@ -26,6 +26,7 @@ pub struct RootContext {
 
 /// The kind of error that occurred during validation.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
 pub enum ErrorKind {
     /// CEL expression syntax error.
     CompilationFailure,

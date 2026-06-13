@@ -76,7 +76,7 @@ impl Opaque for KubeFormat {
 // ---------------------------------------------------------------------------
 
 /// Register all named format extension functions.
-pub fn register(ctx: &mut Context<'_>) {
+pub(crate) fn register(ctx: &mut Context<'_>) {
     // Factory functions
     ctx.add_function("format.dns1123Label", format_dns1123_label);
     ctx.add_function("format.dns1123Subdomain", format_dns1123_subdomain);

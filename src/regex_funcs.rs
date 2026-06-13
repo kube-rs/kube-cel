@@ -12,7 +12,7 @@ use regex::Regex;
 use std::sync::Arc;
 
 /// Register all regex extension functions.
-pub fn register(ctx: &mut Context<'_>) {
+pub(crate) fn register(ctx: &mut Context<'_>) {
     ctx.add_function("find", find);
     ctx.add_function("findAll", find_all);
 }

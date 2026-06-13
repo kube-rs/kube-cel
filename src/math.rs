@@ -6,7 +6,7 @@
 use cel::{Context, ExecutionError, ResolveResult, extractors::Arguments, objects::Value};
 
 /// Register all math extension functions.
-pub fn register(ctx: &mut Context<'_>) {
+pub(crate) fn register(ctx: &mut Context<'_>) {
     // Rounding
     ctx.add_function("math.ceil", math_ceil);
     ctx.add_function("math.floor", math_floor);

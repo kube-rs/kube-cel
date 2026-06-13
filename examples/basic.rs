@@ -3,7 +3,7 @@
 //! Run with: `cargo run --example basic`
 
 use cel::{Context, Program};
-use kube_cel::register_all;
+use kube_cel::KubeCelExt;
 
 fn run(ctx: &Context, label: &str, expr: &str) {
     let result = Program::compile(expr).unwrap().execute(ctx).unwrap();
@@ -11,8 +11,7 @@ fn run(ctx: &Context, label: &str, expr: &str) {
 }
 
 fn main() {
-    let mut ctx = Context::default();
-    register_all(&mut ctx);
+    let ctx = Context::default().with_all();
 
     // String functions
     run(&ctx, "upperAscii", "'hello world'.upperAscii()");

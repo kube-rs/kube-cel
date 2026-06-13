@@ -1,6 +1,6 @@
 [package]
 name = "kube-cel"
-version = "0.5.4"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -11,6 +11,10 @@ homepage = "https://kube.rs"
 keywords = ["kubernetes", "cel", "kube", "validation"]
 categories = ["api-bindings"]
 exclude = ["justfile"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 cel = "0.13"

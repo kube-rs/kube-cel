@@ -40,7 +40,7 @@ impl Opaque for KubeCIDR {
 }
 
 /// Register all IP and CIDR extension functions.
-pub fn register(ctx: &mut Context<'_>) {
+pub(crate) fn register(ctx: &mut Context<'_>) {
     // IP functions
     // ip() is registered via dispatch module to handle
     // name collision between string→IP parsing and CIDR→network extraction.

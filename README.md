@@ -13,18 +13,18 @@ Implements the Kubernetes-specific CEL libraries defined in [`k8s.io/apiserver/p
 
 ```toml
 [dependencies]
-kube-cel = "0.5"
-cel = "0.13"
+kube-cel = "0.6"
 ```
+
+`kube-cel` re-exports the `cel` crate it was built against as `kube_cel::cel`. Import `cel` types through that re-export rather than declaring a separate `cel` dependency, otherwise a version mismatch surfaces as a cryptic `Context` type error.
 
 ## Usage
 
 ```rust
-use cel::{Context, Program};
-use kube_cel::register_all;
+use kube_cel::KubeCelExt;
+use kube_cel::cel::{Context, Program};
 
-let mut ctx = Context::default();
-register_all(&mut ctx);
+let ctx = Context::default().with_all();
 
 // String functions
 let result = Program::compile("'hello'.upperAscii()")
@@ -45,7 +45,7 @@ With the `validation` feature, you can compile and evaluate `x-kubernetes-valida
 
 ```toml
 [dependencies]
-kube-cel = { version = "0.5", features = ["validation"] }
+kube-cel = { version = "0.6", features = ["validation"] }
 ```
 
 ```rust
@@ -273,7 +273,17 @@ let result = Program::compile("jsonpatch.escapeKey('k8s.io/my~label')")
 
 ## Feature Flags
 
-All features are enabled by default. Disable with `default-features = false` and pick what you need:
+Cargo features are the **only** granularity axis — there is no runtime per-library registration. All extension-function features are enabled by default. To narrow the set you must disable the defaults first:
+
+```toml
+# Correct: only string + list helpers.
+kube-cel = { version = "0.6", default-features = false, features = ["strings", "lists"] }
+
+# No-op narrowing: without `default-features = false` the list is ADDED to the
+# already-complete default set, so you still get everything.
+kube-cel = { version = "0.6", features = ["strings", "lists"] }
+```
+
 
 | Feature | Dependencies | Description |
 |---------|-------------|-------------|
