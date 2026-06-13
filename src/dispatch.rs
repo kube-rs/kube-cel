@@ -17,7 +17,7 @@ use cel::{
 /// that override cel built-in functions. Registration order is independent
 /// of individual module registrations since modules no longer register
 /// these conflicting names.
-pub fn register(ctx: &mut Context<'_>) {
+pub(crate) fn register(ctx: &mut Context<'_>) {
     ctx.add_function("indexOf", index_of);
     ctx.add_function("lastIndexOf", last_index_of);
 

@@ -13,7 +13,7 @@ use std::{cmp::Ordering, sync::Arc};
 use crate::value_ops::{compare_values, val_add, val_eq, val_le, val_lt};
 
 /// Register all list extension functions.
-pub fn register(ctx: &mut Context<'_>) {
+pub(crate) fn register(ctx: &mut Context<'_>) {
     ctx.add_function("isSorted", is_sorted);
     ctx.add_function("sum", sum);
     // min/max are registered via dispatch module to handle

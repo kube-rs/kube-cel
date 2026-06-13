@@ -20,7 +20,7 @@ const STANDARD_INDIFFERENT: GeneralPurpose = GeneralPurpose::new(
 );
 
 /// Register all encoder extension functions.
-pub fn register(ctx: &mut Context<'_>) {
+pub(crate) fn register(ctx: &mut Context<'_>) {
     ctx.add_function("base64.decode", base64_decode);
     ctx.add_function("base64.encode", base64_encode);
 }

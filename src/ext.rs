@@ -46,7 +46,7 @@ use cel::Context;
 /// | `strings` | string helpers (`charAt`, `indexOf`, `lowerAscii`, …) | [cel-go `ext.Strings`] |
 /// | `lists` | list helpers (`isSorted`, `sum`, `min`, `max`, …) | [cel-go `ext.Lists`] |
 /// | `sets` | `sets.contains`, `sets.intersects`, `sets.equivalent` | [cel-go `ext.Sets`] |
-/// | `regex_funcs` | `find`, `findAll` | [cel-go `ext.Strings`] |
+/// | `regex_funcs` | `find`, `findAll` | [k8s apiserver library] |
 /// | `math` | `math.greatest`, `math.least`, … | [cel-go `ext.Math`] |
 /// | `encoders` | `base64.encode`, `base64.decode` | [cel-go `ext.Encoders`] |
 /// | `urls` | `url`, `isURL`, `getScheme`, … | [k8s apiserver library] |

@@ -30,7 +30,7 @@ impl Opaque for KubeUrl {
 }
 
 /// Register all URL extension functions.
-pub fn register(ctx: &mut Context<'_>) {
+pub(crate) fn register(ctx: &mut Context<'_>) {
     ctx.add_function("url", parse_url);
     ctx.add_function("isURL", is_url);
     ctx.add_function("getScheme", get_scheme);
