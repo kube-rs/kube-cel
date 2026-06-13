@@ -92,3 +92,7 @@ required-features = ["validation"]
 [[example]]
 name = "error_chain"
 required-features = ["validation"]
+
+[[example]]
+name = "message_expression"
+required-features = ["validation"]
