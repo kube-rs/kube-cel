@@ -15,8 +15,10 @@
 //!
 //! Measured against `cel` 0.13: the unsupported CEL macros below **parse**
 //! successfully but fail at evaluation with an "Undeclared reference" error, so
-//! through the Validator they surface as [`ErrorKind::EvaluationError`], *not*
-//! `CompilationFailure`.
+//! through the Validator they surface as [`ErrorKind::UnsupportedReference`]
+//! (a coverage gap), *not* `CompilationFailure` and not a generic
+//! `EvaluationError` — the latter is reserved for genuine runtime errors in a
+//! supported rule.
 #![cfg(feature = "validation")]
 
 use kube_cel::validation::{ErrorKind, Validator};
@@ -37,18 +39,18 @@ fn run_rule(rule: &str) -> Vec<kube_cel::ValidationError> {
 }
 
 /// Asserts a rule fails closed: the apiserver would accept it, but kube-cel
-/// rejects it with an `EvaluationError` because `cel` 0.13 lacks the macro.
+/// rejects it with an `UnsupportedReference` because `cel` 0.13 lacks the macro.
 fn assert_unsupported_macro(feature: &str, rule: &str) {
     let errors = run_rule(rule);
     assert!(
-        errors.iter().any(|e| e.kind == ErrorKind::EvaluationError),
-        "{feature}: expected fail-closed EvaluationError (unsupported macro), got {errors:?}"
+        errors.iter().any(|e| e.kind == ErrorKind::UnsupportedReference),
+        "{feature}: expected fail-closed UnsupportedReference (unsupported macro), got {errors:?}"
     );
 }
 
 // ── Unsupported CEL macros (cel-crate gated) — all fail CLOSED ──────────────
 // apiserver: supported, rule evaluates normally.
-// kube-cel:  EvaluationError ("Undeclared reference"), object rejected.
+// kube-cel:  UnsupportedReference ("Undeclared reference"), object rejected.
 
 #[test]
 fn sort_by_fails_closed() {
@@ -80,6 +82,23 @@ fn one_arg_comprehension_is_supported() {
     assert!(
         errors.is_empty(),
         "one-arg all() should be supported, got {errors:?}"
+    );
+}
+
+/// Control: a genuine runtime error in a *supported* rule stays an
+/// `EvaluationError`, NOT `UnsupportedReference` — the two are kept distinct so
+/// callers can tell a coverage gap apart from a real evaluation failure.
+#[test]
+fn runtime_error_is_not_an_unsupported_reference() {
+    // int vs string comparison: compiles, errors at runtime (not undeclared).
+    let errors = run_rule("self.items[0] > 'a'");
+    assert!(
+        errors.iter().any(|e| e.kind == ErrorKind::EvaluationError),
+        "expected a genuine EvaluationError, got {errors:?}"
+    );
+    assert!(
+        !errors.iter().any(|e| e.kind == ErrorKind::UnsupportedReference),
+        "a real runtime error must not be classified as UnsupportedReference, got {errors:?}"
     );
 }
 

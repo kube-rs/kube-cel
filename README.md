@@ -312,18 +312,20 @@ pinned by `tests/apiserver_divergence.rs`.
 
 | Feature | API server | kube-cel | Direction |
 |---------|-----------|----------|-----------|
-| `<list>.sortBy(var, expr)` | evaluates | `EvaluationError` | fail-closed |
-| `cel.bind(var, init, expr)` | evaluates | `EvaluationError` | fail-closed |
-| Two-arg comprehensions (`all(i, v, …)`, `transformList`, `transformMap`; K8s 1.33+) | evaluates | `EvaluationError` | fail-closed |
+| `<list>.sortBy(var, expr)` | evaluates | `UnsupportedReference` | fail-closed |
+| `cel.bind(var, init, expr)` | evaluates | `UnsupportedReference` | fail-closed |
+| Two-arg comprehensions (`all(i, v, …)`, `transformList`, `transformMap`; K8s 1.33+) | evaluates | `UnsupportedReference` | fail-closed |
 | Schema nesting deeper than 64 levels | enforces (rejects over-limit schemas at registration) | `SchemaTooDeep` error | fail-closed |
 | Authz library (`authorizer.*`) | evaluates against the cluster | not available | out of scope |
 
 The unsupported CEL macros above **parse** successfully but error at evaluation
-(`cel` 0.13 has no such reference), so they surface as `EvaluationError`, not a
-compile error. Single-argument comprehensions (`list.all(x, …)`, `map(x, …)`,
-etc.) are fully supported and do not diverge. The macro gaps lift once the `cel`
-crate gains compiler-macro support; the authz library requires a live API server
-and is out of scope for a client library.
+(`cel` 0.13 has no such reference), so they surface as the dedicated
+`ErrorKind::UnsupportedReference` — distinct from `EvaluationError` (reserved for
+genuine runtime errors in a supported rule), so a consumer can tell a kube-cel
+coverage gap apart from an actual rule failure. Single-argument comprehensions
+(`list.all(x, …)`, `map(x, …)`, etc.) are fully supported and do not diverge.
+The macro gaps lift once the `cel` crate gains compiler-macro support; the authz
+library requires a live API server and is out of scope for a client library.
 
 ## Related
 

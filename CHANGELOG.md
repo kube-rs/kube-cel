@@ -25,6 +25,11 @@ hygiene. See [#6](https://github.com/kube-rs/kube-cel/issues/6).
 ### Added
 - `ErrorKind::SchemaTooDeep` and `CompilationError::SchemaTooDeep { depth }`
   variants, emitted when schema nesting exceeds the depth cap (see Breaking).
+- `ErrorKind::UnsupportedReference`: a rule that references a CEL macro the
+  `cel` crate does not implement (`sortBy`, `cel.bind`, two-arg comprehensions)
+  or a feature disabled at compile time now reports this distinct kind instead
+  of a generic `EvaluationError`, so callers can tell a kube-cel coverage gap
+  apart from a genuine runtime error. Still fail-closed (the object is rejected).
 
 ### Documentation
 - README gained an "apiserver divergence" table mapping every known way the

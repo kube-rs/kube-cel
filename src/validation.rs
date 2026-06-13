@@ -38,6 +38,14 @@ pub enum ErrorKind {
     InvalidResult,
     /// Runtime evaluation error.
     EvaluationError,
+    /// The rule referenced a CEL function or identifier this build does not
+    /// provide — typically a CEL macro not yet supported by the `cel` crate
+    /// (`sortBy`, `cel.bind`, the two-argument comprehensions), or an
+    /// extension-function feature disabled at compile time. The rule is
+    /// well-formed but cannot be evaluated client-side, so the object is
+    /// rejected (fail-closed). Distinct from [`Self::EvaluationError`] so
+    /// callers can tell a coverage gap apart from a genuine runtime error.
+    UnsupportedReference,
     /// Schema nesting exceeded the maximum supported depth.
     /// The over-deep subtree was refused rather than skipped, so validation
     /// fails closed instead of silently passing rules it never evaluated.
@@ -593,6 +601,23 @@ impl Validator {
                     field_path: error_path,
                     reason: None,
                     kind: ErrorKind::InvalidResult,
+                });
+            }
+            Err(cel::ExecutionError::UndeclaredReference(name)) => {
+                // The rule compiled but references something this build does not
+                // provide — a cel-gated macro (sortBy/cel.bind/two-arg
+                // comprehensions) or a disabled feature. Classify it distinctly
+                // so callers can tell a coverage gap from a real runtime error.
+                errors.push(ValidationError {
+                    rule: cr.rule.rule.clone(),
+                    message: format!(
+                        "rule references '{name}', which this kube-cel build does not support \
+                         (an unsupported CEL macro, or a feature disabled at compile time); \
+                         it cannot be evaluated client-side"
+                    ),
+                    field_path: error_path,
+                    reason: None,
+                    kind: ErrorKind::UnsupportedReference,
                 });
             }
             Err(e) => {
