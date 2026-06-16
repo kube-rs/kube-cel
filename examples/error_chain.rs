@@ -36,7 +36,9 @@ fn main() {
 
     let object = json!({"replicas": 0, "zones": ["b", "a"]});
 
-    let errors = Validator::new().validate(&schema, &object, None);
+    let errors = Validator::new()
+        .validate(&schema, &object, None)
+        .expect_err("object violates every rule, so validation must fail");
 
     println!("{} validation error(s)\n", errors.len());
     for err in &errors {

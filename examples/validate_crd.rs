@@ -30,15 +30,18 @@ fn main() {
 
     // Valid object
     let valid = json!({"spec": {"replicas": 3}});
-    let errors = validator.validate(&schema, &valid, None);
-    println!("Valid object: {} errors", errors.len());
+    match validator.validate(&schema, &valid, None) {
+        Ok(()) => println!("Valid object: OK"),
+        Err(errors) => println!("Valid object: {} errors", errors.len()),
+    }
 
     // Invalid object
     let invalid = json!({"spec": {"replicas": -1}});
-    let errors = validator.validate(&schema, &invalid, None);
-    println!("\nInvalid object: {} errors", errors.len());
-    for err in &errors {
-        println!("  [{path}] {msg}", path = err.field_path, msg = err.message);
+    if let Err(errors) = validator.validate(&schema, &invalid, None) {
+        println!("\nInvalid object: {} errors", errors.len());
+        for err in &errors {
+            println!("  [{path}] {msg}", path = err.field_path, msg = err.message);
+        }
     }
 
     // Transition rule (update check)
@@ -57,13 +60,16 @@ fn main() {
     let old_obj = json!({"replicas": 5});
 
     // Create (no old object): transition rule skipped
-    let errors = validator.validate(&transition_schema, &new_obj, None);
-    println!("\nCreate (no old): {} errors", errors.len());
+    match validator.validate(&transition_schema, &new_obj, None) {
+        Ok(()) => println!("\nCreate (no old): OK"),
+        Err(errors) => println!("\nCreate (no old): {} errors", errors.len()),
+    }
 
     // Update (scale down): transition rule fires
-    let errors = validator.validate(&transition_schema, &new_obj, Some(&old_obj));
-    println!("Update (scale down): {} errors", errors.len());
-    for err in &errors {
-        println!("  {}", err);
+    if let Err(errors) = validator.validate(&transition_schema, &new_obj, Some(&old_obj)) {
+        println!("Update (scale down): {} errors", errors.len());
+        for err in &errors {
+            println!("  {}", err);
+        }
     }
 }

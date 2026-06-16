@@ -45,7 +45,7 @@ fn plan_usage_example() {
     });
 
     let validator = Validator::new();
-    let errors = validator.validate(&schema, &object, None);
+    let errors = validator.validate(&schema, &object, None).unwrap_err();
 
     assert_eq!(errors.len(), 2);
 
@@ -81,8 +81,7 @@ fn full_crd_schema_passing() {
     });
 
     let obj = json!({"spec": {"replicas": 3}});
-    let errors = validate(&schema, &obj, None);
-    assert!(errors.is_empty());
+    assert!(validate(&schema, &obj, None).is_ok());
 }
 
 #[test]
@@ -109,20 +108,18 @@ fn transition_rule_end_to_end() {
     // Scale up: OK
     let obj = json!({"spec": {"replicas": 5}});
     let old = json!({"spec": {"replicas": 3}});
-    let errors = validate(&schema, &obj, Some(&old));
-    assert!(errors.is_empty());
+    assert!(validate(&schema, &obj, Some(&old)).is_ok());
 
     // Scale down: fails
     let obj2 = json!({"spec": {"replicas": 1}});
-    let errors2 = validate(&schema, &obj2, Some(&old));
+    let errors2 = validate(&schema, &obj2, Some(&old)).unwrap_err();
     assert_eq!(errors2.len(), 1);
     assert_eq!(errors2[0].message, "cannot scale down");
     assert_eq!(errors2[0].reason.as_deref(), Some("FieldValueForbidden"));
     assert_eq!(errors2[0].field_path, "spec");
 
     // Create (no old): transition rule skipped
-    let errors3 = validate(&schema, &obj2, None);
-    assert!(errors3.is_empty());
+    assert!(validate(&schema, &obj2, None).is_ok());
 }
 
 #[test]
@@ -162,7 +159,7 @@ fn nested_array_items_validation() {
         }
     });
 
-    let errors = validate(&schema, &obj, None);
+    let errors = validate(&schema, &obj, None).unwrap_err();
     assert_eq!(errors.len(), 2);
 
     let err0 = errors
@@ -206,11 +203,11 @@ fn multi_level_validations() {
 
     // All valid
     let obj = json!({"spec": {"replicas": 3, "minReplicas": 1}});
-    assert!(validate(&schema, &obj, None).is_empty());
+    assert!(validate(&schema, &obj, None).is_ok());
 
     // Multiple failures at different levels
     let obj2 = json!({"spec": {"replicas": -1, "minReplicas": 2}});
-    let errors = validate(&schema, &obj2, None);
+    let errors = validate(&schema, &obj2, None).unwrap_err();
     // spec level: -1 >= 2 fails, replicas level: -1 >= 0 fails
     assert_eq!(errors.len(), 2);
     assert!(errors.iter().any(|e| e.field_path == "spec"));
@@ -229,7 +226,7 @@ fn convenience_function_works() {
         }
     });
     let obj = json!({"x": -1});
-    let errors = validate(&schema, &obj, None);
+    let errors = validate(&schema, &obj, None).unwrap_err();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].message, "x must be positive");
     assert!(errors[0].field_path.is_empty()); // root level
@@ -239,7 +236,7 @@ fn convenience_function_works() {
 fn empty_schema_no_errors() {
     let schema = json!({"type": "object"});
     let obj = json!({"anything": "goes"});
-    assert!(validate(&schema, &obj, None).is_empty());
+    assert!(validate(&schema, &obj, None).is_ok());
 }
 
 #[test]
@@ -258,10 +255,10 @@ fn extension_functions_in_validation() {
     });
 
     let obj = json!({"name": "  Hello  "});
-    assert!(validate(&schema, &obj, None).is_empty());
+    assert!(validate(&schema, &obj, None).is_ok());
 
     let obj2 = json!({"name": "   "});
-    let errors = validate(&schema, &obj2, None);
+    let errors = validate(&schema, &obj2, None).unwrap_err();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].message, "name must not be blank");
 }
@@ -288,7 +285,7 @@ fn array_items_with_transition_rule() {
 
     let obj = json!({"tags": [{"value": 5}, {"value": 2}]});
     let old = json!({"tags": [{"value": 3}, {"value": 4}]});
-    let errors = validate(&schema, &obj, Some(&old));
+    let errors = validate(&schema, &obj, Some(&old)).unwrap_err();
 
     // tags[0]: 5 >= 3 → OK
     // tags[1]: 2 >= 4 → FAIL
@@ -327,7 +324,7 @@ fn deeply_nested_objects() {
     });
 
     let obj = json!({"a": {"b": {"c": {"value": -1}}}});
-    let errors = validate(&schema, &obj, None);
+    let errors = validate(&schema, &obj, None).unwrap_err();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].field_path, "a.b.c");
     assert_eq!(errors[0].message, "deep value must be positive");
@@ -351,8 +348,7 @@ fn empty_array_no_item_validation() {
     });
 
     let obj = json!({"items": []});
-    let errors = validate(&schema, &obj, None);
-    assert!(errors.is_empty());
+    assert!(validate(&schema, &obj, None).is_ok());
 }
 
 #[test]
@@ -369,7 +365,7 @@ fn null_field_value() {
 
     // null name: passes the rule
     let obj = json!({"name": null});
-    assert!(validate(&schema, &obj, None).is_empty());
+    assert!(validate(&schema, &obj, None).is_ok());
 }
 
 #[test]
@@ -385,10 +381,10 @@ fn cel_exists_macro() {
     });
 
     let pass = json!({"items": [1, 2, 5]});
-    assert!(validate(&schema, &pass, None).is_empty());
+    assert!(validate(&schema, &pass, None).is_ok());
 
     let fail = json!({"items": [1, 2, 3]});
-    let errors = validate(&schema, &fail, None);
+    let errors = validate(&schema, &fail, None).unwrap_err();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].message, "need at least one item > 3");
 }
@@ -406,10 +402,10 @@ fn cel_all_macro() {
     });
 
     let pass = json!({"tags": ["a", "bb", "ccc"]});
-    assert!(validate(&schema, &pass, None).is_empty());
+    assert!(validate(&schema, &pass, None).is_ok());
 
     let fail = json!({"tags": ["a", "", "c"]});
-    let errors = validate(&schema, &fail, None);
+    let errors = validate(&schema, &fail, None).unwrap_err();
     assert_eq!(errors.len(), 1);
 }
 
@@ -426,10 +422,10 @@ fn cel_map_and_filter() {
     });
 
     let pass = json!({"nums": [-1, 2, 3]});
-    assert!(validate(&schema, &pass, None).is_empty());
+    assert!(validate(&schema, &pass, None).is_ok());
 
     let fail = json!({"nums": [-1, 2, -3]});
-    let errors = validate(&schema, &fail, None);
+    let errors = validate(&schema, &fail, None).unwrap_err();
     assert_eq!(errors.len(), 1);
 }
 
@@ -447,11 +443,11 @@ fn cel_ternary_expression() {
     });
 
     // enabled=true, count=5: OK
-    assert!(validate(&schema, &json!({"enabled": true, "count": 5}), None).is_empty());
+    assert!(validate(&schema, &json!({"enabled": true, "count": 5}), None).is_ok());
     // enabled=false, count=0: OK (skipped by ternary)
-    assert!(validate(&schema, &json!({"enabled": false, "count": 0}), None).is_empty());
+    assert!(validate(&schema, &json!({"enabled": false, "count": 0}), None).is_ok());
     // enabled=true, count=0: FAIL
-    let errors = validate(&schema, &json!({"enabled": true, "count": 0}), None);
+    let errors = validate(&schema, &json!({"enabled": true, "count": 0}), None).unwrap_err();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].message, "count required when enabled");
 }
@@ -470,12 +466,12 @@ fn mixed_transition_and_non_transition_rules() {
     });
 
     // Create (no old): only non-transition rule evaluated
-    let errors = validate(&schema, &json!({"replicas": -1}), None);
+    let errors = validate(&schema, &json!({"replicas": -1}), None).unwrap_err();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].message, "non-negative");
 
     // Update: both rules evaluated
-    let errors = validate(&schema, &json!({"replicas": -1}), Some(&json!({"replicas": 3})));
+    let errors = validate(&schema, &json!({"replicas": -1}), Some(&json!({"replicas": 3}))).unwrap_err();
     assert_eq!(errors.len(), 2);
 }
 
@@ -499,7 +495,7 @@ fn array_length_mismatch_with_old_self() {
     // New array is longer: items[2] has no oldSelf → transition rule skipped
     let obj = json!({"items": [5, 3, 10]});
     let old = json!({"items": [3, 4]});
-    let errors = validate(&schema, &obj, Some(&old));
+    let errors = validate(&schema, &obj, Some(&old)).unwrap_err();
     // items[0]: 5 >= 3 OK, items[1]: 3 >= 4 FAIL, items[2]: no oldSelf → skipped
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].field_path, "items[1]");
@@ -565,7 +561,7 @@ fn realistic_istio_like_crd() {
             }]
         }
     });
-    assert!(validate(&schema, &valid, None).is_empty());
+    assert!(validate(&schema, &valid, None).is_ok());
 
     // Multiple failures at different levels
     let invalid = json!({
@@ -579,7 +575,7 @@ fn realistic_istio_like_crd() {
             }]
         }
     });
-    let errors = validate(&schema, &invalid, None);
+    let errors = validate(&schema, &invalid, None).unwrap_err();
     // spec: hosts empty, route[0]: weight 150, route[1]: weight -10
     assert_eq!(errors.len(), 3);
     assert!(errors.iter().any(|e| e.field_path == "spec"));
@@ -628,7 +624,7 @@ fn realistic_cert_manager_like_crd() {
             "renewBefore": 30
         }
     });
-    assert!(validate(&schema, &valid, None).is_empty());
+    assert!(validate(&schema, &valid, None).is_ok());
 
     let invalid = json!({
         "spec": {
@@ -636,7 +632,7 @@ fn realistic_cert_manager_like_crd() {
             "renewBefore": 60
         }
     });
-    let errors = validate(&schema, &invalid, None);
+    let errors = validate(&schema, &invalid, None).unwrap_err();
     // Missing both dnsNames and ipAddresses, AND renewBefore > duration
     assert_eq!(errors.len(), 2);
 }
@@ -663,7 +659,7 @@ fn message_expression_end_to_end() {
     });
 
     let obj = json!({"spec": {"replicas": -3}});
-    let errors = validate(&schema, &obj, None);
+    let errors = validate(&schema, &obj, None).unwrap_err();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].message, "replicas is -3, must be >= 0");
     assert_eq!(errors[0].field_path, "spec");
@@ -688,7 +684,7 @@ fn invalid_message_expression_fails_closed_end_to_end() {
     // rejects such a CRD at registration — rather than being silently dropped and
     // the rule evaluated with the static message.
     let obj = json!({"x": 5});
-    let errors = validate(&schema, &obj, None);
+    let errors = validate(&schema, &obj, None).unwrap_err();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].kind, ErrorKind::CompilationFailure);
 }
@@ -714,18 +710,18 @@ fn optional_old_self_create_end_to_end() {
 
     // Create (no old_object): oldSelf is null, rule passes
     let obj = json!({"spec": {"replicas": 1}});
-    assert!(validate(&schema, &obj, None).is_empty());
+    assert!(validate(&schema, &obj, None).is_ok());
 
     // Update (scale down): fails
     let old = json!({"spec": {"replicas": 5}});
-    let errors = validate(&schema, &obj, Some(&old));
+    let errors = validate(&schema, &obj, Some(&old)).unwrap_err();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].message, "cannot scale down");
     assert_eq!(errors[0].field_path, "spec");
 
     // Update (scale up): passes
     let obj2 = json!({"spec": {"replicas": 10}});
-    assert!(validate(&schema, &obj2, Some(&old)).is_empty());
+    assert!(validate(&schema, &obj2, Some(&old)).is_ok());
 }
 
 #[test]
@@ -756,10 +752,10 @@ fn compiled_schema_end_to_end() {
 
     // Validate multiple objects without recompiling
     let pass = json!({"spec": {"replicas": 3}});
-    assert!(validate_compiled(&compiled, &pass, None).is_empty());
+    assert!(validate_compiled(&compiled, &pass, None).is_ok());
 
     let fail = json!({"spec": {"replicas": -1}});
-    let errors = validate_compiled(&compiled, &fail, None);
+    let errors = validate_compiled(&compiled, &fail, None).unwrap_err();
     assert_eq!(errors.len(), 2); // at least one replica + non-negative
     assert!(errors.iter().any(|e| e.field_path == "spec"));
     assert!(errors.iter().any(|e| e.field_path == "spec.replicas"));
@@ -781,7 +777,7 @@ fn compiled_schema_with_message_expression() {
     });
 
     let compiled = compile_schema(&schema);
-    let errors = validate_compiled(&compiled, &json!({"count": -5}), None);
+    let errors = validate_compiled(&compiled, &json!({"count": -5}), None).unwrap_err();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].message, "count is -5 but must be > 0");
 }
@@ -803,10 +799,10 @@ fn compiled_schema_with_transition_rule() {
     let compiled = compile_schema(&schema);
 
     // Create: transition rule skipped
-    assert!(validate_compiled(&compiled, &json!({"x": 1}), None).is_empty());
+    assert!(validate_compiled(&compiled, &json!({"x": 1}), None).is_ok());
 
     // Update (decrease): fails
-    let errors = validate_compiled(&compiled, &json!({"x": 1}), Some(&json!({"x": 5})));
+    let errors = validate_compiled(&compiled, &json!({"x": 1}), Some(&json!({"x": 5}))).unwrap_err();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].message, "x cannot decrease");
 }
@@ -860,9 +856,9 @@ fn compiled_schema_matches_schema_validation() {
         }
     });
 
-    let mut errors_schema = validate(&schema, &obj, None);
+    let mut errors_schema = validate(&schema, &obj, None).unwrap_err().into_vec();
     let compiled = compile_schema(&schema);
-    let mut errors_compiled = validate_compiled(&compiled, &obj, None);
+    let mut errors_compiled = validate_compiled(&compiled, &obj, None).unwrap_err().into_vec();
 
     // Both should produce the same number of errors
     assert_eq!(errors_schema.len(), errors_compiled.len());
@@ -984,8 +980,7 @@ fn timestamp_comparison_passes() {
     });
 
     let obj = json!({"expiresAt": "2025-06-15T12:00:00Z"});
-    let errors = validate(&schema, &obj, None);
-    assert!(errors.is_empty());
+    assert!(validate(&schema, &obj, None).is_ok());
 }
 
 #[test]
@@ -1005,7 +1000,7 @@ fn timestamp_comparison_fails() {
     });
 
     let obj = json!({"expiresAt": "2023-06-15T12:00:00Z"});
-    let errors = validate(&schema, &obj, None);
+    let errors = validate(&schema, &obj, None).unwrap_err();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].message, "must expire after 2024");
 }
@@ -1027,8 +1022,7 @@ fn duration_comparison_passes() {
     });
 
     let obj = json!({"timeout": "30m"});
-    let errors = validate(&schema, &obj, None);
-    assert!(errors.is_empty());
+    assert!(validate(&schema, &obj, None).is_ok());
 }
 
 #[test]
@@ -1048,7 +1042,7 @@ fn duration_comparison_fails() {
     });
 
     let obj = json!({"timeout": "2h"});
-    let errors = validate(&schema, &obj, None);
+    let errors = validate(&schema, &obj, None).unwrap_err();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].message, "timeout must be at most 1 hour");
 }
@@ -1070,10 +1064,9 @@ fn invalid_datetime_string_falls_back_to_string() {
     });
 
     let obj = json!({"expiresAt": "not-a-date"});
-    let errors = validate(&schema, &obj, None);
     // The invalid date-time string falls back to Value::String,
     // so string comparison works
-    assert!(errors.is_empty());
+    assert!(validate(&schema, &obj, None).is_ok());
 }
 
 #[test]
@@ -1095,11 +1088,11 @@ fn timestamp_transition_rule() {
     // Move expiration later: OK
     let obj = json!({"expiresAt": "2025-06-15T00:00:00Z"});
     let old = json!({"expiresAt": "2025-01-01T00:00:00Z"});
-    assert!(validate(&schema, &obj, Some(&old)).is_empty());
+    assert!(validate(&schema, &obj, Some(&old)).is_ok());
 
     // Move expiration earlier: FAIL
     let obj2 = json!({"expiresAt": "2024-06-15T00:00:00Z"});
-    let errors = validate(&schema, &obj2, Some(&old));
+    let errors = validate(&schema, &obj2, Some(&old)).unwrap_err();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].message, "expiration cannot be moved earlier");
 }
@@ -1126,11 +1119,11 @@ fn compiled_schema_timestamp_comparison() {
 
     // Pass
     let obj = json!({"expiresAt": "2025-06-15T12:00:00Z"});
-    assert!(validate_compiled(&compiled, &obj, None).is_empty());
+    assert!(validate_compiled(&compiled, &obj, None).is_ok());
 
     // Fail
     let obj2 = json!({"expiresAt": "2023-06-15T12:00:00Z"});
-    let errors = validate_compiled(&compiled, &obj2, None);
+    let errors = validate_compiled(&compiled, &obj2, None).unwrap_err();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].message, "must expire after 2024");
 }
@@ -1155,9 +1148,9 @@ fn compiled_schema_duration_comparison() {
 
     let compiled = compile_schema(&schema);
 
-    assert!(validate_compiled(&compiled, &json!({"timeout": "30m"}), None).is_empty());
+    assert!(validate_compiled(&compiled, &json!({"timeout": "30m"}), None).is_ok());
 
-    let errors = validate_compiled(&compiled, &json!({"timeout": "2h"}), None);
+    let errors = validate_compiled(&compiled, &json!({"timeout": "2h"}), None).unwrap_err();
     assert_eq!(errors.len(), 1);
 }
 
@@ -1200,7 +1193,7 @@ fn nested_object_timestamp_access() {
             }
         }
     });
-    assert!(validate(&schema, &obj, None).is_empty());
+    assert!(validate(&schema, &obj, None).is_ok());
 
     // Invalid: notAfter < notBefore
     let obj2 = json!({
@@ -1211,7 +1204,7 @@ fn nested_object_timestamp_access() {
             }
         }
     });
-    let errors = validate(&schema, &obj2, None);
+    let errors = validate(&schema, &obj2, None).unwrap_err();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].field_path, "spec.certificate");
     assert_eq!(errors[0].message, "notAfter must be after notBefore");
@@ -1234,10 +1227,10 @@ fn reserved_word_field_name() {
     });
 
     let pass = json!({"namespace": "default"});
-    assert!(validate(&schema, &pass, None).is_empty());
+    assert!(validate(&schema, &pass, None).is_ok());
 
     let fail = json!({"namespace": "kube-system"});
-    let errors = validate(&schema, &fail, None);
+    let errors = validate(&schema, &fail, None).unwrap_err();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].message, "namespace must be default");
 }
@@ -1256,10 +1249,10 @@ fn dash_in_field_name() {
     });
 
     let pass = json!({"app-name": "myapp"});
-    assert!(validate(&schema, &pass, None).is_empty());
+    assert!(validate(&schema, &pass, None).is_ok());
 
     let fail = json!({"app-name": ""});
-    let errors = validate(&schema, &fail, None);
+    let errors = validate(&schema, &fail, None).unwrap_err();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].message, "app-name must not be empty");
 }
@@ -1278,10 +1271,10 @@ fn dot_in_field_name() {
     });
 
     let pass = json!({"app.kubernetes.io/name": "nginx"});
-    assert!(validate(&schema, &pass, None).is_empty());
+    assert!(validate(&schema, &pass, None).is_ok());
 
     let fail = json!({"app.kubernetes.io/name": "apache"});
-    let errors = validate(&schema, &fail, None);
+    let errors = validate(&schema, &fail, None).unwrap_err();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].message, "annotation must be nginx");
 }
@@ -1300,10 +1293,10 @@ fn underscore_in_field_name() {
     });
 
     let pass = json!({"my_field": 5});
-    assert!(validate(&schema, &pass, None).is_empty());
+    assert!(validate(&schema, &pass, None).is_ok());
 
     let fail = json!({"my_field": -1});
-    let errors = validate(&schema, &fail, None);
+    let errors = validate(&schema, &fail, None).unwrap_err();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].message, "my_field must be positive");
 }
@@ -1333,10 +1326,10 @@ fn escaped_field_with_compiled_schema() {
     let compiled = compile_schema(&schema);
 
     let pass = json!({"namespace": "default", "my-value": 10});
-    assert!(validate_compiled(&compiled, &pass, None).is_empty());
+    assert!(validate_compiled(&compiled, &pass, None).is_ok());
 
     let fail = json!({"namespace": "", "my-value": -1});
-    let errors = validate_compiled(&compiled, &fail, None);
+    let errors = validate_compiled(&compiled, &fail, None).unwrap_err();
     assert_eq!(errors.len(), 2);
     assert!(errors.iter().any(|e| e.message == "namespace required"));
     assert!(
@@ -1372,7 +1365,7 @@ fn deeply_nested(depth: usize) -> (serde_json::Value, serde_json::Value) {
 #[test]
 fn deep_schema_must_not_silently_pass() {
     let (schema, object) = deeply_nested(70);
-    let errors = Validator::new().validate(&schema, &object, None);
+    let errors = Validator::new().validate(&schema, &object, None).unwrap_err();
     assert!(
         errors.iter().any(|e| e.kind == ErrorKind::SchemaTooDeep),
         "schema nested past the depth cap must fail closed with SchemaTooDeep; \
@@ -1387,7 +1380,9 @@ fn deep_schema_fails_closed_when_precompiled() {
     use kube_cel::compile_schema;
     let (schema, object) = deeply_nested(70);
     let compiled = compile_schema(&schema);
-    let errors = Validator::new().validate_compiled(&compiled, &object, None);
+    let errors = Validator::new()
+        .validate_compiled(&compiled, &object, None)
+        .unwrap_err();
     assert!(
         errors.iter().any(|e| e.kind == ErrorKind::SchemaTooDeep),
         "pre-compiled path must fail closed with SchemaTooDeep; got {errors:?}"
@@ -1399,7 +1394,7 @@ fn deep_schema_fails_closed_when_precompiled() {
 #[test]
 fn schema_within_depth_cap_validates_normally() {
     let (schema, object) = deeply_nested(60);
-    let errors = Validator::new().validate(&schema, &object, None);
+    let errors = Validator::new().validate(&schema, &object, None).unwrap_err();
     assert!(
         errors.iter().any(|e| e.kind == ErrorKind::ValidationFailure),
         "within-cap schema should evaluate the deep rule; got {errors:?}"

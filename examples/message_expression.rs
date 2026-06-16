@@ -37,17 +37,18 @@ fn main() {
     // Two invalid objects: the dynamic message differs per object.
     for replicas in [8, 20] {
         let object = json!({"spec": {"replicas": replicas}});
-        let errors = validator.validate(&schema, &object, None);
-        for err in &errors {
-            // Note the message reflects this object's value, not a fixed string.
-            println!("replicas={replicas}: {}", err.message);
+        if let Err(errors) = validator.validate(&schema, &object, None) {
+            for err in &errors {
+                // Note the message reflects this object's value, not a fixed string.
+                println!("replicas={replicas}: {}", err.message);
+            }
         }
     }
 
     // A valid object produces no errors (and so no message at all).
     let ok = json!({"spec": {"replicas": 3}});
-    println!(
-        "replicas=3: {} error(s)",
-        validator.validate(&schema, &ok, None).len()
-    );
+    match validator.validate(&schema, &ok, None) {
+        Ok(()) => println!("replicas=3: 0 error(s)"),
+        Err(errors) => println!("replicas=3: {} error(s)", errors.len()),
+    }
 }

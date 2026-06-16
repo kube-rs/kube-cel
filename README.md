@@ -13,7 +13,7 @@ Implements the Kubernetes-specific CEL libraries defined in [`k8s.io/apiserver/p
 
 ```toml
 [dependencies]
-kube-cel = "0.6"
+kube-cel = "0.7"
 ```
 
 `kube-cel` re-exports the `cel` crate it was built against as `kube_cel::cel`. Import `cel` types through that re-export rather than declaring a separate `cel` dependency, otherwise a version mismatch surfaces as a cryptic `Context` type error.
@@ -45,7 +45,7 @@ With the `validation` feature, you can compile and evaluate `x-kubernetes-valida
 
 ```toml
 [dependencies]
-kube-cel = { version = "0.6", features = ["validation"] }
+kube-cel = { version = "0.7", features = ["validation"] }
 ```
 
 ```rust
@@ -75,12 +75,14 @@ let schema = json!({
 let object = json!({"spec": {"replicas": -1}});
 
 let validator = Validator::new();
-let errors = validator.validate(&schema, &object, None);
+let errors = validator.validate(&schema, &object, None).unwrap_err();
 
 assert_eq!(errors.len(), 2);
 assert_eq!(errors[0].field_path, "spec");
 assert_eq!(errors[1].field_path, "spec.replicas");
 ```
+
+Validation entry points return `Result<(), ValidationErrors>`: `Ok(())` when every rule passes (so a caller can `?`-propagate failure), and `Err(ValidationErrors)` otherwise. `ValidationErrors` derefs to `[ValidationError]` and is iterable, so every individual failure stays inspectable; `into_vec()` recovers the owned `Vec`.
 
 The validator walks the schema tree, compiles rules at each node, and evaluates them with `self` bound to the corresponding object value. Transition rules (referencing `oldSelf`) are supported by passing `old_object`.
 
@@ -139,7 +141,7 @@ let defaulted = apply_defaults(&schema, &object);
 Or use the convenience method:
 
 ```rust
-let errors = Validator::new().validate_with_defaults(&schema, &object, None);
+let result = Validator::new().validate_with_defaults(&schema, &object, None);
 ```
 
 ### Root-level variables
@@ -154,7 +156,7 @@ let root_ctx = RootContext {
     api_group: "apps".into(),
     kind: "Deployment".into(),
 };
-let errors = Validator::new().validate_with_context(&schema, &object, None, Some(&root_ctx));
+let result = Validator::new().validate_with_context(&schema, &object, None, Some(&root_ctx));
 ```
 
 ## ValidatingAdmissionPolicy (VAP)
@@ -277,15 +279,15 @@ Cargo features are the **only** granularity axis — there is no runtime per-lib
 
 ```toml
 # Correct: only string + list helpers.
-kube-cel = { version = "0.6", default-features = false, features = ["strings", "lists"] }
+kube-cel = { version = "0.7", default-features = false, features = ["strings", "lists"] }
 
 # No-op narrowing: without `default-features = false` the list is ADDED to the
 # already-complete default set, so you still get everything.
-kube-cel = { version = "0.6", features = ["strings", "lists"] }
+kube-cel = { version = "0.7", features = ["strings", "lists"] }
 
 # Restore the whole surface (all 13 function groups + the validation engine)
 # in one flag, e.g. after narrowing for a downstream build profile.
-kube-cel = { version = "0.6", default-features = false, features = ["full"] }
+kube-cel = { version = "0.7", default-features = false, features = ["full"] }
 ```
 
 

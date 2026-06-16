@@ -46,8 +46,10 @@ fn main() {
             "timeout": "30m"
         }
     });
-    let errors = validate(&schema, &valid, None);
-    println!("Valid object: {} errors", errors.len());
+    match validate(&schema, &valid, None) {
+        Ok(()) => println!("Valid object: OK"),
+        Err(errors) => println!("Valid object: {} errors", errors.len()),
+    }
 
     let invalid = json!({
         "spec": {
@@ -55,10 +57,11 @@ fn main() {
             "timeout": "2h"
         }
     });
-    let errors = validate(&schema, &invalid, None);
-    println!("Invalid object: {} errors", errors.len());
-    for err in &errors {
-        println!("  [{path}] {msg}", path = err.field_path, msg = err.message);
+    if let Err(errors) = validate(&schema, &invalid, None) {
+        println!("Invalid object: {} errors", errors.len());
+        for err in &errors {
+            println!("  [{path}] {msg}", path = err.field_path, msg = err.message);
+        }
     }
 
     // ── Compiled schema (pre-compile once, validate many) ────────────
@@ -74,13 +77,13 @@ fn main() {
     ];
 
     for (i, obj) in objects.iter().enumerate() {
-        let errors = validate_compiled(&compiled, obj, None);
-        if errors.is_empty() {
-            println!("Object {i}: OK");
-        } else {
-            println!("Object {i}: {} error(s)", errors.len());
-            for err in &errors {
-                println!("  [{path}] {msg}", path = err.field_path, msg = err.message);
+        match validate_compiled(&compiled, obj, None) {
+            Ok(()) => println!("Object {i}: OK"),
+            Err(errors) => {
+                println!("Object {i}: {} error(s)", errors.len());
+                for err in &errors {
+                    println!("  [{path}] {msg}", path = err.field_path, msg = err.message);
+                }
             }
         }
     }
@@ -106,13 +109,16 @@ fn main() {
     let new_obj = json!({"expiresAt": "2025-12-01T00:00:00Z"});
     let old_obj = json!({"expiresAt": "2025-06-01T00:00:00Z"});
 
-    let errors = validate(&transition_schema, &new_obj, Some(&old_obj));
-    println!("Extend expiration: {} errors", errors.len());
+    match validate(&transition_schema, &new_obj, Some(&old_obj)) {
+        Ok(()) => println!("Extend expiration: OK"),
+        Err(errors) => println!("Extend expiration: {} errors", errors.len()),
+    }
 
     let bad_obj = json!({"expiresAt": "2025-01-01T00:00:00Z"});
-    let errors = validate(&transition_schema, &bad_obj, Some(&old_obj));
-    println!("Shorten expiration: {} errors", errors.len());
-    for err in &errors {
-        println!("  {err}");
+    if let Err(errors) = validate(&transition_schema, &bad_obj, Some(&old_obj)) {
+        println!("Shorten expiration: {} errors", errors.len());
+        for err in &errors {
+            println!("  {err}");
+        }
     }
 }

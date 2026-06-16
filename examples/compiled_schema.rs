@@ -42,18 +42,19 @@ fn main() {
     ];
 
     for (i, obj) in objects.iter().enumerate() {
-        let errors = validate_compiled(&compiled, obj, None);
+        let result = validate_compiled(&compiled, obj, None);
         let replicas = obj["spec"]["replicas"].as_i64().unwrap();
         let min = obj["spec"]["minReplicas"].as_i64().unwrap();
-        if errors.is_empty() {
-            println!("Object {i}: replicas={replicas}, min={min} -> OK");
-        } else {
-            println!(
-                "Object {i}: replicas={replicas}, min={min} -> {} error(s)",
-                errors.len()
-            );
-            for err in &errors {
-                println!("  [{path}] {msg}", path = err.field_path, msg = err.message);
+        match result {
+            Ok(()) => println!("Object {i}: replicas={replicas}, min={min} -> OK"),
+            Err(errors) => {
+                println!(
+                    "Object {i}: replicas={replicas}, min={min} -> {} error(s)",
+                    errors.len()
+                );
+                for err in &errors {
+                    println!("  [{path}] {msg}", path = err.field_path, msg = err.message);
+                }
             }
         }
     }

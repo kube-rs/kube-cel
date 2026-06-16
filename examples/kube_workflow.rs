@@ -41,22 +41,23 @@ fn main() {
         println!("=== reconcile: {label} ===");
 
         // Client-side gate, run BEFORE touching the apiserver.
-        let errors = validator.validate(&schema, desired, None);
-
-        if errors.is_empty() {
-            println!("  validation passed -> apply to cluster");
-            // The real apply happens only on the happy path:
-            //     let widgets: Api<Widget> = Api::namespaced(client, "default");
-            //     widgets.patch("my-widget", &PatchParams::apply("my-controller"),
-            //                   &Patch::Apply(desired)).await?;
-        } else {
-            println!("  validation failed -> skip apply, record on status:");
-            for err in &errors {
-                println!("    [{}] {}", err.field_path, err.message);
+        match validator.validate(&schema, desired, None) {
+            Ok(()) => {
+                println!("  validation passed -> apply to cluster");
+                // The real apply happens only on the happy path:
+                //     let widgets: Api<Widget> = Api::namespaced(client, "default");
+                //     widgets.patch("my-widget", &PatchParams::apply("my-controller"),
+                //                   &Patch::Apply(desired)).await?;
             }
-            // Instead of a doomed apply, the controller would surface the reason:
-            //     widgets.patch_status("my-widget", &pp,
-            //         &Patch::Merge(json!({"status": {"validationError": err.message}}))).await?;
+            Err(errors) => {
+                println!("  validation failed -> skip apply, record on status:");
+                for err in &errors {
+                    println!("    [{}] {}", err.field_path, err.message);
+                }
+                // Instead of a doomed apply, the controller would surface the reason:
+                //     widgets.patch_status("my-widget", &pp,
+                //         &Patch::Merge(json!({"status": {"validationError": err.message}}))).await?;
+            }
         }
         println!();
     }

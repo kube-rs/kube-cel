@@ -21,12 +21,12 @@
 //! supported rule.
 #![cfg(feature = "validation")]
 
-use kube_cel::{ErrorKind, Validator};
+use kube_cel::{ErrorKind, ValidationErrors, Validator};
 use serde_json::json;
 
 /// Runs a single `x-kubernetes-validations` rule against `{"items": [3,1,2]}`
 /// and returns the resulting errors.
-fn run_rule(rule: &str) -> Vec<kube_cel::ValidationError> {
+fn run_rule(rule: &str) -> Result<(), ValidationErrors> {
     let schema = json!({
         "type": "object",
         "properties": {
@@ -41,7 +41,7 @@ fn run_rule(rule: &str) -> Vec<kube_cel::ValidationError> {
 /// Asserts a rule fails closed: the apiserver would accept it, but kube-cel
 /// rejects it with an `UnsupportedReference` because `cel` 0.13 lacks the macro.
 fn assert_unsupported_macro(feature: &str, rule: &str) {
-    let errors = run_rule(rule);
+    let errors = run_rule(rule).unwrap_err();
     assert!(
         errors.iter().any(|e| e.kind == ErrorKind::UnsupportedReference),
         "{feature}: expected fail-closed UnsupportedReference (unsupported macro), got {errors:?}"
@@ -78,10 +78,10 @@ fn two_var_comprehension_fails_closed() {
 /// not comprehensions in general.
 #[test]
 fn one_arg_comprehension_is_supported() {
-    let errors = run_rule("self.items.all(x, x > 0)");
+    let result = run_rule("self.items.all(x, x > 0)");
     assert!(
-        errors.is_empty(),
-        "one-arg all() should be supported, got {errors:?}"
+        result.is_ok(),
+        "one-arg all() should be supported, got {result:?}"
     );
 }
 
@@ -91,7 +91,7 @@ fn one_arg_comprehension_is_supported() {
 #[test]
 fn runtime_error_is_not_an_unsupported_reference() {
     // int vs string comparison: compiles, errors at runtime (not undeclared).
-    let errors = run_rule("self.items[0] > 'a'");
+    let errors = run_rule("self.items[0] > 'a'").unwrap_err();
     assert!(
         errors.iter().any(|e| e.kind == ErrorKind::EvaluationError),
         "expected a genuine EvaluationError, got {errors:?}"
@@ -108,7 +108,7 @@ fn runtime_error_is_not_an_unsupported_reference() {
 #[test]
 fn runtime_error_chains_its_cause() {
     use std::error::Error;
-    let errors = run_rule("self.items[0] > 'a'");
+    let errors = run_rule("self.items[0] > 'a'").unwrap_err();
     let err = errors
         .iter()
         .find(|e| e.kind == ErrorKind::EvaluationError)
@@ -135,7 +135,7 @@ fn depth_cap_fails_closed() {
         schema = json!({ "type": "object", "properties": { "c": schema } });
         object = json!({ "c": object });
     }
-    let errors = Validator::new().validate(&schema, &object, None);
+    let errors = Validator::new().validate(&schema, &object, None).unwrap_err();
     assert!(
         errors.iter().any(|e| e.kind == ErrorKind::SchemaTooDeep),
         "depth past the cap must fail closed with SchemaTooDeep, got {errors:?}"
@@ -163,7 +163,7 @@ fn invalid_message_expression_fails_closed() {
         }]
     });
     let object = json!({"items": [1, 2, 3]});
-    let errors = Validator::new().validate(&schema, &object, None);
+    let errors = Validator::new().validate(&schema, &object, None).unwrap_err();
     assert!(
         errors.iter().any(|e| e.kind == ErrorKind::CompilationFailure),
         "a rule whose messageExpression fails to compile must fail closed, got {errors:?}"

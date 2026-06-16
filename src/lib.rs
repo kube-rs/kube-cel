@@ -40,7 +40,7 @@
 //!
 //! ```toml
 //! # Only the string + list helpers:
-//! kube-cel = { version = "0.6", default-features = false, features = ["strings", "lists"] }
+//! kube-cel = { version = "0.7", default-features = false, features = ["strings", "lists"] }
 //! ```
 //!
 //! The validation pipeline (CRD `x-kubernetes-validations`, VAP, static analysis)
@@ -52,7 +52,7 @@
 //! after narrowing, or to opt into validation alongside the default functions:
 //!
 //! ```toml
-//! kube-cel = { version = "0.6", features = ["full"] }
+//! kube-cel = { version = "0.7", features = ["full"] }
 //! ```
 //!
 //! # Versioning and stability
@@ -80,7 +80,7 @@ Compile and evaluate `x-kubernetes-validations` CEL rules client-side,
 without an API server.
 
 ```toml
-kube-cel = { version = "0.6", features = ["validation"] }
+kube-cel = { version = "0.7", features = ["validation"] }
 ```
 
 ```rust
@@ -96,7 +96,7 @@ let schema = json!({
 });
 
 let object = json!({"replicas": -1});
-let errors = Validator::new().validate(&schema, &object, None);
+let errors = Validator::new().validate(&schema, &object, None).unwrap_err();
 assert_eq!(errors.len(), 1);
 ```
 
@@ -127,7 +127,7 @@ pub use ext::KubeCelExt;
 
 #[cfg(feature = "validation")]
 pub use crate::validation::{
-    ErrorKind, RootContext, ValidationError, Validator,
+    ErrorKind, RootContext, ValidationError, ValidationErrors, Validator,
     analysis::{
         AnalysisWarning, ScopeContext, WarningKind, analyze_rule, check_rule_scope, estimate_rule_cost,
     },

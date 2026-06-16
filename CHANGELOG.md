@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.7.0] - 2026-06-16
+
+Breaking release that reshapes the validation surface around the idiomatic Rust
+`validate()?` flow, addressing review feedback on the client-side CEL derive
+([kube#2011](https://github.com/kube-rs/kube/pull/2011#discussion_r3419318288)).
+
+### Breaking
+- The eight validation entry points now return `Result<(), ValidationErrors>`
+  instead of `Vec<ValidationError>`:
+  `Validator::{validate, validate_with_context, validate_compiled,
+  validate_compiled_with_context, validate_with_defaults,
+  validate_with_defaults_and_context}` and the free `validate` /
+  `validate_compiled`. They return `Ok(())` when every rule passes (so callers
+  can `?`-propagate failure) and `Err(ValidationErrors)` otherwise — no more
+  explicit `is_empty()` check inverting the success path. Migration: a passing
+  assertion `assert!(errors.is_empty())` becomes `assert!(result.is_ok())`; to
+  inspect failures, `let errors = result.unwrap_err()` yields the same data
+  (`ValidationErrors` derefs to `[ValidationError]`).
+
+### Added
+- `ValidationErrors`, the aggregate `Err` payload: a newtype over
+  `Vec<ValidationError>` with `Deref<Target = [ValidationError]>`, owned and
+  borrowed `IntoIterator`, `Display` (one failure per line), `std::error::Error`,
+  `From<Vec<ValidationError>>`, and `into_vec` / `as_slice` / `len` / `is_empty`
+  accessors. No information is lost relative to the old `Vec` return — the full
+  slice stays reachable inside the `Err`.
+
 ## [0.6.1] - 2026-06-13
 
 ### Fixed

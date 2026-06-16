@@ -127,6 +127,108 @@ impl std::error::Error for ValidationError {
     }
 }
 
+/// Aggregate of CEL validation failures.
+///
+/// The `Err` payload of the Result-returning validation entry points (e.g.
+/// [`Validator::validate`]), so callers can `?` instead of checking
+/// `Vec::is_empty`. Derefs to `[ValidationError]` and is iterable, so every
+/// individual failure stays inspectable; [`into_vec`](Self::into_vec) recovers
+/// ownership of the full `Vec`.
+///
+/// A `ValidationErrors` is never empty: the entry points return `Ok(())` when no
+/// rule fails and `Err(ValidationErrors)` only when at least one does.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ValidationErrors(Vec<ValidationError>);
+
+impl ValidationErrors {
+    /// Consume the aggregate and return the underlying `Vec`.
+    #[must_use]
+    pub fn into_vec(self) -> Vec<ValidationError> {
+        self.0
+    }
+
+    /// The individual failures as a slice.
+    #[must_use]
+    pub fn as_slice(&self) -> &[ValidationError] {
+        &self.0
+    }
+
+    /// Whether the aggregate holds no failures. Always `false` for a value
+    /// produced by the validation entry points (which return `Ok` in that case),
+    /// but meaningful for aggregates built directly via [`From`].
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Number of individual failures.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl std::fmt::Display for ValidationErrors {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "{} validation error(s):", self.0.len())?;
+        for (i, err) in self.0.iter().enumerate() {
+            if i + 1 == self.0.len() {
+                write!(f, "  - {err}")?;
+            } else {
+                writeln!(f, "  - {err}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+// Aggregate error: the constituent `ValidationError`s are the payload (reachable
+// via `Deref`/`IntoIterator`), not a single underlying cause, so `source()` is
+// `None`. Mirrors `ValidationError`'s own `Error` impl style.
+impl std::error::Error for ValidationErrors {}
+
+impl std::ops::Deref for ValidationErrors {
+    type Target = [ValidationError];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<Vec<ValidationError>> for ValidationErrors {
+    fn from(errors: Vec<ValidationError>) -> Self {
+        Self(errors)
+    }
+}
+
+impl IntoIterator for ValidationErrors {
+    type IntoIter = std::vec::IntoIter<ValidationError>;
+    type Item = ValidationError;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a ValidationErrors {
+    type IntoIter = std::slice::Iter<'a, ValidationError>;
+    type Item = &'a ValidationError;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+/// Convert a collected error `Vec` into the Result shape the entry points return:
+/// `Ok(())` when empty, `Err(ValidationErrors)` otherwise.
+fn into_result(errors: Vec<ValidationError>) -> Result<(), ValidationErrors> {
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(ValidationErrors(errors))
+    }
+}
+
 /// Builds the fail-closed error emitted when schema nesting exceeds
 /// [`MAX_SCHEMA_DEPTH`](crate::validation::compilation::MAX_SCHEMA_DEPTH). Surfacing this —
 /// rather than silently skipping the over-deep subtree — is what keeps the
@@ -178,13 +280,12 @@ impl Validator {
     ///
     /// Compiles rules on each call. For repeated validation against the same
     /// schema, prefer [`compile_schema`](crate::compile_schema) + [`validate_compiled`](Self::validate_compiled).
-    #[must_use]
     pub fn validate(
         &self,
         schema: &serde_json::Value,
         object: &serde_json::Value,
         old_object: Option<&serde_json::Value>,
-    ) -> Vec<ValidationError> {
+    ) -> Result<(), ValidationErrors> {
         self.validate_with_context(schema, object, old_object, None)
     }
 
@@ -192,14 +293,13 @@ impl Validator {
     ///
     /// Like [`validate`](Self::validate), but also binds `apiVersion`, `apiGroup`, and `kind`
     /// as root-level CEL variables when a [`RootContext`] is provided.
-    #[must_use]
     pub fn validate_with_context(
         &self,
         schema: &serde_json::Value,
         object: &serde_json::Value,
         old_object: Option<&serde_json::Value>,
         root_ctx: Option<&RootContext>,
-    ) -> Vec<ValidationError> {
+    ) -> Result<(), ValidationErrors> {
         let mut errors = Vec::new();
         self.walk_schema(
             schema,
@@ -211,20 +311,19 @@ impl Validator {
             root_ctx,
             0,
         );
-        errors
+        into_result(errors)
     }
 
     /// Validate an object using a pre-compiled schema tree.
     ///
     /// Use [`compile_schema`](crate::compile_schema) to build the [`CompiledSchema`], then call this
     /// method for each object to validate — rules are compiled only once.
-    #[must_use]
     pub fn validate_compiled(
         &self,
         compiled: &CompiledSchema,
         object: &serde_json::Value,
         old_object: Option<&serde_json::Value>,
-    ) -> Vec<ValidationError> {
+    ) -> Result<(), ValidationErrors> {
         self.validate_compiled_with_context(compiled, object, old_object, None)
     }
 
@@ -232,14 +331,13 @@ impl Validator {
     ///
     /// Like [`validate_compiled`](Self::validate_compiled), but also binds `apiVersion`,
     /// `apiGroup`, and `kind` as root-level CEL variables when a [`RootContext`] is provided.
-    #[must_use]
     pub fn validate_compiled_with_context(
         &self,
         compiled: &CompiledSchema,
         object: &serde_json::Value,
         old_object: Option<&serde_json::Value>,
         root_ctx: Option<&RootContext>,
-    ) -> Vec<ValidationError> {
+    ) -> Result<(), ValidationErrors> {
         let mut errors = Vec::new();
         self.walk_compiled(
             compiled,
@@ -251,19 +349,18 @@ impl Validator {
             root_ctx,
             0,
         );
-        errors
+        into_result(errors)
     }
 
     /// Validate with schema defaults applied to the object first.
     ///
     /// Equivalent to calling [`crate::validation::defaults::apply_defaults`] followed by [`validate`].
-    #[must_use]
     pub fn validate_with_defaults(
         &self,
         schema: &serde_json::Value,
         object: &serde_json::Value,
         old_object: Option<&serde_json::Value>,
-    ) -> Vec<ValidationError> {
+    ) -> Result<(), ValidationErrors> {
         let defaulted = crate::validation::defaults::apply_defaults(schema, object);
         let defaulted_old = old_object.map(|o| crate::validation::defaults::apply_defaults(schema, o));
         self.validate(schema, &defaulted, defaulted_old.as_ref())
@@ -272,14 +369,13 @@ impl Validator {
     /// Validate with schema defaults applied and root context variables bound.
     ///
     /// Combines [`crate::validation::defaults::apply_defaults`] with [`Self::validate_with_context`].
-    #[must_use]
     pub fn validate_with_defaults_and_context(
         &self,
         schema: &serde_json::Value,
         object: &serde_json::Value,
         old_object: Option<&serde_json::Value>,
         root_ctx: Option<&RootContext>,
-    ) -> Vec<ValidationError> {
+    ) -> Result<(), ValidationErrors> {
         let defaulted = crate::validation::defaults::apply_defaults(schema, object);
         let defaulted_old = old_object.map(|o| crate::validation::defaults::apply_defaults(schema, o));
         self.validate_with_context(schema, &defaulted, defaulted_old.as_ref(), root_ctx)
@@ -739,12 +835,11 @@ thread_local! {
 /// Uses a thread-local [`Validator`] to avoid re-registering CEL functions on each call.
 ///
 /// See [`Validator::validate`] for details.
-#[must_use]
 pub fn validate(
     schema: &serde_json::Value,
     object: &serde_json::Value,
     old_object: Option<&serde_json::Value>,
-) -> Vec<ValidationError> {
+) -> Result<(), ValidationErrors> {
     THREAD_VALIDATOR.with(|v| v.validate(schema, object, old_object))
 }
 
@@ -753,12 +848,11 @@ pub fn validate(
 /// Uses a thread-local [`Validator`] to avoid re-registering CEL functions on each call.
 ///
 /// See [`Validator::validate_compiled`] for details.
-#[must_use]
 pub fn validate_compiled(
     compiled: &CompiledSchema,
     object: &serde_json::Value,
     old_object: Option<&serde_json::Value>,
-) -> Vec<ValidationError> {
+) -> Result<(), ValidationErrors> {
     THREAD_VALIDATOR.with(|v| v.validate_compiled(compiled, object, old_object))
 }
 
@@ -815,8 +909,7 @@ mod tests {
             {"rule": "self.replicas >= 0", "message": "must be non-negative"}
         ]));
         let obj = json!({"replicas": 3, "name": "app"});
-        let errors = validate(&schema, &obj, None);
-        assert!(errors.is_empty());
+        assert!(validate(&schema, &obj, None).is_ok());
     }
 
     #[test]
@@ -825,7 +918,7 @@ mod tests {
             {"rule": "self.replicas >= 0", "message": "must be non-negative"}
         ]));
         let obj = json!({"replicas": -1, "name": "app"});
-        let errors = validate(&schema, &obj, None);
+        let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].message, "must be non-negative");
         assert_eq!(errors[0].rule, "self.replicas >= 0");
@@ -837,7 +930,7 @@ mod tests {
             {"rule": "self.replicas >= 0"}
         ]));
         let obj = json!({"replicas": -1, "name": "app"});
-        let errors = validate(&schema, &obj, None);
+        let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("self.replicas >= 0"));
     }
@@ -848,7 +941,7 @@ mod tests {
             {"rule": "self.replicas >= 0", "message": "bad", "reason": "FieldValueInvalid"}
         ]));
         let obj = json!({"replicas": -1, "name": "app"});
-        let errors = validate(&schema, &obj, None);
+        let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors[0].reason.as_deref(), Some("FieldValueInvalid"));
     }
 
@@ -858,8 +951,7 @@ mod tests {
             {"rule": "self.replicas >= oldSelf.replicas", "message": "cannot scale down"}
         ]));
         let obj = json!({"replicas": 1, "name": "app"});
-        let errors = validate(&schema, &obj, None);
-        assert!(errors.is_empty());
+        assert!(validate(&schema, &obj, None).is_ok());
     }
 
     #[test]
@@ -869,7 +961,7 @@ mod tests {
         ]));
         let obj = json!({"replicas": 1, "name": "app"});
         let old = json!({"replicas": 3, "name": "app"});
-        let errors = validate(&schema, &obj, Some(&old));
+        let errors = validate(&schema, &obj, Some(&old)).unwrap_err();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].message, "cannot scale down");
     }
@@ -881,8 +973,7 @@ mod tests {
         ]));
         let obj = json!({"replicas": 5, "name": "app"});
         let old = json!({"replicas": 3, "name": "app"});
-        let errors = validate(&schema, &obj, Some(&old));
-        assert!(errors.is_empty());
+        assert!(validate(&schema, &obj, Some(&old)).is_ok());
     }
 
     #[test]
@@ -904,7 +995,7 @@ mod tests {
             }
         });
         let obj = json!({"spec": {"replicas": -1}});
-        let errors = validate(&schema, &obj, None);
+        let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].field_path, "spec.replicas");
         assert_eq!(errors[0].message, "must be non-negative");
@@ -936,7 +1027,7 @@ mod tests {
                 {"name": "also-good"}
             ]
         });
-        let errors = validate(&schema, &obj, None);
+        let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].field_path, "items[1]");
         assert_eq!(errors[0].message, "name required");
@@ -956,8 +1047,7 @@ mod tests {
             }
         });
         let obj = json!({});
-        let errors = validate(&schema, &obj, None);
-        assert!(errors.is_empty());
+        assert!(validate(&schema, &obj, None).is_ok());
     }
 
     #[test]
@@ -967,7 +1057,7 @@ mod tests {
             {"rule": "self.name.size() > 0", "message": "name required"}
         ]));
         let obj = json!({"replicas": -1, "name": ""});
-        let errors = validate(&schema, &obj, None);
+        let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors.len(), 2);
     }
 
@@ -977,7 +1067,7 @@ mod tests {
             {"rule": "self.replicas >="}
         ]));
         let obj = json!({"replicas": 1, "name": "app"});
-        let errors = validate(&schema, &obj, None);
+        let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("failed to compile"));
     }
@@ -991,8 +1081,7 @@ mod tests {
             }
         });
         let obj = json!({"replicas": -1});
-        let errors = validate(&schema, &obj, None);
-        assert!(errors.is_empty());
+        assert!(validate(&schema, &obj, None).is_ok());
     }
 
     #[test]
@@ -1026,7 +1115,7 @@ mod tests {
         let v = Validator::default();
         let schema = make_schema(json!([{"rule": "self.replicas >= 0"}]));
         let obj = json!({"replicas": 1, "name": "app"});
-        assert!(v.validate(&schema, &obj, None).is_empty());
+        assert!(v.validate(&schema, &obj, None).is_ok());
     }
 
     #[test]
@@ -1041,7 +1130,7 @@ mod tests {
             }
         });
         let obj = json!({"a": 1, "b": -1, "c": 5});
-        let errors = validate(&schema, &obj, None);
+        let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].field_path, "b");
     }
@@ -1056,7 +1145,7 @@ mod tests {
             "messageExpression": "'replicas is ' + string(self.replicas) + ', must be >= 0'"
         }]));
         let obj = json!({"replicas": -5, "name": "app"});
-        let errors = validate(&schema, &obj, None);
+        let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].message, "replicas is -5, must be >= 0");
     }
@@ -1073,7 +1162,7 @@ mod tests {
         // which rejects such a CRD at registration — rather than being silently
         // dropped and the rule evaluated with the static message.
         let obj = json!({"replicas": 5, "name": "app"});
-        let errors = validate(&schema, &obj, None);
+        let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].kind, ErrorKind::CompilationFailure);
     }
@@ -1087,8 +1176,7 @@ mod tests {
         }]));
         // Create (no old object): rule is evaluated with oldSelf = null
         let obj = json!({"replicas": 1, "name": "app"});
-        let errors = validate(&schema, &obj, None);
-        assert!(errors.is_empty()); // oldSelf == null → true
+        assert!(validate(&schema, &obj, None).is_ok()); // oldSelf == null → true
     }
 
     #[test]
@@ -1100,7 +1188,7 @@ mod tests {
         }]));
         let obj = json!({"replicas": 1, "name": "app"});
         let old = json!({"replicas": 3, "name": "app"});
-        let errors = validate(&schema, &obj, Some(&old));
+        let errors = validate(&schema, &obj, Some(&old)).unwrap_err();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].message, "cannot scale down");
     }
@@ -1114,8 +1202,7 @@ mod tests {
         }]));
         let obj = json!({"replicas": 1, "name": "app"});
         // optionalOldSelf: false → transition rule skipped on create
-        let errors = validate(&schema, &obj, None);
-        assert!(errors.is_empty());
+        assert!(validate(&schema, &obj, None).is_ok());
     }
 
     #[test]
@@ -1136,9 +1223,9 @@ mod tests {
         });
         let obj = json!({"spec": {"replicas": -1}});
 
-        let errors_schema = validate(&schema, &obj, None);
+        let errors_schema = validate(&schema, &obj, None).unwrap_err();
         let compiled = compile_schema(&schema);
-        let errors_compiled = validate_compiled(&compiled, &obj, None);
+        let errors_compiled = validate_compiled(&compiled, &obj, None).unwrap_err();
 
         assert_eq!(errors_schema.len(), errors_compiled.len());
         assert_eq!(errors_schema[0].message, errors_compiled[0].message);
@@ -1157,10 +1244,20 @@ mod tests {
         let compiled = compile_schema(&schema);
 
         // Validate multiple objects with the same compiled schema
-        assert_eq!(validate_compiled(&compiled, &json!({"x": 1}), None).len(), 0);
-        assert_eq!(validate_compiled(&compiled, &json!({"x": -1}), None).len(), 1);
-        assert_eq!(validate_compiled(&compiled, &json!({"x": 5}), None).len(), 0);
-        assert_eq!(validate_compiled(&compiled, &json!({"x": 0}), None).len(), 1);
+        assert!(validate_compiled(&compiled, &json!({"x": 1}), None).is_ok());
+        assert_eq!(
+            validate_compiled(&compiled, &json!({"x": -1}), None)
+                .unwrap_err()
+                .len(),
+            1
+        );
+        assert!(validate_compiled(&compiled, &json!({"x": 5}), None).is_ok());
+        assert_eq!(
+            validate_compiled(&compiled, &json!({"x": 0}), None)
+                .unwrap_err()
+                .len(),
+            1
+        );
     }
 
     // ── fieldPath override tests ────────────────────────────────────
@@ -1182,7 +1279,7 @@ mod tests {
             }
         });
         let obj = json!({"spec": {"x": -1}});
-        let errors = validate(&schema, &obj, None);
+        let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].field_path, "spec.spec.x");
     }
@@ -1204,7 +1301,7 @@ mod tests {
             }
         });
         let obj = json!({"spec": {"name": ""}});
-        let errors = validate(&schema, &obj, None);
+        let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].field_path, "spec.name");
     }
@@ -1221,7 +1318,7 @@ mod tests {
             ]
         });
         let obj = json!({"x": -1});
-        let errors = validate(&schema, &obj, None);
+        let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].field_path, ".spec.x");
     }
@@ -1243,7 +1340,7 @@ mod tests {
             }
         });
         let obj = json!({"spec": {"x": -1}});
-        let errors = validate(&schema, &obj, None);
+        let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].field_path, "spec");
     }
@@ -1256,7 +1353,7 @@ mod tests {
             {"rule": "self.replicas >="}
         ]));
         let obj = json!({"replicas": 1, "name": "app"});
-        let errors = validate(&schema, &obj, None);
+        let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].kind, ErrorKind::CompilationFailure);
     }
@@ -1267,7 +1364,7 @@ mod tests {
             {"rule": "self.replicas >= 0", "message": "must be non-negative"}
         ]));
         let obj = json!({"replicas": -1, "name": "app"});
-        let errors = validate(&schema, &obj, None);
+        let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].kind, ErrorKind::ValidationFailure);
     }
@@ -1278,7 +1375,7 @@ mod tests {
             {"rule": "self.missing_field > 0"}
         ]));
         let obj = json!({"replicas": 1, "name": "app"});
-        let errors = validate(&schema, &obj, None);
+        let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].kind, ErrorKind::EvaluationError);
     }
@@ -1307,7 +1404,7 @@ mod tests {
             ]
         });
         let obj = json!({"x": -1, "y": -1});
-        let errors = validate(&schema, &obj, None);
+        let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors.len(), 2);
     }
 
@@ -1323,7 +1420,7 @@ mod tests {
             }]
         });
         let obj = json!({"x": 0});
-        let errors = validate(&schema, &obj, None);
+        let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors.len(), 1);
     }
 
@@ -1343,7 +1440,7 @@ mod tests {
             }]
         });
         let obj = json!({"name": ""});
-        let errors = validate(&schema, &obj, None);
+        let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors.len(), 1);
     }
 
@@ -1359,9 +1456,9 @@ mod tests {
             }]
         });
         let obj = json!({"x": -1});
-        let errors_schema = validate(&schema, &obj, None);
+        let errors_schema = validate(&schema, &obj, None).unwrap_err();
         let compiled = compile_schema(&schema);
-        let errors_compiled = validate_compiled(&compiled, &obj, None);
+        let errors_compiled = validate_compiled(&compiled, &obj, None).unwrap_err();
         assert_eq!(errors_schema.len(), errors_compiled.len());
         assert_eq!(errors_schema[0].message, errors_compiled[0].message);
     }
@@ -1381,8 +1478,7 @@ mod tests {
             }
         });
         let obj = json!({"unknown_field": -1});
-        let errors = validate(&schema, &obj, None);
-        assert!(errors.is_empty());
+        assert!(validate(&schema, &obj, None).is_ok());
     }
 
     #[test]
@@ -1397,7 +1493,7 @@ mod tests {
             }
         });
         let obj = json!({"unknown_field": -1});
-        let errors = validate(&schema, &obj, None);
+        let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors.len(), 1);
     }
 
@@ -1417,8 +1513,7 @@ mod tests {
             }]
         });
         let obj = json!({"spec": {}});
-        let errors = validate(&schema, &obj, None);
-        assert!(errors.is_empty());
+        assert!(validate(&schema, &obj, None).is_ok());
     }
 
     #[test]
@@ -1432,8 +1527,7 @@ mod tests {
             }]
         });
         let obj = json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "test"}});
-        let errors = validate(&schema, &obj, None);
-        assert!(errors.is_empty());
+        assert!(validate(&schema, &obj, None).is_ok());
     }
 
     #[test]
@@ -1448,8 +1542,7 @@ mod tests {
         });
         let obj = json!({"spec": {}});
         let compiled = compile_schema(&schema);
-        let errors = validate_compiled(&compiled, &obj, None);
-        assert!(errors.is_empty());
+        assert!(validate_compiled(&compiled, &obj, None).is_ok());
     }
 
     // ── RootContext tests ────────────────────────────────────────────
@@ -1470,8 +1563,11 @@ mod tests {
             api_group: "apps".into(),
             kind: "Deployment".into(),
         };
-        let errors = Validator::new().validate_with_context(&schema, &obj, None, Some(&root_ctx));
-        assert!(errors.is_empty());
+        assert!(
+            Validator::new()
+                .validate_with_context(&schema, &obj, None, Some(&root_ctx))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1490,8 +1586,11 @@ mod tests {
             api_group: "".into(),
             kind: "Pod".into(),
         };
-        let errors = Validator::new().validate_with_context(&schema, &obj, None, Some(&root_ctx));
-        assert!(errors.is_empty());
+        assert!(
+            Validator::new()
+                .validate_with_context(&schema, &obj, None, Some(&root_ctx))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1502,7 +1601,7 @@ mod tests {
             "x-kubernetes-validations": [{"rule": "self.x >= 0", "message": "bad"}]
         });
         let obj = json!({"x": -1});
-        let errors = validate(&schema, &obj, None);
+        let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors.len(), 1);
     }
 
@@ -1523,8 +1622,11 @@ mod tests {
             kind: "MyResource".into(),
         };
         let compiled = crate::validation::compilation::compile_schema(&schema);
-        let errors = Validator::new().validate_compiled_with_context(&compiled, &obj, None, Some(&root_ctx));
-        assert!(errors.is_empty());
+        assert!(
+            Validator::new()
+                .validate_compiled_with_context(&compiled, &obj, None, Some(&root_ctx))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1542,12 +1644,14 @@ mod tests {
             }
         });
         // Without defaults, replicas is missing -> no validation runs
-        let errors = validate(&schema, &json!({}), None);
-        assert!(errors.is_empty());
+        assert!(validate(&schema, &json!({}), None).is_ok());
 
         // With defaults, replicas=1 is injected -> validation runs and passes
-        let errors = Validator::new().validate_with_defaults(&schema, &json!({}), None);
-        assert!(errors.is_empty());
+        assert!(
+            Validator::new()
+                .validate_with_defaults(&schema, &json!({}), None)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1573,9 +1677,11 @@ mod tests {
             kind: "Deployment".into(),
         };
         // Empty object: defaults fill replicas=1, root context provides kind
-        let errors =
-            Validator::new().validate_with_defaults_and_context(&schema, &json!({}), None, Some(&root_ctx));
-        assert!(errors.is_empty());
+        assert!(
+            Validator::new()
+                .validate_with_defaults_and_context(&schema, &json!({}), None, Some(&root_ctx))
+                .is_ok()
+        );
     }
 
     #[test]

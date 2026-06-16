@@ -11,7 +11,7 @@
 //!
 //! Run with: `cargo run --example transition_rules --features validation`
 
-use kube_cel::Validator;
+use kube_cel::{ValidationErrors, Validator};
 use serde_json::json;
 
 fn main() {
@@ -64,13 +64,14 @@ fn main() {
     );
 }
 
-fn report(label: &str, errors: Vec<kube_cel::ValidationError>) {
-    if errors.is_empty() {
-        println!("{label}: OK");
-    } else {
-        println!("{label}: {} error(s)", errors.len());
-        for err in &errors {
-            println!("  - {}", err.message);
+fn report(label: &str, result: Result<(), ValidationErrors>) {
+    match result {
+        Ok(()) => println!("{label}: OK"),
+        Err(errors) => {
+            println!("{label}: {} error(s)", errors.len());
+            for err in &errors {
+                println!("  - {}", err.message);
+            }
         }
     }
 }

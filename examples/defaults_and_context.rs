@@ -44,14 +44,15 @@ fn main() {
     };
 
     let validator = Validator::new();
-    let errors = validator.validate_with_context(&schema, &defaulted, None, Some(&root_ctx));
+    let result = validator.validate_with_context(&schema, &defaulted, None, Some(&root_ctx));
 
     println!("=== Validation Results ===");
-    if errors.is_empty() {
-        println!("All rules passed!");
-    } else {
-        for e in &errors {
-            println!("[FAIL] {}: {}", e.field_path, e.message);
+    match result {
+        Ok(()) => println!("All rules passed!"),
+        Err(errors) => {
+            for e in &errors {
+                println!("[FAIL] {}: {}", e.field_path, e.message);
+            }
         }
     }
 
@@ -76,13 +77,14 @@ fn main() {
         }
     });
     let sparse_object = json!({}); // no fields at all
-    let errors = validator.validate_with_defaults(&simple_schema, &sparse_object, None);
+    let result = validator.validate_with_defaults(&simple_schema, &sparse_object, None);
     println!("Validating empty object with defaults applied:");
-    if errors.is_empty() {
-        println!("All rules passed (replicas defaulted to 1, strategy to RollingUpdate)");
-    } else {
-        for e in &errors {
-            println!("[FAIL] {}", e.message);
+    match result {
+        Ok(()) => println!("All rules passed (replicas defaulted to 1, strategy to RollingUpdate)"),
+        Err(errors) => {
+            for e in &errors {
+                println!("[FAIL] {}", e.message);
+            }
         }
     }
 }
