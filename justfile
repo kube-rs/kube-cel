@@ -101,25 +101,82 @@ bump version:
     sedi "s/^# Changelog$/# Changelog\n\n${entry}/" CHANGELOG.md
     echo "Bumped ${old} → {{version}}"
     echo "Updated: Cargo.toml, README.md, src/lib.rs, CHANGELOG.md"
-    echo "Edit CHANGELOG.md to fill in release notes"
+    echo "Edit CHANGELOG.md to fill in release notes, then commit with sign-off:"
+    echo "  git commit -s -am 'chore: release {{version}}'   (or a descriptive message)"
 
-# Release: check → commit → tag → push → publish (run `just bump X.Y.Z` first)
+# Release: tag, push, publish, GitHub release (commit the version bump first; never commits)
 release: check
     #!/usr/bin/env bash
+    # Commit the version bump yourself FIRST (`just bump X.Y.Z`, edit CHANGELOG,
+    # `git commit -s`). This recipe refuses a dirty tree and never creates
+    # commits, so every release commit carries a DCO sign-off and a real message
+    # (the old recipe made an unsigned `chore: release` commit, failing kube-rs DCO).
     set -euo pipefail
     version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-    # Verify CHANGELOG has been filled in (not just template)
-    if grep -q "^## \[${version}\]" CHANGELOG.md && grep -A3 "^## \[${version}\]" CHANGELOG.md | grep -q "^$"; then
-        echo "⚠ CHANGELOG.md looks like a template — fill in release notes first"
+    if ! grep -q "^## \[${version}\]" CHANGELOG.md; then
+        echo "⚠ no CHANGELOG.md section for ${version} — add release notes first"
+        exit 1
+    fi
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "⚠ working tree is dirty — commit the version bump first (git commit -s)."
+        echo "  This recipe never commits, so the release commit keeps your sign-off."
+        git status --short
         exit 1
     fi
     echo "Releasing v${version}..."
-    git add -A
-    git commit -m "chore: release ${version}"
     git tag "v${version}"
     git push origin main --tags
     cargo publish
-    echo "Published kube-cel v${version}"
+    # GitHub release: notes reflowed to one line per paragraph/bullet (GitHub
+    # renders single newlines as <br>, so hard-wrapped CHANGELOG text breaks
+    # mid-sentence otherwise).
+    gh release create "v${version}" --title "v${version}" \
+        --notes-file <(just release-notes "${version}") --verify-tag
+    echo "Published + released kube-cel v${version}"
+
+# Print GitHub-friendly (reflowed) release notes for VERSION from the CHANGELOG
+release-notes version:
+    #!/usr/bin/env python3
+    # Each paragraph/bullet is reflowed onto a single line, because GitHub
+    # renders single newlines as <br> (hard-wrapped CHANGELOG text would break
+    # mid-sentence). Used by `release`; also handy for re-editing a release:
+    #   gh release edit vX.Y.Z --notes-file <(just release-notes X.Y.Z)
+    import re
+    version = "{{version}}"
+    lines = open('CHANGELOG.md').read().splitlines()
+    start = next(i for i, l in enumerate(lines) if l.startswith(f'## [{version}]')) + 1
+    sec = []
+    for l in lines[start:]:
+        if l.startswith('## ['):
+            break
+        sec.append(l)
+    out, cur = [], None
+    def flush():
+        global cur
+        if cur:
+            prefix, parts = cur
+            out.append(prefix + ' '.join(p.strip() for p in parts))
+            cur = None
+    for l in sec:
+        s = l.strip()
+        if s == '':
+            flush()
+            if out and out[-1] != '':
+                out.append('')
+            continue
+        if re.match(r'^#{1,6}\s', s):
+            flush(); out.append(s); continue
+        m = re.match(r'^(\s*)([-*+]|\d+\.)\s+(.*)$', l)
+        if m:
+            flush(); cur = (f'{m.group(1)}{m.group(2)} ', [m.group(3)]); continue
+        if cur:
+            cur[1].append(s)
+        else:
+            cur = ('', [s])
+    flush()
+    while out and out[-1] == '':
+        out.pop()
+    print('\n'.join(out))
 
 # Dry-run publish
 publish-dry: check
