@@ -209,6 +209,11 @@ pub struct CompiledSchema {
     pub items: Option<Box<CompiledSchema>>,
     /// Compiled additionalProperties schema.
     pub additional_properties: Option<Box<CompiledSchema>>,
+    /// Whether this node is a map type — its `additionalProperties` is a schema
+    /// or `true` (i.e. not absent/`false`). Map keys are user-supplied data, not
+    /// declared field names, so they are NOT field-name escaped during value
+    /// conversion, matching the apiserver's `MapValue` behavior (kube-rs/kube-cel#8).
+    pub is_map: bool,
     /// The `format` hint from the schema (e.g., `date-time`, `duration`).
     pub format: SchemaFormat,
     /// Compiled `allOf` branch schemas.
@@ -279,6 +284,7 @@ fn compile_schema_inner(schema: &serde_json::Value, depth: usize) -> CompiledSch
             properties: HashMap::new(),
             items: None,
             additional_properties: None,
+            is_map: false,
             format: SchemaFormat::None,
             all_of: Vec::new(),
             one_of: Vec::new(),
@@ -304,10 +310,13 @@ fn compile_schema_inner(schema: &serde_json::Value, depth: usize) -> CompiledSch
         .get("items")
         .map(|s| Box::new(compile_schema_inner(s, depth + 1)));
 
-    let additional_properties = schema
-        .get("additionalProperties")
+    let additional = schema.get("additionalProperties");
+    let additional_properties = additional
         .filter(|a| a.is_object())
         .map(|s| Box::new(compile_schema_inner(s, depth + 1)));
+    // A node whose `additionalProperties` is a schema or `true` (not absent/`false`)
+    // is a map; its keys are user data and must not be field-name escaped (#8).
+    let is_map = !matches!(additional, None | Some(serde_json::Value::Bool(false)));
 
     let format = SchemaFormat::from_schema(schema);
 
@@ -334,6 +343,7 @@ fn compile_schema_inner(schema: &serde_json::Value, depth: usize) -> CompiledSch
         properties,
         items,
         additional_properties,
+        is_map,
         format,
         all_of,
         one_of,

@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.7.1] - 2026-06-19
+
+### Fixed
+- `additionalProperties` map keys are no longer field-name escaped during value
+  conversion ([#8](https://github.com/kube-rs/kube-cel/issues/8)). The apiserver
+  escapes only declared `properties` (struct field names); map keys under
+  `additionalProperties` pass through literally (`apiserver/pkg/cel/common`
+  `MapValue`). Before this fix every object key was escaped, so an instance key
+  like `rio.build/fetcher` became `rio__dot__build__slash__fetcher` and a rule
+  such as `'rio.build/fetcher' in self.nodeSelector` could never fire — a
+  **fail-open** divergence that passed inputs the apiserver rejects. Reserved-word
+  map keys (e.g. `in`) are likewise no longer escaped. Behavior change: a
+  validation that previously (incorrectly) passed may now correctly fail.
+
+### Added
+- `tests/apiserver_parity.rs` + `just parity`: a gated harness that runs each
+  `(schema, object)` case against a throwaway kind cluster via
+  `kubectl apply --dry-run=server` and asserts kube-cel's verdict matches the
+  real apiserver. Confirms the #8 fix is faithful on every reachable case (typed
+  `map[string]T`); free-form `additionalProperties: true` cannot use `in` at all
+  (the apiserver rejects such a rule at registration), so its keys are moot.
+
+
 ## [0.7.0] - 2026-06-16
 
 Breaking release that reshapes the validation surface around the idiomatic Rust

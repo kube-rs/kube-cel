@@ -169,3 +169,60 @@ fn invalid_message_expression_fails_closed() {
         "a rule whose messageExpression fails to compile must fail closed, got {errors:?}"
     );
 }
+
+// ── additionalProperties map-key escaping — faithful since #8; used to fail OPEN
+// apiserver: only declared `properties` (struct field names) are field-name
+//            escaped; `additionalProperties` map keys pass through literally
+//            (`staging/src/k8s.io/apiserver/pkg/cel/common/values.go` MapValue),
+//            so `'a.b/c' in self.m` matches the literal user key and the object
+//            is REJECTED.
+// kube-cel:  before #8, every object key was escaped, so the instance key
+//            `a.b/c` became `a__dot__b__slash__c`, `'a.b/c' in self.m` was always
+//            false, and the object was ACCEPTED — a fail-OPEN divergence.
+//
+// Ground truth measured against a live kind cluster (k8s v1.36.1): applying a CR
+// with `spec.m = {"a.b/c": "x"}` against this exact schema is rejected by the
+// apiserver with the rule's message; a CR with a harmless key is accepted.
+
+/// The map carries the forbidden literal key. apiserver rejects; kube-cel must
+/// now reject too (`ValidationFailure`), not pass via an escaped key.
+#[test]
+fn additional_properties_map_key_fails_faithfully() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "m": { "type": "object", "additionalProperties": {"type": "string"} }
+        },
+        "x-kubernetes-validations": [{
+            "rule": "!('a.b/c' in self.m)",
+            "message": "key a.b/c is forbidden in m"
+        }]
+    });
+    let object = json!({"m": {"a.b/c": "x"}});
+    let errors = Validator::new().validate(&schema, &object, None).unwrap_err();
+    assert!(
+        errors.iter().any(|e| e.kind == ErrorKind::ValidationFailure),
+        "forbidden map key must be rejected (apiserver parity), got {errors:?}"
+    );
+}
+
+/// Control: a harmless key satisfies the same rule, so the object is accepted —
+/// proving the rejection above is about the key, not a blanket failure.
+#[test]
+fn additional_properties_harmless_map_key_passes() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "m": { "type": "object", "additionalProperties": {"type": "string"} }
+        },
+        "x-kubernetes-validations": [{
+            "rule": "!('a.b/c' in self.m)",
+            "message": "key a.b/c is forbidden in m"
+        }]
+    });
+    let object = json!({"m": {"harmless": "x"}});
+    assert!(
+        Validator::new().validate(&schema, &object, None).is_ok(),
+        "a harmless map key should pass the rule"
+    );
+}

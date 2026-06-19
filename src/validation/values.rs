@@ -119,18 +119,25 @@ pub(crate) fn json_to_cel_with_schema(value: &serde_json::Value, schema: &serde_
         }
         serde_json::Value::Object(obj) => {
             let props = schema.get("properties").and_then(|p| p.as_object());
-            let additional = schema.get("additionalProperties").filter(|a| a.is_object());
+            let additional = schema.get("additionalProperties");
+            let additional_schema = additional.filter(|a| a.is_object());
+            // A node whose `additionalProperties` is a schema or `true` (i.e. not
+            // absent/`false`) is a map: its keys are user-supplied data, not
+            // declared field names, so they are NOT escaped — matching the
+            // apiserver's `MapValue` behavior (kube-rs/kube-cel#8).
+            let is_map = !matches!(additional, None | Some(serde_json::Value::Bool(false)));
 
             let mut map = HashMap::with_capacity(obj.len());
             for (k, v) in obj {
                 let child_val = if let Some(prop_schema) = props.and_then(|p| p.get(k)) {
                     json_to_cel_with_schema(v, prop_schema)
-                } else if let Some(additional_schema) = additional {
+                } else if let Some(additional_schema) = additional_schema {
                     json_to_cel_with_schema(v, additional_schema)
                 } else {
                     json_to_cel(v)
                 };
-                map.insert(Key::String(Arc::new(escape_field_name(k))), child_val);
+                let key = if is_map { k.clone() } else { escape_field_name(k) };
+                map.insert(Key::String(Arc::new(key)), child_val);
             }
 
             let is_embedded = schema
@@ -186,7 +193,14 @@ pub(crate) fn json_to_cel_with_compiled(value: &serde_json::Value, compiled: &Co
                 } else {
                     json_to_cel(v)
                 };
-                map.insert(Key::String(Arc::new(escape_field_name(k))), child_val);
+                // Map keys (additionalProperties) are user data, not field names,
+                // so they are not escaped — matching the apiserver (#8).
+                let key = if compiled.is_map {
+                    k.clone()
+                } else {
+                    escape_field_name(k)
+                };
+                map.insert(Key::String(Arc::new(key)), child_val);
             }
 
             if compiled.embedded_resource {
@@ -656,6 +670,131 @@ mod tests {
         let schema = json!({"x-kubernetes-int-or-string": true, "format": "date-time"});
         assert_eq!(SchemaFormat::from_schema(&schema), SchemaFormat::IntOrString);
     }
+
+    // ── additionalProperties map-key escaping (#8) ──────────────────
+    // The apiserver escapes only declared `properties` (struct field names);
+    // `additionalProperties` map keys are passed through literally. We must
+    // match that, or rules like `'a.b/c' in self.m` never fire client-side.
+
+    /// Look up a key in a converted object, asserting the result is a Map.
+    fn map_has_key(value: &Value, key: &str) -> bool {
+        match value {
+            Value::Map(m) => m.map.contains_key(&Key::String(Arc::new(key.into()))),
+            _ => panic!("expected Map"),
+        }
+    }
+
+    #[test]
+    fn additional_properties_object_keys_not_escaped() {
+        // map[string]string: additionalProperties is an object schema.
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": {"type": "string"}
+        });
+        let value = json!({"rio.build/fetcher": "true"});
+        let result = json_to_cel_with_schema(&value, &schema);
+        // Literal key present (apiserver behavior); escaped key absent (the #8 bug).
+        assert!(map_has_key(&result, "rio.build/fetcher"));
+        assert!(!map_has_key(&result, "rio__dot__build__slash__fetcher"));
+    }
+
+    #[test]
+    fn additional_properties_true_keys_not_escaped() {
+        // Free-form map: additionalProperties is `true`.
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": true
+        });
+        let value = json!({"a.b/c": "x"});
+        let result = json_to_cel_with_schema(&value, &schema);
+        assert!(map_has_key(&result, "a.b/c"));
+        assert!(!map_has_key(&result, "a__dot__b__slash__c"));
+    }
+
+    #[test]
+    fn declared_properties_still_escaped() {
+        // Regression guard: struct field names (declared properties) keep escaping.
+        // additionalProperties:false marks a closed struct, not a map.
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "app.kubernetes.io/name": {"type": "string"}
+            }
+        });
+        let value = json!({"app.kubernetes.io/name": "web"});
+        let result = json_to_cel_with_schema(&value, &schema);
+        assert!(map_has_key(&result, "app__dot__kubernetes__dot__io__slash__name"));
+        assert!(!map_has_key(&result, "app.kubernetes.io/name"));
+    }
+
+    #[test]
+    fn nested_map_under_property_keys_not_escaped() {
+        // nodeSelector typed as map[string]string under a declared property.
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "nodeSelector": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"}
+                }
+            }
+        });
+        let value = json!({"nodeSelector": {"rio.build/fetcher": "true"}});
+        let result = json_to_cel_with_schema(&value, &schema);
+        let Value::Map(outer) = &result else {
+            panic!("expected Map")
+        };
+        let inner = outer
+            .map
+            .get(&Key::String(Arc::new("nodeSelector".into())))
+            .unwrap();
+        assert!(map_has_key(inner, "rio.build/fetcher"));
+        assert!(!map_has_key(inner, "rio__dot__build__slash__fetcher"));
+    }
+
+    #[test]
+    fn compiled_additional_properties_keys_not_escaped() {
+        // Same as the object case but through the pre-compiled schema path.
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": {"type": "string"}
+        });
+        let compiled = crate::validation::compilation::compile_schema(&schema);
+        let value = json!({"rio.build/fetcher": "true"});
+        let result = json_to_cel_with_compiled(&value, &compiled);
+        assert!(map_has_key(&result, "rio.build/fetcher"));
+        assert!(!map_has_key(&result, "rio__dot__build__slash__fetcher"));
+    }
+
+    #[test]
+    fn compiled_additional_properties_true_keys_not_escaped() {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": true
+        });
+        let compiled = crate::validation::compilation::compile_schema(&schema);
+        let value = json!({"a.b/c": "x"});
+        let result = json_to_cel_with_compiled(&value, &compiled);
+        assert!(map_has_key(&result, "a.b/c"));
+        assert!(!map_has_key(&result, "a__dot__b__slash__c"));
+    }
+
+    #[test]
+    fn compiled_declared_properties_still_escaped() {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "app.kubernetes.io/name": {"type": "string"}
+            }
+        });
+        let compiled = crate::validation::compilation::compile_schema(&schema);
+        let value = json!({"app.kubernetes.io/name": "web"});
+        let result = json_to_cel_with_compiled(&value, &compiled);
+        assert!(map_has_key(&result, "app__dot__kubernetes__dot__io__slash__name"));
+        assert!(!map_has_key(&result, "app.kubernetes.io/name"));
+    }
 }
 
 /// End-to-end tests of the internal `json_to_cel` conversion through real CEL
@@ -669,8 +808,8 @@ mod cel_evaluation_tests {
     use cel::{Context, Program, Value};
     use serde_json::json;
 
-    use super::json_to_cel;
-    use crate::register_all;
+    use super::{json_to_cel, json_to_cel_with_compiled};
+    use crate::{register_all, validation::compilation::compile_schema};
 
     /// Build a context with kube-cel functions, bind `self` from JSON, compile,
     /// and return the evaluation result.
@@ -679,6 +818,29 @@ mod cel_evaluation_tests {
         register_all(&mut ctx);
         ctx.add_variable_from_value("self", json_to_cel(&json_val));
         Program::compile(expr).unwrap().execute(&ctx).unwrap()
+    }
+
+    /// `'key' in self.<map>` must fire on the literal user-supplied key, not an
+    /// escaped form. Mirrors the kube-rs/kube-cel#8 repro end-to-end: without the
+    /// fix the rule passes for inputs the apiserver rejects (fail-open).
+    #[test]
+    fn in_operator_matches_unescaped_map_key() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "m": {"type": "object", "additionalProperties": {"type": "string"}}
+            }
+        });
+        let compiled = compile_schema(&schema);
+        let self_val = json!({"m": {"a.b/c": "x"}});
+
+        let mut ctx = Context::default();
+        register_all(&mut ctx);
+        ctx.add_variable_from_value("self", json_to_cel_with_compiled(&self_val, &compiled));
+
+        // Rule from the issue: must REJECT (false) when the forbidden key is present.
+        let prog = Program::compile("!('a.b/c' in self.m)").unwrap();
+        assert_eq!(prog.execute(&ctx).unwrap(), Value::Bool(false));
     }
 
     /// Same as `eval_self` but also binds `oldSelf`.

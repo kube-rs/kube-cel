@@ -44,6 +44,19 @@ doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
     RUSTDOCFLAGS="--cfg docsrs" cargo +nightly doc --no-deps --all-features
 
+# Live apiserver parity: spin up a throwaway kind cluster, run the gated parity
+# tests (kube-cel verdict vs real apiserver `--dry-run=server`), tear down.
+# Requires docker + kind + kubectl. Catches escaping/divergence regressions that
+# a hand-written expectation would miss (see tests/apiserver_parity.rs).
+parity:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cluster=kubecel-parity
+    trap 'kind delete cluster --name "$cluster" >/dev/null 2>&1 || true' EXIT
+    kind create cluster --name "$cluster" --wait 90s
+    export KUBE_CEL_PARITY_CTX="kind-$cluster"
+    cargo test --features validation --test apiserver_parity -- --ignored --nocapture --test-threads=1
+
 # --- Development helpers ---
 
 # Format fix
