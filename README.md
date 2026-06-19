@@ -13,7 +13,7 @@ Implements the Kubernetes-specific CEL libraries defined in [`k8s.io/apiserver/p
 
 ```toml
 [dependencies]
-kube-cel = "0.7"
+kube-cel = "0.8"
 ```
 
 `kube-cel` re-exports the `cel` crate it was built against as `kube_cel::cel`. Import `cel` types through that re-export rather than declaring a separate `cel` dependency, otherwise a version mismatch surfaces as a cryptic `Context` type error.
@@ -45,7 +45,7 @@ With the `validation` feature, you can compile and evaluate `x-kubernetes-valida
 
 ```toml
 [dependencies]
-kube-cel = { version = "0.7", features = ["validation"] }
+kube-cel = { version = "0.8", features = ["validation"] }
 ```
 
 ```rust
@@ -279,15 +279,15 @@ Cargo features are the **only** granularity axis — there is no runtime per-lib
 
 ```toml
 # Correct: only string + list helpers.
-kube-cel = { version = "0.7", default-features = false, features = ["strings", "lists"] }
+kube-cel = { version = "0.8", default-features = false, features = ["strings", "lists"] }
 
 # No-op narrowing: without `default-features = false` the list is ADDED to the
 # already-complete default set, so you still get everything.
-kube-cel = { version = "0.7", features = ["strings", "lists"] }
+kube-cel = { version = "0.8", features = ["strings", "lists"] }
 
 # Restore the whole surface (all 13 function groups + the validation engine)
 # in one flag, e.g. after narrowing for a downstream build profile.
-kube-cel = { version = "0.7", default-features = false, features = ["full"] }
+kube-cel = { version = "0.8", default-features = false, features = ["full"] }
 ```
 
 

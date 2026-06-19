@@ -235,6 +235,10 @@ pub struct CompiledSchema {
     /// When true, `apiVersion`, `kind`, and `metadata` keys are injected with
     /// defaults if absent during value conversion.
     pub embedded_resource: bool,
+    /// The `default` value declared on this schema node, if any. Used by the
+    /// defaulting pass to fill a missing field before CEL evaluation, mirroring
+    /// the apiserver's admission order (defaults applied before CEL rules run).
+    pub default: Option<serde_json::Value>,
 }
 
 impl CompiledSchema {
@@ -294,6 +298,7 @@ fn compile_schema_inner(schema: &serde_json::Value, depth: usize) -> CompiledSch
             max_properties: None,
             preserve_unknown_fields: false,
             embedded_resource: false,
+            default: None,
         };
     }
 
@@ -338,6 +343,8 @@ fn compile_schema_inner(schema: &serde_json::Value, depth: usize) -> CompiledSch
         .and_then(|v| v.as_bool())
         == Some(true);
 
+    let default = schema.get("default").cloned();
+
     CompiledSchema {
         validations,
         properties,
@@ -353,6 +360,7 @@ fn compile_schema_inner(schema: &serde_json::Value, depth: usize) -> CompiledSch
         max_properties,
         preserve_unknown_fields,
         embedded_resource,
+        default,
     }
 }
 

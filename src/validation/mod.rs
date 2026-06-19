@@ -278,6 +278,11 @@ impl Validator {
 
     /// Validate an object against a CRD schema's CEL validation rules.
     ///
+    /// Schema `default`s are applied to the object before the rules run, matching
+    /// the apiserver, which defaults during admission before evaluating CEL. A CR
+    /// that omits a defaulted field is therefore validated as the apiserver sees
+    /// it (with the default in place), not as the raw object.
+    ///
     /// Compiles rules on each call. For repeated validation against the same
     /// schema, prefer [`compile_schema`](crate::compile_schema) + [`validate_compiled`](Self::validate_compiled).
     pub fn validate(
@@ -293,6 +298,9 @@ impl Validator {
     ///
     /// Like [`validate`](Self::validate), but also binds `apiVersion`, `apiGroup`, and `kind`
     /// as root-level CEL variables when a [`RootContext`] is provided.
+    ///
+    /// Schema `default`s are applied to the object before evaluation, matching the
+    /// apiserver's admission order (defaults run before CEL rules).
     pub fn validate_with_context(
         &self,
         schema: &serde_json::Value,
@@ -300,11 +308,13 @@ impl Validator {
         old_object: Option<&serde_json::Value>,
         root_ctx: Option<&RootContext>,
     ) -> Result<(), ValidationErrors> {
+        let defaulted = crate::validation::defaults::apply_defaults(schema, object);
+        let defaulted_old = old_object.map(|o| crate::validation::defaults::apply_defaults(schema, o));
         let mut errors = Vec::new();
         self.walk_schema(
             schema,
-            object,
-            old_object,
+            &defaulted,
+            defaulted_old.as_ref(),
             String::new(),
             &mut errors,
             &self.base_ctx,
@@ -318,6 +328,9 @@ impl Validator {
     ///
     /// Use [`compile_schema`](crate::compile_schema) to build the [`CompiledSchema`], then call this
     /// method for each object to validate — rules are compiled only once.
+    ///
+    /// Schema `default`s (retained on the compiled tree) are applied to the object
+    /// before evaluation, matching [`validate`](Self::validate) and the apiserver.
     pub fn validate_compiled(
         &self,
         compiled: &CompiledSchema,
@@ -338,11 +351,14 @@ impl Validator {
         old_object: Option<&serde_json::Value>,
         root_ctx: Option<&RootContext>,
     ) -> Result<(), ValidationErrors> {
+        let defaulted = crate::validation::defaults::apply_defaults_compiled(compiled, object);
+        let defaulted_old =
+            old_object.map(|o| crate::validation::defaults::apply_defaults_compiled(compiled, o));
         let mut errors = Vec::new();
         self.walk_compiled(
             compiled,
-            object,
-            old_object,
+            &defaulted,
+            defaulted_old.as_ref(),
             String::new(),
             &mut errors,
             &self.base_ctx,
@@ -354,21 +370,23 @@ impl Validator {
 
     /// Validate with schema defaults applied to the object first.
     ///
-    /// Equivalent to calling [`crate::validation::defaults::apply_defaults`] followed by [`validate`].
+    /// Alias for [`validate`](Self::validate). As of 0.8, plain `validate` applies
+    /// schema defaults itself, so this method is equivalent and retained only for
+    /// backward compatibility.
     pub fn validate_with_defaults(
         &self,
         schema: &serde_json::Value,
         object: &serde_json::Value,
         old_object: Option<&serde_json::Value>,
     ) -> Result<(), ValidationErrors> {
-        let defaulted = crate::validation::defaults::apply_defaults(schema, object);
-        let defaulted_old = old_object.map(|o| crate::validation::defaults::apply_defaults(schema, o));
-        self.validate(schema, &defaulted, defaulted_old.as_ref())
+        self.validate(schema, object, old_object)
     }
 
     /// Validate with schema defaults applied and root context variables bound.
     ///
-    /// Combines [`crate::validation::defaults::apply_defaults`] with [`Self::validate_with_context`].
+    /// Alias for [`validate_with_context`](Self::validate_with_context). As of 0.8,
+    /// that method applies schema defaults itself, so this is equivalent and
+    /// retained only for backward compatibility.
     pub fn validate_with_defaults_and_context(
         &self,
         schema: &serde_json::Value,
@@ -376,9 +394,7 @@ impl Validator {
         old_object: Option<&serde_json::Value>,
         root_ctx: Option<&RootContext>,
     ) -> Result<(), ValidationErrors> {
-        let defaulted = crate::validation::defaults::apply_defaults(schema, object);
-        let defaulted_old = old_object.map(|o| crate::validation::defaults::apply_defaults(schema, o));
-        self.validate_with_context(schema, &defaulted, defaulted_old.as_ref(), root_ctx)
+        self.validate_with_context(schema, object, old_object, root_ctx)
     }
 
     // ── Schema-based walking (compiles on each call) ────────────────
@@ -1643,14 +1659,56 @@ mod tests {
                 }
             }
         });
-        // Without defaults, replicas is missing -> no validation runs
+        // As of 0.8, plain validate injects replicas=1 and the rule passes.
         assert!(validate(&schema, &json!({}), None).is_ok());
 
-        // With defaults, replicas=1 is injected -> validation runs and passes
+        // validate_with_defaults is now an alias and behaves identically.
         assert!(
             Validator::new()
                 .validate_with_defaults(&schema, &json!({}), None)
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn plain_validate_applies_defaults_closing_fail_open() {
+        // kube-rs/kube-cel#9: a defaulted field omitted by the object. The
+        // apiserver defaults it in, so `!has(self.x)` is FALSE → REJECT. Plain
+        // validate must now match (pre-0.8 it accepted, a fail-open divergence).
+        let schema = json!({
+            "type": "object",
+            "properties": { "x": { "type": "string", "default": "d" } },
+            "x-kubernetes-validations": [{ "rule": "!has(self.x)", "message": "x must be absent" }]
+        });
+        assert!(
+            validate(&schema, &json!({}), None).is_err(),
+            "default makes x present → !has(self.x) false → REJECT"
+        );
+
+        // Same closure through the compiled path and through nested map values.
+        let compiled = crate::validation::compilation::compile_schema(&schema);
+        assert!(
+            Validator::new()
+                .validate_compiled(&compiled, &json!({}), None)
+                .is_err()
+        );
+
+        let nested = json!({
+            "type": "object",
+            "properties": {
+                "m": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "object",
+                        "properties": { "x": { "type": "string", "default": "d" } },
+                        "x-kubernetes-validations": [{ "rule": "!has(self.x)", "message": "x must be absent" }]
+                    }
+                }
+            }
+        });
+        assert!(
+            validate(&nested, &json!({ "m": { "a": {} } }), None).is_err(),
+            "nested map value defaulted → REJECT (was fail-open even via validate_with_defaults)"
         );
     }
 

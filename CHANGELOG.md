@@ -1,5 +1,50 @@
 # Changelog
 
+## [0.8.0] - 2026-06-19
+
+Apiserver fidelity for schema `default`s
+([#9](https://github.com/kube-rs/kube-cel/issues/9)). The apiserver applies
+`default`s during admission **before** evaluating CEL; plain `validate` now does
+the same, so a CR that omits a defaulted field is validated as the apiserver
+sees it.
+
+### Breaking
+- Plain validation now applies schema `default`s before evaluating rules.
+  `Validator::{validate, validate_with_context, validate_compiled,
+  validate_compiled_with_context}` and the free `validate` / `validate_compiled`
+  all default first. The function **signatures are unchanged**, but **runtime
+  verdicts can change**: a CR omitting a defaulted field may flip. This closes a
+  divergence in both directions, the dangerous one being **fail-open** — e.g. a
+  rule `!has(self.x)` with a defaulted `x` and an object omitting `x` previously
+  ACCEPTed an input the apiserver REJECTs (verified live against kind via
+  `just parity`). Under cargo 0.x caret rules this behavior change is breaking,
+  hence 0.8.0.
+  - Migration: usually none — the new behavior matches the apiserver, so most
+    callers become *more* correct for free. There is no longer a no-defaulting
+    fast path; if you were calling `validate_with_defaults` for fidelity, plain
+    `validate` now suffices.
+
+### Fixed
+- `apply_defaults` now recurses into `additionalProperties` (map values), not
+  just `properties` and array `items`. A `default` inside a nested map value was
+  previously skipped, leaving `validate_with_defaults` itself **fail-open** on
+  that shape (live-confirmed: apiserver REJECT, kube-cel ACCEPT). Defaults at the
+  schema root under `additionalProperties` remain moot — the apiserver rejects
+  that shape at registration ("must not be used at the root").
+
+### Added
+- `CompiledSchema` carries a `default` field, so the compiled validation path
+  (`validate_compiled*`) applies defaults identically to the schema path.
+- Parity coverage for defaults: `defaults_parity_*` cases in
+  `tests/apiserver_parity.rs` assert plain `validate` matches the apiserver
+  across `properties`, array `items`, nested structs, `additionalProperties` map
+  values, and `required` + default interaction.
+
+### Changed
+- `just clippy` now lints `--all-targets` (tests, examples, benches), not just
+  the library.
+
+
 ## [0.7.1] - 2026-06-19
 
 ### Fixed

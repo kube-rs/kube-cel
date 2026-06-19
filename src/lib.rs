@@ -40,7 +40,7 @@
 //!
 //! ```toml
 //! # Only the string + list helpers:
-//! kube-cel = { version = "0.7", default-features = false, features = ["strings", "lists"] }
+//! kube-cel = { version = "0.8", default-features = false, features = ["strings", "lists"] }
 //! ```
 //!
 //! The validation pipeline (CRD `x-kubernetes-validations`, VAP, static analysis)
@@ -52,7 +52,7 @@
 //! after narrowing, or to opt into validation alongside the default functions:
 //!
 //! ```toml
-//! kube-cel = { version = "0.7", features = ["full"] }
+//! kube-cel = { version = "0.8", features = ["full"] }
 //! ```
 //!
 //! # Versioning and stability
@@ -80,7 +80,7 @@ Compile and evaluate `x-kubernetes-validations` CEL rules client-side,
 without an API server.
 
 ```toml
-kube-cel = { version = "0.7", features = ["validation"] }
+kube-cel = { version = "0.8", features = ["validation"] }
 ```
 
 ```rust

@@ -1,13 +1,11 @@
 //! Live apiserver parity tests — GATED, require a running kind cluster.
 //!
 //! Each case feeds ONE `openAPIV3Schema` (carrying an `x-kubernetes-validations`
-//! rule) plus an instance to BOTH:
-//!   - the real kube-apiserver, via `kubectl apply --dry-run=server` against a
-//!     CRD wrapping the schema (server dry-run runs CEL admission but persists
-//!     nothing), and
-//!   - kube-cel's [`Validator`],
-//! then asserts the two verdicts agree. This pins kube-cel to ground truth and
-//! catches divergences a hand-written expectation would miss.
+//! rule) plus an instance to BOTH the real kube-apiserver (via `kubectl apply
+//! --dry-run=server` against a CRD wrapping the schema; server dry-run runs CEL
+//! admission but persists nothing) and kube-cel's [`Validator`], then asserts the
+//! two verdicts agree. This pins kube-cel to ground truth and catches divergences
+//! a hand-written expectation would miss.
 //!
 //! Every test is `#[ignore]`, so `cargo test` skips them (no cluster in CI).
 //! Run via `just parity`, which provisions a throwaway kind cluster and exports
@@ -125,6 +123,15 @@ fn apiserver_registration_rejected(kind: &str, plural: &str, schema: &Value) -> 
 
 fn kubecel_verdict(schema: &Value, object: &Value) -> Verdict {
     match Validator::new().validate(schema, object, None) {
+        Ok(()) => Verdict::Accept,
+        Err(_) => Verdict::Reject,
+    }
+}
+
+/// kube-cel's verdict via `validate_with_defaults` — applies schema defaults to
+/// the object before evaluating CEL, mirroring the apiserver's admission order.
+fn kubecel_verdict_with_defaults(schema: &Value, object: &Value) -> Verdict {
+    match Validator::new().validate_with_defaults(schema, object, None) {
         Ok(()) => Verdict::Accept,
         Err(_) => Verdict::Reject,
     }
@@ -283,4 +290,134 @@ fn declared_property_uses_escaped_identifier() {
     let kc = kubecel_verdict(&schema["properties"]["spec"], &json!({"foo.bar": "ok"}));
     assert_eq!(v, Verdict::Accept, "apiserver should reach the escaped field");
     assert_eq!(kc, Verdict::Accept, "kube-cel should reach the escaped field too");
+}
+
+// ── DEFAULTS fidelity (kube-rs/kube-cel#9, fixed in 0.8) ─────────────
+// The apiserver applies schema `default`s to the object BEFORE evaluating CEL.
+// As of 0.8, plain `Validator::validate` does too, so a CR that omits a defaulted
+// field now yields the apiserver's verdict. These cases pinned BOTH divergence
+// directions live before the fix; they now assert PARITY (the gap is closed).
+// `assert_parity` compares plain `validate` against the apiserver directly.
+
+/// Fail-CLOSED direction (pre-0.8 plain `validate` REJECTed). `x` has a default;
+/// the object omits it; `self.x == 'd'` holds once defaulted → ACCEPT, now matched.
+#[test]
+#[ignore = "needs a live kind cluster; run via `just parity`"]
+fn defaults_parity_self_eq() {
+    let schema = json!({
+        "type": "object",
+        "properties": { "x": { "type": "string", "default": "d" } },
+        "x-kubernetes-validations": [{ "rule": "self.x == 'd'", "message": "x must be d" }]
+    });
+    let object = json!({});
+    // Alias still agrees with plain validate (now equivalent).
+    assert_eq!(kubecel_verdict_with_defaults(&schema, &object), Verdict::Accept);
+    let v = assert_parity("Pdefclosed", "pdefcloseds", schema, object);
+    assert_eq!(v, Verdict::Accept, "default applied → self.x == 'd' → ACCEPT");
+}
+
+/// Fail-OPEN direction (the dangerous one; pre-0.8 plain `validate` ACCEPTed an
+/// input the apiserver REJECTS). Defaulting makes `x` present → `!has(self.x)`
+/// false → REJECT, now matched by plain `validate`.
+#[test]
+#[ignore = "needs a live kind cluster; run via `just parity`"]
+fn defaults_parity_not_has() {
+    let schema = json!({
+        "type": "object",
+        "properties": { "x": { "type": "string", "default": "d" } },
+        "x-kubernetes-validations": [{ "rule": "!has(self.x)", "message": "x must be absent" }]
+    });
+    let v = assert_parity("Pdefopen", "pdefopens", schema, json!({}));
+    assert_eq!(
+        v,
+        Verdict::Reject,
+        "default makes x present → !has false → REJECT"
+    );
+}
+
+/// Nested default under a declared object property: defaulting recurses through
+/// nested structs, so plain `validate` matches the apiserver.
+#[test]
+#[ignore = "needs a live kind cluster; run via `just parity`"]
+fn defaults_parity_nested_struct() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "spec": {
+                "type": "object",
+                "properties": { "x": { "type": "string", "default": "d" } },
+                "x-kubernetes-validations": [{ "rule": "!has(self.x)", "message": "x must be absent" }]
+            }
+        }
+    });
+    let v = assert_parity("Pdefnest", "pdefnests", schema, json!({ "spec": {} }));
+    assert_eq!(v, Verdict::Reject, "nested default makes spec.x present → REJECT");
+}
+
+/// Defaulted field inside ARRAY items. Defaulting recurses into items, so plain
+/// `validate` matches the apiserver.
+#[test]
+#[ignore = "needs a live kind cluster; run via `just parity`"]
+fn defaults_parity_array_items() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "list": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": { "x": { "type": "string", "default": "d" } },
+                    "x-kubernetes-validations": [{ "rule": "!has(self.x)", "message": "x must be absent" }]
+                }
+            }
+        }
+    });
+    let v = assert_parity("Pdefarr", "pdefarrs", schema, json!({ "list": [ {} ] }));
+    assert_eq!(v, Verdict::Reject, "item default makes x present → REJECT");
+}
+
+/// THE additionalProperties case (#9 nested-map gap). Defaulting now recurses into
+/// map VALUES, which pre-0.8 was fail-open even via `validate_with_defaults`.
+/// (A default under additionalProperties at the schema ROOT is rejected at
+/// registration — "must not be used at the root" — so the map must be nested.)
+#[test]
+#[ignore = "needs a live kind cluster; run via `just parity`"]
+fn defaults_parity_additional_properties() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "m": {
+                "type": "object",
+                "additionalProperties": {
+                    "type": "object",
+                    "properties": { "x": { "type": "string", "default": "d" } },
+                    "x-kubernetes-validations": [{ "rule": "!has(self.x)", "message": "x must be absent" }]
+                }
+            }
+        }
+    });
+    let object = json!({ "m": { "a": {} } });
+    // The alias (apply_defaults pass) must close this too, not just plain validate.
+    assert_eq!(kubecel_verdict_with_defaults(&schema, &object), Verdict::Reject);
+    let v = assert_parity("Pdefap", "pdefaps", schema, object);
+    assert_eq!(v, Verdict::Reject, "map-value default makes x present → REJECT");
+}
+
+/// `required` + default coexist: registration is accepted, the default wins, the
+/// field is present, so omitting it is ACCEPTed (default satisfies the rule).
+#[test]
+#[ignore = "needs a live kind cluster; run via `just parity`"]
+fn defaults_parity_required_interaction() {
+    let schema = json!({
+        "type": "object",
+        "properties": { "x": { "type": "string", "default": "d" } },
+        "required": ["x"],
+        "x-kubernetes-validations": [{ "rule": "self.x == 'd'", "message": "x must be d" }]
+    });
+    let v = assert_parity("Pdefreq", "pdefreqs", schema, json!({}));
+    assert_eq!(
+        v,
+        Verdict::Accept,
+        "default fills required field → self.x == 'd' → ACCEPT"
+    );
 }

@@ -11,9 +11,9 @@ check: fmt clippy test-all test-no-default doc feature-check
 fmt:
     cargo +nightly fmt --check
 
-# Clippy with all features
+# Clippy with all features, across all targets (lib, tests, examples, benches)
 clippy:
-    cargo clippy --all-features -- -D warnings
+    cargo clippy --all-features --all-targets -- -D warnings
 
 # Test with all features (catches cross-feature issues)
 test-all:
