@@ -93,21 +93,34 @@ pub(crate) fn string_last_index_of(
 
     let chars: Vec<char> = this.chars().collect();
     let search_chars: Vec<char> = search.chars().collect();
+    let len = chars.len() as i64;
 
-    let end: usize = match args.get(1) {
-        Some(Value::Int(n)) => ((*n).max(0) as usize).min(chars.len()),
-        _ => chars.len(),
+    // The optional second argument is the highest index allowed as the START of
+    // a match (inclusive), matching cel-go's `lastIndexOf(substr, i)`: a match
+    // may extend PAST that index. (The previous implementation treated it as an
+    // exclusive upper bound the whole match had to fit under, which diverged
+    // fail-open from the apiserver.) Without it, any start position is allowed.
+    let max_start: i64 = match args.get(1) {
+        Some(Value::Int(n)) => *n,
+        _ => len,
     };
 
     if search_chars.is_empty() {
-        return Ok(Value::Int(end as i64));
+        // The empty string is found at the offset itself, clamped to [0, len].
+        return Ok(Value::Int(max_start.clamp(0, len)));
     }
 
+    // Highest start index we may scan: bounded by `max_start` and by the room
+    // the search string needs to fit within the haystack.
+    let scan_upper = max_start.min(len - search_chars.len() as i64);
     let mut result: i64 = -1;
-    for i in 0..end {
-        if i + search_chars.len() <= end && chars[i..i + search_chars.len()] == search_chars[..] {
-            result = i as i64;
+    let mut i: i64 = 0;
+    while i <= scan_upper {
+        let s = i as usize;
+        if chars[s..s + search_chars.len()] == search_chars[..] {
+            result = i;
         }
+        i += 1;
     }
     Ok(Value::Int(result))
 }
@@ -411,7 +424,9 @@ mod tests {
 
     #[test]
     fn test_last_index_of_with_offset() {
-        assert_eq!(eval("'abcabc'.lastIndexOf('abc', 3)"), Value::Int(0));
+        // offset = last index allowed as the match START (inclusive), so the
+        // occurrence beginning at 3 is found (cel-go semantics).
+        assert_eq!(eval("'abcabc'.lastIndexOf('abc', 3)"), Value::Int(3));
         // empty search returns the offset
         assert_eq!(eval("'hello'.lastIndexOf('', 3)"), Value::Int(3));
     }
@@ -528,8 +543,9 @@ mod tests {
 
     #[test]
     fn test_last_index_of_overlapping() {
-        // lastIndexOf with offset limits search to positions [0, offset)
-        assert_eq!(eval("'bananananana'.lastIndexOf('nana', 7)"), Value::Int(2));
+        // offset bounds the match START (inclusive): occurrences of "nana"
+        // begin at 2,4,6,8; with offset 7 the last allowed start is 6.
+        assert_eq!(eval("'bananananana'.lastIndexOf('nana', 7)"), Value::Int(6));
         assert_eq!(eval("'bananananana'.lastIndexOf('nana')"), Value::Int(8));
     }
 

@@ -11,6 +11,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use base64::Engine;
 use cel::{
     Value,
     objects::{Key, Map},
@@ -26,6 +27,11 @@ pub enum SchemaFormat {
     DateTime,
     /// `format: "duration"` — strings should be parsed as CEL `Duration`.
     Duration,
+    /// `format: "byte"` — base64 strings bind as CEL `bytes`. The apiserver
+    /// decodes the value, so `size()`/indexing operate on the decoded bytes;
+    /// keeping it a string would diverge (e.g. `size()` returns the encoded
+    /// length).
+    Bytes,
     /// `x-kubernetes-int-or-string: true` — field can be int or string.
     /// Primarily a marker to prevent format: "date-time" etc from being interpreted.
     IntOrString,
@@ -43,6 +49,7 @@ impl SchemaFormat {
         match schema.get("format").and_then(|f| f.as_str()) {
             Some("date-time") => SchemaFormat::DateTime,
             Some("duration") => SchemaFormat::Duration,
+            Some("byte") => SchemaFormat::Bytes,
             _ => SchemaFormat::None,
         }
     }
@@ -237,6 +244,12 @@ fn convert_string_with_format(s: &str, format: &SchemaFormat) -> Value {
             }
             Value::String(Arc::new(s.to_string()))
         }
+        SchemaFormat::Bytes => match base64::engine::general_purpose::STANDARD.decode(s) {
+            Ok(bytes) => Value::Bytes(Arc::new(bytes)),
+            // Structural validation would already have rejected malformed base64
+            // upstream; fall back to the raw string rather than failing here.
+            Err(_) => Value::String(Arc::new(s.to_string())),
+        },
         SchemaFormat::IntOrString => Value::String(Arc::new(s.to_string())),
         SchemaFormat::None => Value::String(Arc::new(s.to_string())),
     }
@@ -530,6 +543,22 @@ mod tests {
         let value = json!("2024-01-01T00:00:00Z");
         let result = json_to_cel_with_schema(&value, &schema);
         assert!(matches!(result, Value::Timestamp(_)));
+    }
+
+    #[test]
+    fn byte_format_decodes_to_bytes() {
+        let schema = json!({ "type": "string", "format": "byte" });
+        // "aGVsbG8=" decodes to "hello" (5 bytes); the apiserver binds it as
+        // CEL bytes, so size() must see the decoded length, not the encoded one.
+        let result = json_to_cel_with_schema(&json!("aGVsbG8="), &schema);
+        assert_eq!(result, Value::Bytes(Arc::new(b"hello".to_vec())));
+    }
+
+    #[test]
+    fn byte_format_invalid_falls_back_to_string() {
+        let schema = json!({ "type": "string", "format": "byte" });
+        let result = json_to_cel_with_schema(&json!("!!!not-base64!!!"), &schema);
+        assert_eq!(result, Value::String(Arc::new("!!!not-base64!!!".into())));
     }
 
     #[test]

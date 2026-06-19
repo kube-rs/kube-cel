@@ -136,7 +136,10 @@ fn format_s(val: &Value, out: &mut String) {
                 }
                 first = false;
                 format_key(key, out);
-                out.push_str(": ");
+                // cel-go renders map entries as `key:value` (no space after the
+                // colon — `fmt.Sprintf("%s:%s", ...)`); entries are joined by
+                // `, `. Matching this avoids a fail-open `.format()` divergence.
+                out.push(':');
                 format_s_quoted(value, out);
             }
             out.push('}');
@@ -204,9 +207,25 @@ fn format_f(val: &Value, precision: usize, out: &mut String) -> Result<(), Execu
 }
 
 /// %e — scientific notation.
+///
+/// cel-go formats `%e` through Go's `fmt`, whose exponent ALWAYS carries a sign
+/// and is zero-padded to at least two digits (e.g. `1.50e+03`). Rust's `{:e}`
+/// omits both (`1.50e3`), so reformat the exponent to match the apiserver.
 fn format_e(val: &Value, precision: usize, out: &mut String) -> Result<(), ExecutionError> {
     let f = extract_float(val, 'e')?;
-    out.push_str(&format!("{f:.precision$e}"));
+    let rust = format!("{f:.precision$e}");
+    let (mantissa, exp) = rust.split_once('e').unwrap_or((rust.as_str(), "0"));
+    let (sign, digits) = match exp.strip_prefix('-') {
+        Some(d) => ('-', d),
+        None => ('+', exp),
+    };
+    out.push_str(mantissa);
+    out.push('e');
+    out.push(sign);
+    if digits.len() < 2 {
+        out.push('0');
+    }
+    out.push_str(digits);
     Ok(())
 }
 
@@ -335,7 +354,16 @@ mod tests {
 
     #[test]
     fn test_format_e() {
-        assert_eq!(eval_str("'val: %.2e'.format([1500.0])"), "val: 1.50e3");
+        // Go-style exponent: always signed, zero-padded to >= 2 digits.
+        assert_eq!(eval_str("'val: %.2e'.format([1500.0])"), "val: 1.50e+03");
+        assert_eq!(eval_str("'%.2e'.format([0.0])"), "0.00e+00");
+        assert_eq!(eval_str("'%.1e'.format([0.0000015])"), "1.5e-06");
+    }
+
+    #[test]
+    fn test_format_s_map() {
+        // cel-go renders `key:value` with no space after the colon.
+        assert_eq!(eval_str("'%s'.format([{'a': 1}])"), "{\"a\":1}");
     }
 
     #[test]

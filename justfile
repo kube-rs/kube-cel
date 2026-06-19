@@ -57,6 +57,20 @@ parity:
     export KUBE_CEL_PARITY_CTX="kind-$cluster"
     cargo test --features validation --test apiserver_parity -- --ignored --nocapture --test-threads=1
 
+# Phase-2 fidelity SWEEP: spin a kind cluster, measure the ACTUAL apiserver
+# bucket for every candidate case under target/sweep/*.json (authored by the
+# agent fan-out), write target/sweep/_results.json + print the matrix, tear down.
+# Records the kind server version it ran against (the matrix is version-specific).
+sweep:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cluster=kubecel-sweep
+    trap 'kind delete cluster --name "$cluster" >/dev/null 2>&1 || true' EXIT
+    kind create cluster --name "$cluster" --wait 90s
+    export KUBE_CEL_PARITY_CTX="kind-$cluster"
+    kubectl --context "kind-$cluster" version -o json | grep -A6 serverVersion || true
+    cargo test --features validation --test sweep_kind -- --ignored --nocapture --test-threads=1
+
 # --- Development helpers ---
 
 # Format fix

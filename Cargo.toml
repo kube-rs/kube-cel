@@ -51,7 +51,7 @@ jsonpatch = []
 named_format = []
 math = []
 encoders = ["dep:base64"]
-validation = ["dep:serde_json", "dep:serde", "dep:chrono"]
+validation = ["dep:serde_json", "dep:serde", "dep:chrono", "dep:base64"]
 # Umbrella: every extension-function library (the 13 in `default`) plus the
 # `validation` engine. `default` enables the 13 functions only, NOT validation.
 # Use `default-features = false` to narrow to a subset, then `full` to restore

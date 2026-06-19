@@ -31,6 +31,21 @@ sees it.
   that shape (live-confirmed: apiserver REJECT, kube-cel ACCEPT). Defaults at the
   schema root under `additionalProperties` remain moot — the apiserver rejects
   that shape at registration ("must not be used at the root").
+- Apiserver-fidelity sweep (161 cases across all 13 extension libraries + the
+  validation engine, measured live against kind) closed three divergences:
+  - **`string.format()` `%e`** now emits Go-style scientific notation
+    (`1.50e+03`: signed exponent, zero-padded to ≥2 digits) instead of Rust's
+    `1.50e3`. **fail-open** before (kube-cel accepted a `.format()` equality the
+    apiserver rejects).
+  - **`string.format()` `%s` on a map** now renders `{"a":1}` (no space after
+    the colon), matching cel-go's `fmt.Sprintf("%s:%s", …)`. **fail-open** before.
+  - **`string.lastIndexOf(sub, i)`** now treats `i` as the inclusive last *start*
+    index of a match (cel-go semantics) — a match may extend past `i`. Previously
+    `i` was an exclusive end bound, so `'abcabc'.lastIndexOf('abc', 3)` returned
+    `0` instead of `3`. **fail-open** before.
+  - **`format: byte`** string fields now bind as CEL `bytes` (base64-decoded, as
+    the apiserver does), so `size()`/indexing operate on the decoded bytes. Was
+    **fail-closed** (kube-cel kept the encoded string and over-rejected).
 
 ### Added
 - `CompiledSchema` carries a `default` field, so the compiled validation path
