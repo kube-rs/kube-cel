@@ -23,7 +23,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 # downstreams pick up `cel` 0.13.x patches without a kube-cel release. Do not
 # switch to an exact `=0.13.x` pin (it would block that patch uptake), and bump
 # the major-coupling note in the versioning policy if this constraint changes.
-cel = "0.13"
+cel = "0.14"
 regex = { version = "1", optional = true }
 url = { version = "2", optional = true }
 ipnet = { version = "2", optional = true }
