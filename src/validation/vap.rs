@@ -138,7 +138,8 @@ impl std::fmt::Debug for CompiledVapExpression {
 /// An error produced when a VAP expression fails to compile.
 ///
 /// Returned in the `Err` arm of [`VapEvaluator::compile_expressions`]. The
-/// underlying `cel` parse error is available via [`std::error::Error::source`];
+/// cause (the `cel` parse error, or a call to a function outside the
+/// apiserver's base CEL environment) is available via [`std::error::Error::source`];
 /// the concrete `cel` type is kept out of the public surface (held behind a
 /// boxed `dyn Error`) so it is not frozen into the API.
 ///
@@ -280,28 +281,28 @@ impl VapEvaluator {
     ///
     /// Returns one entry per input expression. Failed compilations are
     /// represented as `Err(`[`VapError`]`)`, which carries the offending
-    /// expression and the underlying `cel` parse error (via
-    /// [`source`](std::error::Error::source)).
+    /// expression and the cause: the `cel` parse error, or a call to a function
+    /// outside the apiserver's base CEL environment, even one evaluation would
+    /// never reach (via [`source`](std::error::Error::source)).
     #[must_use]
     pub fn compile_expressions(
         &self,
         expressions: &[VapExpression],
     ) -> Vec<Result<CompiledVapExpression, VapError>> {
-        let env = crate::validation::validation_env();
         expressions
             .iter()
             .map(|expr| {
-                let program = env.compile(&expr.expression).map_err(|e| VapError {
+                let program = crate::validation::compile(&expr.expression).map_err(|source| VapError {
                     expression: expr.expression.clone(),
-                    source: Box::new(e),
+                    source,
                 })?;
                 // A messageExpression that fails to compile fails closed (the
                 // apiserver rejects such a policy at registration), mirroring the
                 // expression path above rather than silently dropping it.
                 let message_program = match expr.message_expression.as_deref() {
-                    Some(me) => Some(env.compile(me).map_err(|e| VapError {
+                    Some(me) => Some(crate::validation::compile(me).map_err(|source| VapError {
                         expression: me.to_string(),
-                        source: Box::new(e),
+                        source,
                     })?),
                     None => None,
                 };

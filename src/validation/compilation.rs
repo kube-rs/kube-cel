@@ -56,28 +56,30 @@ pub struct CompilationResult {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum CompilationError {
-    /// CEL expression failed to parse.
+    /// CEL expression failed to compile: it does not parse, or it calls a
+    /// function outside the validation environment (see
+    /// [`ErrorKind::CompilationFailure`](crate::ErrorKind::CompilationFailure)).
     Parse {
         /// The original CEL expression that failed to compile.
         rule: String,
-        /// The boxed parse error reported by the CEL compiler. Boxed (rather
-        /// than carrying the concrete `cel::ParseErrors`) so the pre-1.0 `cel`
-        /// type is not frozen into this public enum variant; reach it via
+        /// The boxed error: the parse error reported by the CEL compiler, or
+        /// the unsupported call. Boxed (rather than carrying the concrete
+        /// `cel::ParseErrors`) so the pre-1.0 `cel` type is not frozen into
+        /// this public enum variant; reach it via
         /// [`Error::source`](std::error::Error::source).
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    /// A rule's `messageExpression` failed to parse. The `rule` itself is
-    /// well-formed, but its dynamic error message cannot be compiled. Surfaced as
-    /// a compilation error (rather than silently dropped) so the rule fails
-    /// closed, mirroring the apiserver, which rejects such a CRD at registration.
+    /// A rule's `messageExpression` failed to compile, as for [`Self::Parse`].
+    /// The `rule` itself is well-formed, but its dynamic error message cannot
+    /// be compiled. Surfaced as a compilation error (rather than silently
+    /// dropped) so the rule fails closed, mirroring the apiserver, which
+    /// rejects such a CRD at registration.
     MessageExpressionParse {
         /// The rule whose `messageExpression` failed to compile.
         rule: String,
         /// The `messageExpression` that failed to compile.
         message_expression: String,
-        /// The boxed parse error reported by the CEL compiler. Boxed (rather
-        /// than carrying the concrete `cel::ParseErrors`) so the pre-1.0 `cel`
-        /// type is not frozen into this public enum variant; reach it via
+        /// The boxed error, as for [`Self::Parse`]. Reach it via
         /// [`Error::source`](std::error::Error::source).
         source: Box<dyn std::error::Error + Send + Sync>,
     },
@@ -137,10 +139,9 @@ impl std::error::Error for CompilationError {
 /// Returns [`CompilationError::Parse`] if the rule expression is invalid, or
 /// [`CompilationError::MessageExpressionParse`] if its `messageExpression` is.
 pub(crate) fn compile_rule(rule: &Rule) -> Result<CompilationResult, CompilationError> {
-    let env = crate::validation::validation_env();
-    let program = env.compile(&rule.rule).map_err(|e| CompilationError::Parse {
+    let program = crate::validation::compile(&rule.rule).map_err(|source| CompilationError::Parse {
         rule: rule.rule.clone(),
-        source: Box::new(e),
+        source,
     })?;
     let is_transition_rule = program.references().has_variable("oldSelf");
 
@@ -148,14 +149,13 @@ pub(crate) fn compile_rule(rule: &Rule) -> Result<CompilationResult, Compilation
     // rejects such a CRD at registration), mirroring the `rule` path above rather
     // than silently dropping the dynamic message.
     let message_program = match rule.message_expression.as_deref() {
-        Some(expr) => Some(
-            env.compile(expr)
-                .map_err(|e| CompilationError::MessageExpressionParse {
-                    rule: rule.rule.clone(),
-                    message_expression: expr.to_string(),
-                    source: Box::new(e),
-                })?,
-        ),
+        Some(expr) => Some(crate::validation::compile(expr).map_err(|source| {
+            CompilationError::MessageExpressionParse {
+                rule: rule.rule.clone(),
+                message_expression: expr.to_string(),
+                source,
+            }
+        })?),
         None => None,
     };
 

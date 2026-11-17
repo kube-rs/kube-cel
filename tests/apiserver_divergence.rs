@@ -6,8 +6,10 @@
 //! - **fail-closed** — kube-cel reports an error where the apiserver would
 //!   accept the object (a false positive; safe, but not faithful).
 //! - **fail-open** — kube-cel accepts where the apiserver would reject (a false
-//!   negative; dangerous). There should be **none** of these; the depth case
-//!   used to be one and was fixed in S4 (P1-A).
+//!   negative; dangerous). There should be **none** of these, with one
+//!   documented exception: the errors only a type checker catches, which `cel`
+//!   does not have yet (cel-rust#350); see [`no_type_checker_fails_open`]. The
+//!   depth case used to be one and was fixed in S4 (P1-A).
 //!
 //! Each test locks the *current measured* behavior so a divergence cannot
 //! change silently. The human-readable summary lives in the README
@@ -16,16 +18,14 @@
 //! Measured against `cel` 0.16, with ground truth from the apiserver's base
 //! CEL environment (`k8s.io/apiserver` v0.36.1,
 //! `environment.MustBaseEnvSet(1.36).NewExpressionsEnv()`). `cel` has no type
-//! checker, so a rule the apiserver rejects at CRD registration because it
-//! references something its environment lacks (`cel.bind`, `math.*`,
-//! `isIPv4`, ...) still **parses** in kube-cel and fails at evaluation with an
-//! "Undeclared reference" error. Through the Validator that surfaces as
-//! [`ErrorKind::UnsupportedReference`], *not* `CompilationFailure` and not a
-//! generic `EvaluationError`, which is reserved for genuine runtime errors in a
-//! supported rule. Either way the object is rejected: fail-closed.
+//! checker, so kube-cel walks each rule's AST at compile time and refuses a
+//! call to a function the apiserver's base environment lacks (`cel.bind`,
+//! `math.*`, `isIPv4`, `base64.*`, a global `min(..)`, ...) as
+//! [`ErrorKind::CompilationFailure`], even in a branch evaluation never
+//! reaches, as the apiserver does at registration.
 #![cfg(feature = "validation")]
 
-use kube_cel::{ErrorKind, ValidationErrors, Validator};
+use kube_cel::{ErrorKind, ValidationErrors, Validator, VapEvaluator, VapExpression, compile_schema};
 use serde_json::json;
 
 /// Runs a single `x-kubernetes-validations` rule against `{"items": [3,1,2]}`
@@ -42,64 +42,219 @@ fn run_rule(rule: &str) -> Result<(), ValidationErrors> {
     Validator::new().validate(&schema, &object, None)
 }
 
-/// Asserts a rule fails closed with an `UnsupportedReference`: the apiserver
-/// rejects the CRD at registration because its environment lacks what the rule
-/// references; kube-cel parses it and rejects the object at evaluation.
-fn assert_unsupported_reference(feature: &str, rule: &str) {
+/// Asserts the expression is refused at compile time on every path: the
+/// Validator (`validate` and `validate_compiled`) reports a
+/// `CompilationFailure` for it as a CRD rule, and the VAP evaluator fails to
+/// compile it. The apiserver rejects such a CRD or policy at registration.
+fn assert_refused(rule: &str) {
     let errors = run_rule(rule).unwrap_err();
     assert!(
-        errors.iter().any(|e| e.kind == ErrorKind::UnsupportedReference),
-        "{feature}: expected fail-closed UnsupportedReference, got {errors:?}"
+        errors.iter().any(|e| e.kind == ErrorKind::CompilationFailure),
+        "{rule}: expected CompilationFailure from validate, got {errors:?}"
+    );
+
+    let schema = json!({
+        "type": "object",
+        "properties": { "items": { "type": "array", "items": {"type": "integer"} } },
+        "x-kubernetes-validations": [ {"rule": rule} ]
+    });
+    let errors = Validator::new()
+        .validate_compiled(&compile_schema(&schema), &json!({"items": [3, 1, 2]}), None)
+        .unwrap_err();
+    assert!(
+        errors.iter().any(|e| e.kind == ErrorKind::CompilationFailure),
+        "{rule}: expected CompilationFailure from validate_compiled, got {errors:?}"
+    );
+
+    let compiled = VapEvaluator::builder()
+        .build()
+        .compile_expressions(&[VapExpression {
+            expression: rule.into(),
+            message: None,
+            message_expression: None,
+        }]);
+    assert!(
+        compiled[0].is_err(),
+        "{rule}: expected the VAP expression to fail to compile"
     );
 }
 
 // ── Outside the apiserver's base CEL environment — all fail CLOSED ──────────
-// apiserver: rejects the CRD at registration ("undeclared reference"); its
-//            base environment has no `ext.Bindings`, no `ext.Math`, and none of
-//            kube-cel's `isIPv4`/`isIPv6`/`isCIDRv4`/`isCIDRv6` conveniences.
-// kube-cel:  UnsupportedReference ("Undeclared reference"), object rejected.
-//            The validation environment leaves these out, so a rule using one
-//            can never pass client-side (it used to, for `math.*` and
-//            `isIPv4`-style functions: a fail-OPEN divergence).
+// apiserver: rejects the CRD or policy at registration ("undeclared reference",
+//            or "found no matching overload" for a global `min`/`max`): its base
+//            environment has no `ext.Bindings`, `ext.Math` or `ext.Encoders`, no
+//            `jsonpatch` (a MutatingAdmissionPolicy library), none of kube-cel's
+//            `isIPv4`/`isIPv6`/`isCIDRv4`/`isCIDRv6` conveniences, and `min`/`max`
+//            only as list members.
+// kube-cel:  CompilationFailure, from a compile-time walk of the whole AST, so a
+//            call evaluation never reaches (`true || ..`, the body of a
+//            comprehension over an empty list) is refused too. Before 0.9,
+//            `math.*`, `base64.*`, `jsonpatch.*`, `isIPv4`-style functions and
+//            global `min`/`max` passed client-side: fail-OPEN.
 
 #[test]
 fn cel_bind_fails_closed() {
-    assert_unsupported_reference("cel.bind", "cel.bind(s, self.items.size(), s > 0)");
+    assert_refused("cel.bind(s, self.items.size(), s > 0)");
+    assert_refused("true ? true : cel.bind(x, 2, x > 0)");
 }
 
 #[test]
 fn math_library_fails_closed() {
-    assert_unsupported_reference("math.ceil", "math.ceil(1.2) > 0.0");
-    assert_unsupported_reference("math.greatest", "math.greatest(self.items) == 3");
-    assert_unsupported_reference("math.abs", "math.abs(self.items[0]) == 3");
+    assert_refused("math.ceil(1.2) > 0.0");
+    assert_refused("math.greatest(self.items) == 3");
+    assert_refused("math.abs(self.items[0]) == 3");
+    assert_refused("true || math.ceil(1.2) > 0.0");
 }
 
 #[test]
 fn ip_version_helpers_fail_closed() {
-    assert_unsupported_reference("isIPv4", "isIPv4('192.168.0.1')");
-    assert_unsupported_reference("isIPv6", "isIPv6('::1')");
-    assert_unsupported_reference("isCIDRv4", "isCIDRv4('10.0.0.0/8')");
-    assert_unsupported_reference("isCIDRv6", "isCIDRv6('fd00::/8')");
+    assert_refused("isIPv4('192.168.0.1')");
+    assert_refused("isIPv6('::1')");
+    assert_refused("isCIDRv4('10.0.0.0/8')");
+    assert_refused("isCIDRv6('fd00::/8')");
+    assert_refused("true || isIPv4('192.168.0.1')");
+    assert_refused("self.items.filter(x, x > 5).all(x, isIPv4(string(x)))");
+    assert_refused("[].all(i, v, isIPv4(v))");
+}
+
+#[test]
+fn encoders_and_jsonpatch_fail_closed() {
+    assert_refused("base64.encode(b'hello') == 'aGVsbG8='");
+    assert_refused("true || base64.decode('aGVsbG8=') == b'hello'");
+    assert_refused("jsonpatch.escapeKey('a/b') == 'a~1b'");
+}
+
+#[test]
+fn global_min_max_fails_closed() {
+    assert_refused("min(5, 3) == 3");
+    assert_refused("max(self.items) == 3");
+    assert_refused("true || min(1, 2) == 1");
+}
+
+/// A `messageExpression` goes through the same check, although it is only
+/// evaluated when its rule fails: here the rule holds.
+#[test]
+fn unsupported_call_in_message_expression_fails_closed() {
+    let schema = json!({
+        "type": "object",
+        "x-kubernetes-validations": [{
+            "rule": "true",
+            "messageExpression": "string(isIPv4('1.2.3.4'))"
+        }]
+    });
+    let errors = Validator::new().validate(&schema, &json!({}), None).unwrap_err();
+    assert!(
+        errors.iter().any(|e| e.kind == ErrorKind::CompilationFailure),
+        "expected CompilationFailure, got {errors:?}"
+    );
+
+    let compiled = VapEvaluator::builder()
+        .build()
+        .compile_expressions(&[VapExpression {
+            expression: "true".into(),
+            message: None,
+            message_expression: Some("string(math.ceil(1.2))".into()),
+        }]);
+    assert!(
+        compiled[0].is_err(),
+        "expected the VAP messageExpression to fail to compile"
+    );
 }
 
 /// The apiserver has no string `reverse()` (its `reverse` is the list one):
 /// the CRD is rejected at registration ("found no matching overload"). kube-cel
-/// has no matching overload at evaluation either, so the object is rejected,
-/// as an `EvaluationError` rather than an `UnsupportedReference`.
+/// has no matching overload at evaluation either, so the object is rejected, as
+/// an `EvaluationError`; without the `lists` feature there is no `reverse` at
+/// all and the rule does not compile.
 #[test]
 fn string_reverse_fails_closed() {
+    let want = if cfg!(feature = "lists") {
+        ErrorKind::EvaluationError
+    } else {
+        ErrorKind::CompilationFailure
+    };
     let errors = run_rule("'abc'.reverse() == 'cba'").unwrap_err();
     assert!(
-        errors.iter().any(|e| e.kind == ErrorKind::EvaluationError),
-        "string reverse(): expected fail-closed EvaluationError, got {errors:?}"
+        errors.iter().any(|e| e.kind == want),
+        "string reverse(): expected fail-closed {want:?}, got {errors:?}"
+    );
+}
+
+/// The apiserver has `string(<IP>)` and `string(<CIDR>)` only: the member form
+/// is rejected at registration ("found no matching overload"). kube-cel finds
+/// no overload of that form at evaluation and rejects the object.
+#[test]
+#[cfg(feature = "ip")]
+fn ip_member_string_fails_closed() {
+    for rule in [
+        "ip('10.0.0.1').string() == '10.0.0.1'",
+        "cidr('10.0.0.0/8').string() == '10.0.0.0/8'",
+    ] {
+        let errors = run_rule(rule).unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.kind == ErrorKind::UnsupportedReference),
+            "{rule}: expected fail-closed UnsupportedReference, got {errors:?}"
+        );
+    }
+}
+
+// ── No type checker — fails OPEN (the one documented exception) ──────────────
+// apiserver: type-checks every expression at registration, so a type, arity or
+//            call-shape error, or an undeclared identifier, rejects the CRD
+//            even in a branch that is never evaluated.
+// kube-cel:  `cel` has no type checker yet (cel-rust#350), and kube-cel's
+//            compile-time walk checks function names only. Such a rule passes
+//            whenever evaluation does not trip over the error. Pinned so the
+//            gap is visible, and so this test fails (and gets updated) once a
+//            checker lands.
+
+/// Asserts the rule passes, though the apiserver rejects it at registration.
+fn assert_fails_open(rule: &str) {
+    let result = run_rule(rule);
+    assert!(
+        result.is_ok(),
+        "{rule}: expected the known fail-open (no type checker) to pass, got {result:?}"
+    );
+}
+
+#[test]
+fn no_type_checker_fails_open() {
+    // Types: mixed-type list literals, and lists of different element types.
+    assert_fails_open("[1, 2] == [1.0, 2.0]");
+    #[cfg(feature = "lists")]
+    assert_fails_open("[1, 2.0].isSorted()");
+    // Arity.
+    #[cfg(feature = "strings")]
+    assert_fails_open("'a'.lowerAscii(42) == 'a'");
+    // Call shape: the apiserver has `<IP>.family()`, not `family(<IP>)`, and
+    // `string(<IP>)`, not `<IP>.string()` (rejected when evaluated, see
+    // `ip_member_string_fails_closed`, but not when it is not).
+    #[cfg(feature = "ip")]
+    {
+        assert_fails_open("family(ip('1.2.3.4')) == 4");
+        assert_fails_open("true || ip('1.2.3.4').string() == ''");
+    }
+    // An undeclared identifier in a branch that is never evaluated.
+    assert_fails_open("true || undeclared == 1");
+
+    // A `messageExpression` must be a string; this one is only evaluated when
+    // the rule fails, and the rule holds.
+    let schema = json!({
+        "type": "object",
+        "x-kubernetes-validations": [{ "rule": "true", "messageExpression": "1" }]
+    });
+    assert!(
+        Validator::new().validate(&schema, &json!({}), None).is_ok(),
+        "a non-string messageExpression is a known fail-open (no type checker)"
     );
 }
 
 // ── `lists` extension and two-variable comprehensions — faithful since 0.9 ──
 // apiserver: evaluates (`ext.Lists` and `ext.TwoVarComprehensions` are in the
 //            base environment).
-// kube-cel:  evaluates too, through `cel`'s upstream extensions. Before 0.9
-//            these surfaced as UnsupportedReference (fail-closed).
+// kube-cel:  evaluates too, through `cel`'s upstream extensions (`lists` with
+//            the `lists` feature). Before 0.9 `sortBy` and the two-variable
+//            macros surfaced as UnsupportedReference (fail-closed).
 
 /// Asserts the rule evaluates to `true` against `{"items": [3, 1, 2]}`.
 fn assert_passes(rule: &str) {
@@ -121,6 +276,7 @@ fn assert_fails_validation(rule: &str) {
 }
 
 #[test]
+#[cfg(feature = "lists")]
 fn sort_by_evaluates() {
     assert_passes("self.items.sortBy(x, x) == [1, 2, 3]");
     assert_passes("self.items.sortBy(x, -x) == [3, 2, 1]");
@@ -136,6 +292,7 @@ fn two_var_comprehension_evaluates() {
 }
 
 #[test]
+#[cfg(feature = "lists")]
 fn upstream_list_functions_evaluate() {
     assert_passes("self.items.sort() == [1, 2, 3]");
     assert_passes("self.items.reverse() == [2, 1, 3]");
@@ -143,6 +300,15 @@ fn upstream_list_functions_evaluate() {
     assert_passes("[self.items, [4]].flatten() == [3, 1, 2, 4]");
     assert_passes("(self.items + self.items).distinct() == [3, 1, 2]");
     assert_passes("lists.range(3) == [0, 1, 2]");
+}
+
+/// Without the `lists` feature the validation environment has no list
+/// functions, upstream ones included: a rule using one does not compile.
+#[test]
+#[cfg(not(feature = "lists"))]
+fn list_functions_need_the_lists_feature() {
+    assert_refused("self.items.sortBy(x, x) == [1, 2, 3]");
+    assert_refused("lists.range(3) == [0, 1, 2]");
 }
 
 /// kube-cel's own Kubernetes list functions (feature `lists`) stay alongside

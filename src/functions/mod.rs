@@ -48,6 +48,7 @@ pub(crate) struct Registrar<'c, 'p, 'v> {
     ctx: &'c mut cel::Context<'p, 'v>,
     profile: Profile,
     error: Option<crate::RegisterError>,
+    names: Vec<String>,
 }
 
 /// Which function set a [`Registrar`] registers.
@@ -58,12 +59,14 @@ pub(crate) enum Profile {
     General,
     /// The validation engine's set, mirroring the apiserver's base CEL
     /// environment: see [`VALIDATION_EXCLUDED`] and [`register_profile`].
+    /// The validation engine also refuses, at compile time, a call to any
+    /// function this set leaves out.
     #[cfg_attr(not(feature = "validation"), allow(dead_code))]
     Validation,
 }
 
 /// Names the [`Profile::Validation`] set leaves out, on top of the whole
-/// `math` library.
+/// `math`, `jsonpatch` and `encoders` (`base64.*`) libraries.
 ///
 /// - `slice`, `flatten`, `distinct`, `reverse`, `sort`, `lists.range`: the
 ///   validation `Env` enables `cel`'s upstream `lists` extension, which declares
@@ -98,7 +101,12 @@ impl Profile {
 impl<'c, 'p, 'v> Registrar<'c, 'p, 'v> {
     pub(crate) fn new(ctx: &'c mut cel::Context<'p, 'v>, profile: Profile) -> Self {
         let error = (!matches!(ctx, cel::Context::Root { .. })).then_some(crate::RegisterError::ChildScope);
-        Self { ctx, profile, error }
+        Self {
+            ctx,
+            profile,
+            error,
+            names: Vec::new(),
+        }
     }
 
     /// Adds `f` as `name`, unless an earlier step already failed or the
@@ -110,16 +118,20 @@ impl<'c, 'p, 'v> Registrar<'c, 'p, 'v> {
         if self.error.is_some() || self.profile.excludes(name) {
             return;
         }
-        if let Err(source) = self.ctx.add_function(name, f) {
-            self.error = Some(crate::RegisterError::Rejected {
-                function: name.to_owned(),
-                source: Box::new(source),
-            });
+        match self.ctx.add_function(name, f) {
+            Ok(()) => self.names.push(name.to_owned()),
+            Err(source) => {
+                self.error = Some(crate::RegisterError::Rejected {
+                    function: name.to_owned(),
+                    source: Box::new(source),
+                });
+            }
         }
     }
 
-    pub(crate) fn finish(self) -> Result<(), crate::RegisterError> {
-        self.error.map_or(Ok(()), Err)
+    /// The names registered, or the first failure.
+    pub(crate) fn finish(self) -> Result<Vec<String>, crate::RegisterError> {
+        self.error.map_or(Ok(self.names), Err)
     }
 }
 
@@ -140,17 +152,19 @@ pub(crate) fn declare_overloads(env: &mut cel::Env) -> Result<(), cel::Declarati
 /// kept as a free function so the in-crate callers (vap, validation, …) can
 /// invoke it without importing the trait.
 pub(crate) fn register_all(ctx: &mut cel::Context<'_, '_>) -> Result<(), crate::RegisterError> {
-    register_profile(ctx, Profile::General)
+    register_profile(ctx, Profile::General).map(drop)
 }
 
-/// Registers the `profile`'s function set into `ctx`.
+/// Registers the `profile`'s function set into `ctx` and returns the names it
+/// registered.
 ///
-/// [`Profile::Validation`] leaves out the `math` library and the names in
-/// [`VALIDATION_EXCLUDED`], none of which the apiserver's base environment has.
+/// [`Profile::Validation`] leaves out the `math`, `jsonpatch` and `encoders`
+/// libraries and the names in [`VALIDATION_EXCLUDED`], none of which the
+/// apiserver's base environment has.
 pub(crate) fn register_profile(
     ctx: &mut cel::Context<'_, '_>,
     profile: Profile,
-) -> Result<(), crate::RegisterError> {
+) -> Result<Vec<String>, crate::RegisterError> {
     let mut r = Registrar::new(ctx, profile);
 
     #[cfg(feature = "strings")]
@@ -181,7 +195,9 @@ pub(crate) fn register_profile(
     quantity::register(&mut r);
 
     #[cfg(feature = "jsonpatch")]
-    jsonpatch::register(&mut r);
+    if profile == Profile::General {
+        jsonpatch::register(&mut r);
+    }
 
     #[cfg(feature = "named_format")]
     named_format::register(&mut r);
@@ -192,7 +208,9 @@ pub(crate) fn register_profile(
     }
 
     #[cfg(feature = "encoders")]
-    encoders::register(&mut r);
+    if profile == Profile::General {
+        encoders::register(&mut r);
+    }
 
     // Dispatch: registers functions with name collisions (indexOf, reverse,
     // min/max, ip, isGreaterThan, etc.). Order-independent since individual
