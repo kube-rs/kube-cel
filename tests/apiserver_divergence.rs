@@ -504,6 +504,28 @@ fn runtime_error_chains_its_cause() {
     );
 }
 
+// ── Quantity arithmetic past i128 — fails CLOSED ───────────────────────────
+// apiserver: quantities are exact `inf.Dec`, so
+//            `quantity('2e38').add(quantity('1')).isGreaterThan(quantity('2e38'))`
+//            holds (k8s.io/apiserver v0.36.1 `MustBaseEnvSet(1.36)`).
+// kube-cel:  a quantity is an i128 mantissa and a scale; `add` / `sub` whose
+//            result does not fit is an EvaluationError instead of a panic or
+//            a wrapped value.
+
+#[test]
+fn quantity_arithmetic_past_i128_fails_closed() {
+    for rule in [
+        "quantity('2e38').add(quantity('1')).isGreaterThan(quantity('2e38'))",
+        "quantity('2e38').sub(quantity('-1')).isGreaterThan(quantity('2e38'))",
+    ] {
+        let errors = run_rule(rule).unwrap_err();
+        assert!(
+            errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
+            "{rule}: {errors:?}"
+        );
+    }
+}
+
 // ── Schema depth cap — fails CLOSED since S4 (P1-A); used to fail OPEN ───────
 // apiserver: enforces deep rules (and rejects over-limit schemas at registration).
 // kube-cel:  SchemaTooDeep error past MAX_SCHEMA_DEPTH (64).

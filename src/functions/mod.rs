@@ -26,6 +26,7 @@
 
 #[cfg(feature = "jsonpatch")] mod jsonpatch;
 
+#[cfg(any(feature = "urls", feature = "named_format"))] mod go_url;
 #[cfg(feature = "named_format")] mod named_format;
 
 #[cfg(feature = "math")] mod math;

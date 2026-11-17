@@ -129,6 +129,12 @@ format_factory!(format_datetime, DateTime);
 // format.named(string)
 // ---------------------------------------------------------------------------
 
+/// `format.named(string) -> optional(Format)`
+///
+/// apiserver `library/format.go` binds this as `OptionalType(FormatType)`:
+/// a known name yields `optional.of(format)`, an unknown one `optional.none()`.
+/// The caller unwraps with `.value()` before `.validate()`. Returning the raw
+/// Format (or null) instead would diverge from the apiserver.
 fn format_named(name: Arc<String>) -> ResolveResult {
     let kind = match name.as_str() {
         "dns1123Label" => FormatKind::Dns1123Label,
@@ -144,9 +150,11 @@ fn format_named(name: Arc<String>) -> ResolveResult {
         "byte" => FormatKind::Byte,
         "date" => FormatKind::Date,
         "datetime" => FormatKind::DateTime,
-        _ => return Ok(Value::Null),
+        _ => return Ok(Value::Opaque(Arc::new(OptionalValue::none()))),
     };
-    Ok(Value::Opaque(Arc::new(KubeFormat(kind))))
+    Ok(Value::Opaque(Arc::new(OptionalValue::of(Value::Opaque(
+        Arc::new(KubeFormat(kind)),
+    )))))
 }
 
 // ---------------------------------------------------------------------------
@@ -430,30 +438,12 @@ fn is_label_value_char_set(s: &str) -> bool {
 // -- URI --
 
 fn validate_uri(s: &str) -> Vec<String> {
-    let mut errors = Vec::new();
-    if s.is_empty() {
-        errors.push("must be non-empty".to_string());
-        return errors;
+    // apiserver `format.uri()` is Go's `url.ParseRequestURI` (absolute URI or
+    // absolute path), reporting its error.
+    match crate::functions::go_url::parse_request_uri(s) {
+        Ok(()) => Vec::new(),
+        Err(e) => vec![e],
     }
-    // Must have a scheme (letters followed by ':')
-    let scheme_end = s.find(':');
-    match scheme_end {
-        None => {
-            errors.push("must have a scheme (e.g., 'https:')".to_string());
-        }
-        Some(pos) => {
-            let scheme = &s[..pos];
-            if scheme.is_empty()
-                || !scheme.starts_with(|c: char| c.is_ascii_alphabetic())
-                || !scheme
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
-            {
-                errors.push("invalid scheme".to_string());
-            }
-        }
-    }
-    errors
 }
 
 // -- UUID --
@@ -485,40 +475,53 @@ fn validate_uuid(s: &str) -> Vec<String> {
 // -- Byte (base64) --
 
 fn validate_byte(s: &str) -> Vec<String> {
-    let mut errors = Vec::new();
-    if s.is_empty() {
-        return errors;
+    if is_std_base64(s) {
+        Vec::new()
+    } else {
+        vec!["invalid base64".to_string()]
     }
-    // Strip padding
-    let stripped = s.trim_end_matches('=');
-    // Check all chars are base64 (standard or URL-safe)
-    let valid = stripped
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '-' || c == '_');
-    if !valid {
-        errors.push("must be a valid base64 encoded string".to_string());
-        return errors;
+}
+
+/// Standard-alphabet base64 with required padding, matching the regex that
+/// apiserver's `format.byte()` uses via `strfmt` → `govalidator.IsBase64`:
+///
+/// ```text
+/// ^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{4})$
+/// ```
+///
+/// Consequences vs. the old lenient check: the URL-safe alphabet (`-`/`_`) is
+/// rejected, padding is mandatory (length must be a multiple of 4), and the
+/// empty string is invalid — all three diverged before.
+fn is_std_base64(s: &str) -> bool {
+    // The final group is required, so the empty string never matches, and the
+    // total length is always a multiple of 4.
+    if s.is_empty() || !s.len().is_multiple_of(4) {
+        return false;
     }
-    // Check padding is correct
-    let padding_count = s.len() - stripped.len();
-    if padding_count > 2 {
-        errors.push("must be a valid base64 encoded string".to_string());
-        return errors;
-    }
-    // Check length alignment: base64 without padding should have len % 4 ∈ {0, 2, 3}
-    let remainder = stripped.len() % 4;
-    if remainder == 1 {
-        errors.push("must be a valid base64 encoded string".to_string());
-        return errors;
-    }
-    // If padding is present, total length must be multiple of 4
-    if padding_count > 0 && !s.len().is_multiple_of(4) {
-        errors.push("must be a valid base64 encoded string".to_string());
-    }
-    errors
+    let bytes = s.as_bytes();
+    let n = bytes.len();
+    // Count trailing '=' padding (the regex permits only one or two, at the end).
+    let pad = if bytes[n - 1] == b'=' {
+        if bytes[n - 2] == b'=' { 2 } else { 1 }
+    } else {
+        0
+    };
+    // Every non-padding byte must be in the standard base64 alphabet; any stray
+    // '=' outside the final group falls here and fails.
+    bytes[..n - pad]
+        .iter()
+        .all(|&c| c.is_ascii_alphanumeric() || c == b'+' || c == b'/')
 }
 
 // -- Date --
+
+/// A non-empty run of ASCII digits. Go's `time.Parse` (and strfmt's RFC3339
+/// regex `[0-9]{2}`) accept only digits in numeric fields, but Rust's
+/// `parse::<u32>` also accepts a leading `+` (e.g. `"+024"` → `24`); this guard
+/// closes that gap so date/time components match the apiserver.
+fn all_ascii_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
 
 fn validate_date(s: &str) -> Vec<String> {
     let mut errors = Vec::new();
@@ -535,6 +538,11 @@ fn validate_date(s: &str) -> Vec<String> {
     let year_str = &s[0..4];
     let month_str = &s[5..7];
     let day_str = &s[8..10];
+
+    if !all_ascii_digits(year_str) || !all_ascii_digits(month_str) || !all_ascii_digits(day_str) {
+        errors.push("must be a date in YYYY-MM-DD format".to_string());
+        return errors;
+    }
 
     let Ok(year) = year_str.parse::<u32>() else {
         errors.push("must be a date in YYYY-MM-DD format".to_string());
@@ -657,6 +665,9 @@ fn validate_time_str(s: &str) -> bool {
     if bytes[2] != b':' || bytes[5] != b':' {
         return false;
     }
+    if !all_ascii_digits(&s[0..2]) || !all_ascii_digits(&s[3..5]) || !all_ascii_digits(&s[6..8]) {
+        return false;
+    }
     let Ok(hour) = s[0..2].parse::<u32>() else {
         return false;
     };
@@ -666,8 +677,10 @@ fn validate_time_str(s: &str) -> bool {
     let Ok(sec) = s[6..8].parse::<u32>() else {
         return false;
     };
-    if hour > 23 || min > 59 || sec > 60 {
-        // sec=60 for leap seconds
+    // strfmt's datetime regex caps seconds at "59" (`m[3] <= "59"` in
+    // IsDateTime), so leap seconds (sec == 60) are rejected — matching the
+    // apiserver, not bare RFC 3339.
+    if hour > 23 || min > 59 || sec > 59 {
         return false;
     }
     // Check fractional seconds if present
@@ -696,6 +709,9 @@ fn validate_timezone(tz: &str) -> bool {
         return false;
     }
     if bytes[3] != b':' {
+        return false;
+    }
+    if !all_ascii_digits(&tz[1..3]) || !all_ascii_digits(&tz[4..6]) {
         return false;
     }
     let Ok(hour) = tz[1..3].parse::<u32>() else {
@@ -840,7 +856,7 @@ mod tests {
 
     #[test]
     fn test_dns1035_label_prefix_via_named() {
-        assert_valid("format.named('dns1035LabelPrefix').validate('ok-')");
+        assert_valid("format.named('dns1035LabelPrefix').value().validate('ok-')");
     }
 
     // -- DNS 1123 Subdomain Prefix --
@@ -909,6 +925,9 @@ mod tests {
         assert_valid("format.uri().validate('ftp://files.example.com')");
         assert_valid("format.uri().validate('urn:isbn:0451450523')");
         assert_valid("format.uri().validate('mailto:user@example.com')");
+        // apiserver's url.ParseRequestURI accepts an absolute path, not just an
+        // absolute URI — the old scheme-required check wrongly rejected this.
+        assert_valid("format.uri().validate('/absolute/path')");
     }
 
     #[test]
@@ -938,19 +957,22 @@ mod tests {
 
     #[test]
     fn test_byte_valid() {
-        assert_valid("format.byte().validate('')"); // empty is valid
+        // Standard-alphabet base64 with correct padding (govalidator.IsBase64).
         assert_valid("format.byte().validate('aGVsbG8=')"); // "hello"
-        assert_valid("format.byte().validate('aGVsbG8')"); // no padding
         assert_valid("format.byte().validate('YQ==')"); // "a"
         assert_valid("format.byte().validate('YWI=')"); // "ab"
-        assert_valid("format.byte().validate('aGVsbG8-')"); // url-safe
-        assert_valid("format.byte().validate('aGVsbG8_')"); // url-safe
+        assert_valid("format.byte().validate('YWJjZA==')"); // "abcd"
     }
 
     #[test]
     fn test_byte_invalid() {
         assert_invalid("format.byte().validate('not valid!')");
         assert_invalid("format.byte().validate('abc===')"); // too much padding
+        // strfmt/govalidator rejects these that the old lenient check accepted:
+        assert_invalid("format.byte().validate('')"); // empty (final group is required)
+        assert_invalid("format.byte().validate('aGVsbG8')"); // missing padding (len 7)
+        assert_invalid("format.byte().validate('aGVsbG8-')"); // URL-safe '-'
+        assert_invalid("format.byte().validate('aGVsbG8_')"); // URL-safe '_'
     }
 
     // -- Date --
@@ -969,6 +991,11 @@ mod tests {
         assert_invalid("format.date().validate('2023-02-29')"); // not leap year
         assert_invalid("format.date().validate('2024-1-1')"); // wrong format
         assert_invalid("format.date().validate('not-a-date')");
+        // Go's time.Parse rejects '+'-prefixed components; Rust's parse::<u32>
+        // would accept them, so these must be rejected explicitly.
+        assert_invalid("format.date().validate('+024-01-01')"); // '+' year
+        assert_invalid("format.date().validate('2024-+1-01')"); // '+' month
+        assert_invalid("format.date().validate('2024-01-+1')"); // '+' day
     }
 
     // -- DateTime (RFC 3339) --
@@ -989,19 +1016,31 @@ mod tests {
         assert_invalid("format.datetime().validate('2024-01-15T10:30:00')"); // no tz
         assert_invalid("format.datetime().validate('not-a-datetime')");
         assert_invalid("format.datetime().validate('2024-01-15T25:00:00Z')"); // hour > 23
+        // strfmt's regex caps seconds at "59"; leap seconds are rejected.
+        assert_invalid("format.datetime().validate('2024-01-15T23:59:60Z')"); // sec == 60
+        // '+'-prefixed time component (Rust parse accepts, strfmt regex rejects).
+        assert_invalid("format.datetime().validate('2024-01-15T+1:30:00Z')"); // '+' hour
     }
 
     // -- format.named() --
 
     #[test]
     fn test_format_named_known() {
-        assert_valid("format.named('dns1123Label').validate('my-name')");
-        assert_valid("format.named('uuid').validate('550e8400-e29b-41d4-a716-446655440000')");
+        // apiserver: format.named(x) -> optional(Format); unwrap with .value().
+        assert_valid("format.named('dns1123Label').value().validate('my-name')");
+        assert_valid("format.named('uuid').value().validate('550e8400-e29b-41d4-a716-446655440000')");
+    }
+
+    #[test]
+    fn test_format_named_known_has_value() {
+        // A known name yields optional.of(format).
+        assert_eq!(eval("format.named('dns1123Label').hasValue()"), Value::Bool(true));
     }
 
     #[test]
     fn test_format_named_unknown() {
-        assert_eq!(eval("format.named('unknown')"), Value::Null);
+        // An unknown name yields optional.none(), not null.
+        assert_eq!(eval("format.named('unknown').hasValue()"), Value::Bool(false));
     }
 
     // -- validate return type --

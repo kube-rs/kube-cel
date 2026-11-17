@@ -35,8 +35,45 @@ impl PartialEq for KubeQuantity {
 
 impl Ord for KubeQuantity {
     fn cmp(&self, other: &Self) -> Ordering {
-        let (a, b) = normalize_pair(self, other);
-        a.cmp(&b)
+        match normalize_pair(self, other) {
+            Some((a, b)) => a.cmp(&b),
+            // Aligning the scales overflowed i128 (magnitudes beyond ~10^38).
+            None => cmp_digits(self, other),
+        }
+    }
+}
+
+/// Exact comparison that never aligns scales in `i128`: by sign, then by the
+/// magnitudes' decimal digits (the apiserver's `inf.Dec` compare is exact, and
+/// an `f64` fallback called quantities 3 apart near `i128::MAX` equal).
+fn cmp_digits(a: &KubeQuantity, b: &KubeQuantity) -> Ordering {
+    let by_sign = a.sign().cmp(&b.sign());
+    if by_sign != Ordering::Equal || a.mantissa == 0 {
+        return by_sign;
+    }
+    let min_scale = i64::from(a.scale.min(b.scale));
+    let (da, db) = (
+        a.mantissa.unsigned_abs().to_string(),
+        b.mantissa.unsigned_abs().to_string(),
+    );
+    // Digit count once both are written at `min_scale`: the mantissa's digits
+    // plus the zeros its larger scale adds.
+    let width = |d: &str, q: &KubeQuantity| d.len() as i64 + i64::from(q.scale) - min_scale;
+    let magnitude = width(&da, a).cmp(&width(&db, b)).then_with(|| {
+        // Same width: compare digit by digit; past a mantissa's end its digits are 0.
+        let n = da.len().max(db.len());
+        let digits = |d: &str| {
+            d.bytes()
+                .chain(std::iter::repeat(b'0'))
+                .take(n)
+                .collect::<Vec<u8>>()
+        };
+        digits(&da).cmp(&digits(&db))
+    });
+    if a.mantissa < 0 {
+        magnitude.reverse()
+    } else {
+        magnitude
     }
 }
 
@@ -145,38 +182,42 @@ impl KubeQuantity {
         self.mantissa as f64 * 10f64.powi(self.scale)
     }
 
-    fn add(&self, other: &KubeQuantity) -> KubeQuantity {
+    fn add(&self, other: &KubeQuantity) -> Option<KubeQuantity> {
         let min_scale = self.scale.min(other.scale);
-        let a = scale_mantissa(self.mantissa, self.scale, min_scale);
-        let b = scale_mantissa(other.mantissa, other.scale, min_scale);
-        KubeQuantity::new(a + b, min_scale)
+        let a = scale_mantissa(self.mantissa, self.scale, min_scale)?;
+        let b = scale_mantissa(other.mantissa, other.scale, min_scale)?;
+        Some(KubeQuantity::new(a.checked_add(b)?, min_scale))
     }
 
-    fn sub(&self, other: &KubeQuantity) -> KubeQuantity {
+    fn sub(&self, other: &KubeQuantity) -> Option<KubeQuantity> {
         let min_scale = self.scale.min(other.scale);
-        let a = scale_mantissa(self.mantissa, self.scale, min_scale);
-        let b = scale_mantissa(other.mantissa, other.scale, min_scale);
-        KubeQuantity::new(a - b, min_scale)
+        let a = scale_mantissa(self.mantissa, self.scale, min_scale)?;
+        let b = scale_mantissa(other.mantissa, other.scale, min_scale)?;
+        Some(KubeQuantity::new(a.checked_sub(b)?, min_scale))
     }
 }
 
 /// Scale a mantissa from `from_scale` down to `to_scale` (to_scale <= from_scale).
-fn scale_mantissa(mantissa: i128, from_scale: i32, to_scale: i32) -> i128 {
+/// Returns `None` if the scaled value would overflow `i128` (magnitude > ~10^38).
+fn scale_mantissa(mantissa: i128, from_scale: i32, to_scale: i32) -> Option<i128> {
     let diff = from_scale - to_scale;
     if diff <= 0 {
-        mantissa
+        Some(mantissa)
     } else {
-        mantissa * 10i128.pow(diff as u32)
+        10i128
+            .checked_pow(diff as u32)
+            .and_then(|p| mantissa.checked_mul(p))
     }
 }
 
 /// Normalize a pair of quantities to the same scale, returning their mantissas.
-fn normalize_pair(a: &KubeQuantity, b: &KubeQuantity) -> (i128, i128) {
+/// `None` if either scaling overflows `i128`.
+fn normalize_pair(a: &KubeQuantity, b: &KubeQuantity) -> Option<(i128, i128)> {
     let min_scale = a.scale.min(b.scale);
-    (
-        scale_mantissa(a.mantissa, a.scale, min_scale),
-        scale_mantissa(b.mantissa, b.scale, min_scale),
-    )
+    Some((
+        scale_mantissa(a.mantissa, a.scale, min_scale)?,
+        scale_mantissa(b.mantissa, b.scale, min_scale)?,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -370,7 +411,9 @@ pub(crate) fn cel_add(This(this): This<Value>, Arguments(args): Arguments) -> Re
         return Err(ExecutionError::function_error("add", "missing argument"));
     }
     let other = quantity_or_int(&args[0], "add")?;
-    let result = q.add(&other);
+    let result = q
+        .add(&other)
+        .ok_or_else(|| ExecutionError::function_error("add", "quantity overflow"))?;
     Ok(Value::Opaque(Arc::new(result)))
 }
 
@@ -381,7 +424,9 @@ pub(crate) fn cel_sub(This(this): This<Value>, Arguments(args): Arguments) -> Re
         return Err(ExecutionError::function_error("sub", "missing argument"));
     }
     let other = quantity_or_int(&args[0], "sub")?;
-    let result = q.sub(&other);
+    let result = q
+        .sub(&other)
+        .ok_or_else(|| ExecutionError::function_error("sub", "quantity overflow"))?;
     Ok(Value::Opaque(Arc::new(result)))
 }
 
@@ -438,6 +483,48 @@ mod tests {
         let mut ctx = Context::default();
         crate::functions::register_parts(&mut ctx, &[register, crate::functions::dispatch::register]);
         Program::compile(expr).unwrap().execute(&ctx).unwrap()
+    }
+
+    #[test]
+    fn compare_extreme_magnitude_no_panic() {
+        // quantity('1e40') exceeds i128; comparison must fall back gracefully, not
+        // panic (debug) or wrap (release).
+        assert_eq!(eval("quantity('1e40').compareTo(quantity('1'))"), Value::Int(1));
+        assert_eq!(eval("quantity('1').compareTo(quantity('1e40'))"), Value::Int(-1));
+    }
+
+    #[test]
+    fn compare_is_exact_when_scales_cannot_align() {
+        // Compare i128::MAX against i128::MAX + 3 spelled with an exponent, so
+        // the scales differ and aligning them overflows i128.
+        let a = "quantity('170141183460469231731687303715884105727')";
+        let b = "quantity('17014118346046923173168730371588410573e1')";
+        assert_eq!(eval(&format!("{a}.compareTo({b})")), Value::Int(-1));
+        assert_eq!(eval(&format!("{b}.compareTo({a})")), Value::Int(1));
+        assert_eq!(eval(&format!("{a}.isLessThan({b})")), Value::Bool(true));
+        // Negative magnitudes order the other way.
+        let (na, nb) = (a.replace("('", "('-"), b.replace("('", "('-"));
+        assert_eq!(eval(&format!("{na}.compareTo({nb})")), Value::Int(1));
+        // Same digit count, decided by the last digit (…727 against …720).
+        assert_eq!(
+            eval(&format!(
+                "{a}.compareTo(quantity('17014118346046923173168730371588410572e1'))"
+            )),
+            Value::Int(1)
+        );
+        // A tiny fractional part against a huge integer.
+        assert_eq!(eval("quantity('1e40').compareTo(quantity('1n'))"), Value::Int(1));
+    }
+
+    #[test]
+    fn add_overflow_errors() {
+        // 2e38 scaled to scale 0 overflows i128 → error, not panic/wrap.
+        let mut ctx = Context::default();
+        crate::functions::register_parts(&mut ctx, &[register, crate::functions::dispatch::register]);
+        let r = Program::compile("quantity('2e38').add(quantity('1'))")
+            .unwrap()
+            .execute(&ctx);
+        assert!(r.is_err(), "expected overflow error, got {r:?}");
     }
 
     // -- Parsing --

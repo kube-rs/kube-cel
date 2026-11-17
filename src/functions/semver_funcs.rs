@@ -32,46 +32,44 @@ pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
     // isGreaterThan, isLessThan, compareTo registered via dispatch
 }
 
-/// Normalize a version string for lenient parsing:
-/// - Strip leading 'v' or 'V'
-/// - Strip leading zeros from each component (e.g., "01" -> "1")
-/// - Pad missing minor/patch (e.g., "1" -> "1.0.0", "1.2" -> "1.2.0")
+/// Normalize a version string for lenient parsing, mirroring the apiserver's
+/// `normalizeAndParse` (library/semverlib.go) before it hands off to a strict
+/// parser:
+/// - strip a single leading lowercase `v` (NOT `V` — apiserver uses
+///   `TrimPrefix(s, "v")`)
+/// - split into at most 3 dot-parts (major, minor, patch+prerelease+build) so a
+///   4th component like `1.2.3.4` is preserved and then rejected, not truncated
+/// - strip leading zeros from any part longer than one char, re-prepending `0`
+///   when the trimmed part no longer starts with a digit (`00` -> `0`)
+/// - a shortened version (<3 parts) carrying `+`/`-` metadata is invalid; else
+///   pad with `.0` up to 3 parts
+///
+/// The result is handed to the strict semver parser, which rejects anything the
+/// normalization above left malformed.
 fn normalize(s: &str) -> String {
-    let s = s.strip_prefix('v').or_else(|| s.strip_prefix('V')).unwrap_or(s);
-    let parts: Vec<&str> = s.splitn(2, '-').collect();
-    let version_part = parts[0];
-    let pre_part = parts.get(1);
-
-    let dots: Vec<&str> = version_part.split('.').collect();
-    let strip_zeros = |s: &str| -> String {
-        let stripped = s.trim_start_matches('0');
-        if stripped.is_empty() {
-            "0".into()
-        } else {
-            stripped.into()
-        }
-    };
-    // Each version component must be numeric
-    for comp in &dots {
-        if comp.is_empty() || !comp.bytes().all(|b| b.is_ascii_digit()) {
-            return s.to_string(); // return as-is, let semver::parse reject it
+    let s = s.strip_prefix('v').unwrap_or(s);
+    let mut parts: Vec<String> = s.splitn(3, '.').map(str::to_string).collect();
+    for p in &mut parts {
+        if p.len() > 1 {
+            let trimmed = p.trim_start_matches('0');
+            *p = if trimmed.as_bytes().first().is_none_or(|b| !b.is_ascii_digit()) {
+                format!("0{trimmed}")
+            } else {
+                trimmed.to_string()
+            };
         }
     }
-    let normalized = match dots.len() {
-        1 => format!("{}.0.0", strip_zeros(dots[0])),
-        2 => format!("{}.{}.0", strip_zeros(dots[0]), strip_zeros(dots[1])),
-        _ => format!(
-            "{}.{}.{}",
-            strip_zeros(dots[0]),
-            strip_zeros(dots[1]),
-            strip_zeros(dots[2])
-        ),
-    };
-
-    match pre_part {
-        Some(pre) => format!("{normalized}-{pre}"),
-        None => normalized,
+    if parts.len() < 3 {
+        // A shortened version cannot carry PreRelease/Build metadata; leave it
+        // for the strict parser to reject.
+        if parts.last().is_some_and(|p| p.contains(['+', '-'])) {
+            return s.to_string();
+        }
+        while parts.len() < 3 {
+            parts.push("0".to_string());
+        }
     }
+    parts.join(".")
 }
 
 /// Check if the lenient flag is set.
@@ -380,5 +378,20 @@ mod tests {
         // Passing false should behave like strict mode
         assert_eq!(eval("isSemver('v1.0.0', false)"), Value::Bool(false));
         assert_eq!(eval("isSemver('1', false)"), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_is_semver_lenient_uppercase_v_rejected() {
+        // apiserver normalizeAndParse strips only lowercase `v` (TrimPrefix "v"),
+        // so `V1.0.0` stays malformed and is rejected — lowercase still passes.
+        assert_eq!(eval("isSemver('V1.0.0', true)"), Value::Bool(false));
+        assert_eq!(eval("isSemver('v1.0.0', true)"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_is_semver_lenient_four_components_rejected() {
+        // normalizeAndParse splits into at most 3 parts, so a 4th component is
+        // preserved and rejected by the strict parser, not truncated to 1.2.3.
+        assert_eq!(eval("isSemver('1.2.3.4', true)"), Value::Bool(false));
     }
 }

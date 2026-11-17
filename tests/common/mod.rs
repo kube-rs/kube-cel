@@ -785,6 +785,142 @@ pub fn cases() -> Vec<ParityCase> {
             expect: Expect::Accept,
             note: "format:byte binds as bytes → size()==5 → ACCEPT (F3)",
         },
+        // ── Kubernetes functions vs apiserver v1.36.1 ─────────────────────────
+        //
+        // Quantity comparison: i128::MAX against i128::MAX + 3 written with an
+        // exponent. The scales differ, aligning them overflowed i128, and
+        // kube-cel fell back to an f64 compare, which called them equal. The
+        // apiserver compares exactly.
+        ParityCase {
+            kind: "PquantBigCmp",
+            plural: "pquantbigcmps",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "quantity('170141183460469231731687303715884105727').compareTo(quantity('17014118346046923173168730371588410573e1')) == -1",
+                    "message": "cmp"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "quantities 3 apart beyond i128 scaling compare exactly (-1) → ACCEPT",
+        },
+        // URI validity: `isURL`, `url()` and `format.uri()` are Go's
+        // `url.ParseRequestURI` (go1.26.2 in kube-apiserver v1.36.1): a bad
+        // `%` escape, a control byte, a leading space, and (http/https only) a
+        // second colon in the host are refused. The WHATWG parse kube-cel used
+        // repaired or accepted each of them.
+        ParityCase {
+            kind: "PurlRequestUri",
+            plural: "purlrequesturis",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "!isURL('/foo%zz') && !isURL('/foo\\n') && !isURL('/foo\\t') && !isURL(' http://example.com') && !isURL('http://a:1:2/') && isURL('foo://a:1:2/') && isURL('mailto:%zz')",
+                    "message": "isURL"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "isURL follows Go url.ParseRequestURI → ACCEPT",
+        },
+        ParityCase {
+            kind: "PfmtUri",
+            plural: "pfmturis",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "format.uri().validate('/foo%zz').hasValue() && format.uri().validate(' http://example.com').hasValue() && !format.uri().validate('/foo').hasValue()",
+                    "message": "uri"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "format.uri() follows Go url.ParseRequestURI → ACCEPT",
+        },
+        // A `format: duration` value past the int64 range is an error in the
+        // apiserver (`strfmt.ParseDuration`); kube-cel saturated it to the
+        // largest duration.
+        ParityCase {
+            kind: "PdurOverflow",
+            plural: "pduroverflows",
+            schema: json!({
+                "type": "object",
+                "properties": { "d": { "type": "string", "format": "duration" } },
+                "x-kubernetes-validations": [{ "rule": "self.d == duration('2562047h47m16.854775807s')", "message": "d" }]
+            }),
+            object: json!({"d": "9223372036854775808µs"}),
+            expect: Expect::Reject,
+            note: "duration past int64 is an error, not the largest duration → REJECT",
+        },
+        // `strfmt.ParseDuration` falls back to word units Go's own parser
+        // lacks, so `1d` is a day there (kube-cel used to leave it a string).
+        ParityCase {
+            kind: "PdurDay",
+            plural: "pdurdays",
+            schema: json!({
+                "type": "object",
+                "properties": { "d": { "type": "string", "format": "duration" } },
+                "x-kubernetes-validations": [{ "rule": "self.d == duration('24h')", "message": "d" }]
+            }),
+            object: json!({"d": "1d"}),
+            expect: Expect::Accept,
+            note: "format:duration 1d is 24h (strfmt fallback) → ACCEPT",
+        },
+        // `format.named` returns `optional(Format)`; `format.byte()` is strict
+        // standard base64 (govalidator.IsBase64): padding required, empty refused.
+        ParityCase {
+            kind: "PfmtNamedByte",
+            plural: "pfmtnamedbytes",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "format.named('uuid').hasValue() && !format.named('unknown').hasValue() && !format.byte().validate('aGVsbG8=').hasValue() && format.byte().validate('aGVsbG8').hasValue() && format.byte().validate('').hasValue()",
+                    "message": "named/byte"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "format.named is optional, format.byte needs padded standard base64 → ACCEPT",
+        },
+        // `format.date()` / `format.datetime()` refuse a `+`-signed component
+        // and a leap second (strfmt IsDate / IsDateTime).
+        ParityCase {
+            kind: "PfmtDateSign",
+            plural: "pfmtdatesigns",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "format.date().validate('+024-01-01').hasValue() && format.date().validate('2024-+1-01').hasValue() && format.datetime().validate('2024-01-15T+1:30:00Z').hasValue() && format.datetime().validate('2024-01-15T10:30:60Z').hasValue() && !format.datetime().validate('2024-01-15T10:30:59Z').hasValue()",
+                    "message": "date"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "signed date components and leap seconds are invalid → ACCEPT",
+        },
+        // Lenient semver normalizes like the apiserver's normalizeAndParse:
+        // only a lowercase `v` is stripped, and a fourth component stays an error.
+        ParityCase {
+            kind: "PsemverLenient",
+            plural: "psemverlenients",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "!isSemver('V1.0.0', true) && !isSemver('1.2.3.4', true) && isSemver('v1.2', true) && isSemver('01.02.03', true)",
+                    "message": "semver"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "lenient semver: lowercase v only, no fourth component → ACCEPT",
+        },
         // ── cel 0.16 validation environment (kube-rs/kube-cel#14) ─────────────
         // The validation env enables `cel`'s upstream `lists` extension and the
         // two-variable comprehensions, which the apiserver's base environment

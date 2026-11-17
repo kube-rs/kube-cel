@@ -293,12 +293,11 @@ fn convert_string_with_format(s: &str, format: &SchemaFormat) -> Value {
             Some(ts) => Value::Timestamp(ts),
             None => Value::String(Arc::new(s.to_string())),
         },
-        SchemaFormat::Duration => {
-            if let Some(d) = parse_go_duration(s) {
-                return Value::Duration(d);
-            }
-            Value::String(Arc::new(s.to_string()))
-        }
+        // As for a date, an invalid duration is reported by the validator.
+        SchemaFormat::Duration => match parse_schema_duration(s) {
+            Some(d) => Value::Duration(d),
+            None => Value::String(Arc::new(s.to_string())),
+        },
         SchemaFormat::Bytes => match base64::engine::general_purpose::STANDARD.decode(s) {
             Ok(bytes) => Value::Bytes(Arc::new(bytes)),
             // Structural validation would already have rejected malformed base64
@@ -326,81 +325,220 @@ pub(crate) fn parse_date(s: &str) -> Option<chrono::DateTime<chrono::FixedOffset
 /// Why the apiserver cannot bind `value` under `format`, if it cannot: its
 /// binding returns an error, and its OpenAPI format check refuses the object
 /// whether or not a rule reads the field. Only formats whose parser here
-/// matches the apiserver's exactly are checked, so this never refuses a value
-/// the apiserver accepts.
+/// matches the apiserver's exactly (`date`, `duration`) are checked, so this
+/// never refuses a value the apiserver accepts.
 pub(crate) fn binding_error(value: &serde_json::Value, format: &SchemaFormat) -> Option<String> {
     let s = value.as_str()?;
     match format {
         SchemaFormat::Date if parse_date(s).is_none() => Some(format!("Invalid date formatted string {s}")),
+        SchemaFormat::Duration if parse_schema_duration(s).is_none() => Some(format!("Invalid duration {s}")),
         _ => None,
     }
 }
 
-/// Parse a Go-style duration string into a [`chrono::Duration`].
-///
-/// Supported units: `h` (hours), `m` (minutes), `s` (seconds), `ms` (milliseconds),
-/// `us` (microseconds), `ns` (nanoseconds). Multiple units can be combined
-/// (e.g., `"1h30m"`). An optional leading `-` makes the duration negative.
-/// The bare string `"0"` is treated as zero duration.
-///
-/// Returns `None` if the string cannot be parsed.
+/// Go's `time.ParseDuration` (go1.26.2), exactly: integer arithmetic, the
+/// fractional part through `float64` as Go does it, and every overflow an
+/// error (`None`).
 pub(crate) fn parse_go_duration(input: &str) -> Option<chrono::Duration> {
-    let (input, negative) = if let Some(rest) = input.strip_prefix('-') {
-        (rest, true)
-    } else {
-        (input, false)
-    };
+    go_parse_duration(input.as_bytes()).map(chrono::Duration::nanoseconds)
+}
 
-    if input == "0" {
-        return Some(chrono::Duration::zero());
+/// The apiserver's `format: duration`, kube-openapi `strfmt.ParseDuration`:
+/// Go's `time.ParseDuration`, else every `<digits><spaces><letters>` match of
+/// `(\d+)\s*([A-Za-zµ]+)` whose letters name a unit (`d`, `day`, `w`, `hour`,
+/// `sec`, ...), summed with Go's wrapping int64 arithmetic. A digit run past
+/// int64 is an error (`strconv.Atoi`).
+pub(crate) fn parse_schema_duration(input: &str) -> Option<chrono::Duration> {
+    if let Some(d) = parse_go_duration(input) {
+        return Some(d);
     }
-
-    let mut remaining = input;
-    let mut total_nanos: i64 = 0;
-    let mut parsed_any = false;
-
-    while !remaining.is_empty() {
-        // Parse the numeric part (integer or float)
-        let num_end = remaining
-            .find(|c: char| !c.is_ascii_digit() && c != '.')
-            .unwrap_or(0);
-        if num_end == 0 {
-            return None; // no digits found
+    const UNITS: &[(&[&str], i64)] = &[
+        (&["ns", "nano"], 1),
+        (&["us", "µs", "micro"], 1_000),
+        (&["ms", "milli"], 1_000_000),
+        (&["s", "sec"], 1_000_000_000),
+        (&["m", "min"], 60_000_000_000),
+        (&["h", "hr", "hour"], 3_600_000_000_000),
+        (&["d", "day"], 86_400_000_000_000),
+        (&["w", "wk", "week"], 604_800_000_000_000),
+    ];
+    let mut total: i64 = 0;
+    let mut matched = false;
+    for (digits, letters) in duration_matches(input) {
+        let factor: i64 = digits.parse().ok()?;
+        // `strings.ToLower`; `strings.EqualFold` against these lowercase
+        // variants is then plain equality.
+        let unit = letters.to_lowercase();
+        for (variants, nanos) in UNITS {
+            let last = variants.len() - 1;
+            for (i, variant) in variants.iter().enumerate() {
+                if (i == last && unit.starts_with(variant)) || unit == *variant {
+                    matched = true;
+                    total = total.wrapping_add(factor.wrapping_mul(*nanos));
+                }
+            }
         }
-        let num_str = &remaining[..num_end];
-        let num: f64 = num_str.parse().ok()?;
-        remaining = &remaining[num_end..];
-
-        // Parse the unit suffix
-        let (unit_nanos, unit_len) = if remaining.starts_with("ms") {
-            (1_000_000i64, 2)
-        } else if remaining.starts_with("us") {
-            (1_000i64, 2)
-        } else if remaining.starts_with("ns") {
-            (1i64, 2)
-        } else if remaining.starts_with('h') {
-            (3_600_000_000_000i64, 1)
-        } else if remaining.starts_with('m') {
-            (60_000_000_000i64, 1)
-        } else if remaining.starts_with('s') {
-            (1_000_000_000i64, 1)
-        } else {
-            return None; // unknown unit
-        };
-
-        remaining = &remaining[unit_len..];
-        total_nanos += (num * unit_nanos as f64).trunc() as i64;
-        parsed_any = true;
     }
+    matched.then(|| chrono::Duration::nanoseconds(total))
+}
 
-    if !parsed_any {
+/// The `(digits, letters)` of each match of Go's `(\d+)\s*([A-Za-zµ]+)`, left
+/// to right, without overlap: a maximal ASCII digit run, then `\s` (tab,
+/// newline, form feed, carriage return, space), then a maximal run of ASCII
+/// letters and `µ` (U+00B5).
+fn duration_matches(s: &str) -> Vec<(&str, &str)> {
+    let b = s.as_bytes();
+    let letter_len = |i: usize| -> usize {
+        match b.get(i) {
+            Some(c) if c.is_ascii_alphabetic() => 1,
+            Some(0xC2) if b.get(i + 1) == Some(&0xB5) => 2,
+            _ => 0,
+        }
+    };
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if !b[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let digits_start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        let digits_end = i;
+        let mut j = i;
+        while matches!(b.get(j), Some(b'\t' | b'\n' | 0x0C | b'\r' | b' ')) {
+            j += 1;
+        }
+        let letters_start = j;
+        while letter_len(j) > 0 {
+            j += letter_len(j);
+        }
+        if j > letters_start {
+            out.push((&s[digits_start..digits_end], &s[letters_start..j]));
+            i = j;
+        }
+    }
+    out
+}
+
+fn go_parse_duration(orig: &[u8]) -> Option<i64> {
+    const LIMIT: u64 = 1 << 63;
+    let mut s = orig;
+    let mut neg = false;
+    if let Some(&c) = s.first()
+        && (c == b'-' || c == b'+')
+    {
+        neg = c == b'-';
+        s = &s[1..];
+    }
+    if s == b"0" {
+        return Some(0);
+    }
+    if s.is_empty() {
         return None;
     }
-
-    if negative {
-        total_nanos = -total_nanos;
+    let mut d: u64 = 0;
+    while !s.is_empty() {
+        if !(s[0] == b'.' || s[0].is_ascii_digit()) {
+            return None;
+        }
+        let before = s.len();
+        let (v, rest) = leading_int(s)?;
+        s = rest;
+        let pre = before != s.len();
+        let (mut f, mut scale, mut post) = (0u64, 1f64, false);
+        if s.first() == Some(&b'.') {
+            s = &s[1..];
+            let before = s.len();
+            (f, scale, s) = leading_fraction(s);
+            post = before != s.len();
+        }
+        if !pre && !post {
+            return None;
+        }
+        let unit_len = s
+            .iter()
+            .position(|&c| c == b'.' || c.is_ascii_digit())
+            .unwrap_or(s.len());
+        if unit_len == 0 {
+            return None;
+        }
+        let unit: u64 = match &s[..unit_len] {
+            b"ns" => 1,
+            b"us" | b"\xc2\xb5s" | b"\xce\xbcs" => 1_000,
+            b"ms" => 1_000_000,
+            b"s" => 1_000_000_000,
+            b"m" => 60_000_000_000,
+            b"h" => 3_600_000_000_000,
+            _ => return None,
+        };
+        s = &s[unit_len..];
+        if v > LIMIT / unit {
+            return None;
+        }
+        let mut v = v * unit;
+        if f > 0 {
+            v += (f as f64 * (unit as f64 / scale)) as u64;
+            if v > LIMIT {
+                return None;
+            }
+        }
+        d = d.wrapping_add(v);
+        if d > LIMIT {
+            return None;
+        }
     }
-    Some(chrono::Duration::nanoseconds(total_nanos))
+    if neg {
+        return Some((d as i64).wrapping_neg());
+    }
+    if d > LIMIT - 1 {
+        return None;
+    }
+    Some(d as i64)
+}
+
+/// Go's `leadingInt`: the leading `[0-9]*`, `None` past 2^63.
+fn leading_int(s: &[u8]) -> Option<(u64, &[u8])> {
+    let mut x: u64 = 0;
+    let mut i = 0;
+    while let Some(&c) = s.get(i).filter(|c| c.is_ascii_digit()) {
+        if x > (1u64 << 63) / 10 {
+            return None;
+        }
+        x = x * 10 + u64::from(c - b'0');
+        if x > 1u64 << 63 {
+            return None;
+        }
+        i += 1;
+    }
+    Some((x, &s[i..]))
+}
+
+/// Go's `leadingFraction`: the leading `[0-9]*` as `x / scale`, which stops
+/// gaining precision (but keeps consuming digits) once it would overflow.
+fn leading_fraction(s: &[u8]) -> (u64, f64, &[u8]) {
+    let (mut x, mut scale, mut overflow) = (0u64, 1f64, false);
+    let mut i = 0;
+    while let Some(&c) = s.get(i).filter(|c| c.is_ascii_digit()) {
+        i += 1;
+        if overflow {
+            continue;
+        }
+        if x > ((1u64 << 63) - 1) / 10 {
+            overflow = true;
+            continue;
+        }
+        let y = x * 10 + u64::from(c - b'0');
+        if y > 1u64 << 63 {
+            overflow = true;
+            continue;
+        }
+        x = y;
+        scale *= 10.0;
+    }
+    (x, scale, &s[i..])
 }
 
 #[cfg(test)]
@@ -603,6 +741,25 @@ mod tests {
     #[test]
     fn parse_duration_zero() {
         assert_eq!(parse_go_duration("0"), Some(chrono::Duration::zero()));
+    }
+
+    #[test]
+    fn schema_duration_matches_strfmt() {
+        // Expected values are kube-openapi `strfmt.ParseDuration`'s (the
+        // apiserver's `format: duration`), run with k8s.io/kube-openapi.
+        let ns = |s: &str| parse_schema_duration(s).map(|d| d.num_nanoseconds().unwrap());
+        // Past int64: an error, neither saturated nor a panic.
+        assert_eq!(ns("9223372036854775808µs"), None);
+        assert_eq!(ns("5000000000000000μs5000000000000000μs"), None);
+        // Go's own syntax, including a sign and the int64 minimum.
+        assert_eq!(ns("+1s"), Some(1_000_000_000));
+        assert_eq!(ns("-9223372036854775808ns"), Some(i64::MIN));
+        // strfmt's fallback: word units, and Go's wrapping int64 sum.
+        assert_eq!(ns("1d"), Some(86_400_000_000_000));
+        assert_eq!(ns("1 day 2 hours"), Some(93_600_000_000_000));
+        assert_eq!(ns("1.5d"), Some(432_000_000_000_000));
+        assert_eq!(ns("3000000h"), Some(-7_646_744_073_709_551_616));
+        assert_eq!(ns("2562047h47m16.854775808s"), Some(-8_368_596_245_709_551_616));
     }
 
     #[test]

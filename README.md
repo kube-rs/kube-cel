@@ -112,9 +112,10 @@ let schema = json!({
 });
 ```
 
-A `format: date` string that is not a valid date is an `EvaluationError` at its
-field, as the apiserver refuses it; other invalid strings fall back to
-`Value::String`.
+A `format: date` or `format: duration` string the apiserver cannot parse is an
+`EvaluationError` at its field, as the apiserver refuses it (durations follow
+its `strfmt.ParseDuration`, so `1d` is a day); other invalid strings fall back
+to `Value::String`.
 
 ### Field name escaping
 
@@ -261,8 +262,8 @@ let result = Program::compile("!format.dns1123Label().validate('my-name').hasVal
     .unwrap().execute(&ctx).unwrap();
 // Value::Bool(true)
 
-// Dynamic format lookup
-let result = Program::compile("!format.named('uuid').validate('550e8400-e29b-41d4-a716-446655440000').hasValue()")
+// Dynamic format lookup — format.named() returns optional(Format); unwrap with .value()
+let result = Program::compile("!format.named('uuid').value().validate('550e8400-e29b-41d4-a716-446655440000').hasValue()")
     .unwrap().execute(&ctx).unwrap();
 // Value::Bool(true)
 ```
@@ -364,6 +365,7 @@ pinned by `tests/apiserver_divergence.rs`.
 | Global `min(..)` / `max(..)` | rejects the CRD at registration (only `<list>.min()` / `<list>.max()`) | `CompilationFailure` | fail-closed |
 | String `reverse()` (`'abc'.reverse()`) | rejects the CRD at registration (no matching overload) | `EvaluationError` | fail-closed |
 | `<IP>.string()`, `<CIDR>.string()` | rejects the CRD at registration (no matching overload; only `string(<IP>)`) | `UnsupportedReference` | fail-closed |
+| Quantity `add` / `sub` past `i128` (`quantity('2e38').add(quantity('1'))`) | exact (`inf.Dec`), so `….isGreaterThan(quantity('2e38'))` holds | `EvaluationError` (quantity overflow) | fail-closed |
 | Schema nesting deeper than 64 levels | enforces (rejects over-limit schemas at registration) | `SchemaTooDeep` error | fail-closed |
 | Rule whose `messageExpression` does not compile (a syntax error, or a call refused above) | rejects the CRD at registration | `CompilationFailure` (the rule is rejected, not just its message) | fail-closed |
 | Functions the apiserver declares that kube-cel does not implement: `optional.unwrap(..)`, `<list>.unwrapOpt()`, the authz library (`authorizer.*` in a VAP), or a function whose kube-cel feature is disabled | evaluates (the authz library against the cluster) | compiles, and passes where evaluation does not reach the call; `UnsupportedReference` where it does | fail-closed (the authz library is out of scope) |

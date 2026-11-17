@@ -44,8 +44,10 @@ pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
 }
 
 /// Validates and parses a URL string.
-/// Accepts absolute URIs (with scheme) and absolute paths (starting with /).
+/// Validity is Go's `url.ParseRequestURI`, as in the apiserver; the accessors
+/// then read a WHATWG parse, which refuses a few strings Go accepts (`*`).
 fn validate_and_parse(s: &str) -> Result<Url, String> {
+    crate::functions::go_url::parse_request_uri(s).map_err(|e| format!("invalid URL: {e}"))?;
     // Accept absolute paths by prepending a dummy scheme
     if s.starts_with('/') {
         let full = format!("http://localhost{s}");
@@ -69,7 +71,9 @@ fn parse_url(s: Arc<String>) -> ResolveResult {
 ///
 /// Returns true if the string is a valid URL (absolute URI or absolute path).
 fn is_url(s: Arc<String>) -> ResolveResult {
-    Ok(Value::Bool(validate_and_parse(&s).is_ok()))
+    Ok(Value::Bool(
+        crate::functions::go_url::parse_request_uri(&s).is_ok(),
+    ))
 }
 
 /// Helper to extract KubeUrl from an opaque Value.

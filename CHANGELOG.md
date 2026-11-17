@@ -91,6 +91,23 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     past int64 is a float (2^63 and 2^63 + 1 are one key), and a single float
     key `-0.0` equals `0.0`.
   - Migration: none for rules the apiserver accepts.
+- **Kubernetes library functions follow the apiserver in more places** (each
+  checked live on v1.36.1):
+  - `format.named(name)` returns `optional(Format)`, as in the apiserver:
+    `optional.none()` for an unknown name. Unwrap it with `.value()`.
+  - Validity in `isURL`, `url()` and `format.uri()` follows Go's
+    `url.ParseRequestURI`: a bad `%` escape, a control character, a leading
+    space or, for http/https, a second colon in the host is refused; an
+    absolute path (`/foo`) is accepted by `format.uri()`. Only validity: the
+    `url()` accessors (`getPort()`, ...) still read a WHATWG parse, and
+    `url('*')`, which Go accepts, still fails.
+  - `format.byte()` requires standard, padded base64 and refuses the empty
+    string; `format.date()` / `format.datetime()` refuse a `+`-signed
+    component and a leap second.
+  - Lenient `semver(x, true)` / `isSemver(x, true)` strip only a lowercase
+    `v` and refuse a fourth component (`1.2.3.4`).
+  - Quantity comparison is exact for magnitudes beyond `i128` scaling
+    (`compareTo` used to call quantities 3 apart equal there).
 
 ### Added
 - `new_env() -> cel::Env`: the `cel` standard library plus the overloads
@@ -121,6 +138,13 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
 - `<list>.sum()` overflow is an error instead of a panic (debug) or a wrapped
   result (release). `lists.range()` in `new_env()` refuses more than 10,000,000
   elements.
+- Quantity `add` / `sub` past the `i128` range is an error instead of a panic
+  or a wrapped result (the apiserver's quantities are exact, so this is a
+  documented fail-closed limit).
+- A schema `format: duration` parses as the apiserver's
+  `strfmt.ParseDuration`: Go's `time.ParseDuration` exactly (`µs` / `μs`, a
+  `+` sign, every overflow refused), then strfmt's word units (`1d`,
+  `2 hours`); a duration it cannot parse is an `EvaluationError` at its field.
 - README "apiserver divergence" table: the apiserver does **not** evaluate
   `cel.bind` (its base environment has no `ext.Bindings`); it rejects the CRD at
   registration. The `sortBy` and two-variable comprehension rows are gone (both
