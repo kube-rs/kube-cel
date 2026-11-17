@@ -3,16 +3,16 @@
 //! Provides set operations on lists, matching `cel-go/ext/sets.go`.
 //! These are namespaced functions called as `sets.contains(a, b)`.
 
-use cel::{Context, ResolveResult, objects::Value};
+use cel::{ResolveResult, objects::Value};
 use std::sync::Arc;
 
-use crate::functions::value_ops::val_eq;
+use crate::functions::{Registrar, value_ops::val_eq};
 
 /// Register all set extension functions.
-pub(crate) fn register(ctx: &mut Context<'_>) {
-    ctx.add_function("sets.contains", sets_contains);
-    ctx.add_function("sets.equivalent", sets_equivalent);
-    ctx.add_function("sets.intersects", sets_intersects);
+pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
+    r.add("sets.contains", sets_contains);
+    r.add("sets.equivalent", sets_equivalent);
+    r.add("sets.intersects", sets_intersects);
 }
 
 /// `sets.contains(list, list) -> bool`
@@ -61,11 +61,11 @@ fn sets_intersects(a: Arc<Vec<Value>>, b: Arc<Vec<Value>>) -> ResolveResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel::Program;
+    use cel::{Context, Program};
 
     fn eval(expr: &str) -> Value {
         let mut ctx = Context::default();
-        register(&mut ctx);
+        crate::functions::register_parts(&mut ctx, &[register]);
         Program::compile(expr).unwrap().execute(&ctx).unwrap()
     }
 

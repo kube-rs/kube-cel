@@ -3,12 +3,14 @@
 //! Provides `jsonpatch.escapeKey()` to escape JSONPatch path keys
 //! per RFC 6901 (`~` → `~0`, `/` → `~1`).
 
-use cel::{Context, ResolveResult, objects::Value};
+use cel::{ResolveResult, objects::Value};
 use std::sync::Arc;
 
+use crate::functions::Registrar;
+
 /// Register the jsonpatch extension functions.
-pub(crate) fn register(ctx: &mut Context<'_>) {
-    ctx.add_function("jsonpatch.escapeKey", escape_key);
+pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
+    r.add("jsonpatch.escapeKey", escape_key);
 }
 
 /// `jsonpatch.escapeKey(<string>) -> string`
@@ -23,11 +25,11 @@ fn escape_key(s: Arc<String>) -> ResolveResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel::Program;
+    use cel::{Context, Program};
 
     fn eval(expr: &str) -> Value {
         let mut ctx = Context::default();
-        register(&mut ctx);
+        crate::functions::register_parts(&mut ctx, &[register]);
         Program::compile(expr).unwrap().execute(&ctx).unwrap()
     }
 

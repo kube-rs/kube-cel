@@ -10,8 +10,10 @@ use base64::{
         general_purpose::{GeneralPurpose, GeneralPurposeConfig, STANDARD},
     },
 };
-use cel::{Context, ExecutionError, ResolveResult, objects::Value};
+use cel::{ExecutionError, ResolveResult, objects::Value};
 use std::sync::Arc;
+
+use crate::functions::Registrar;
 
 /// Base64 decoder that accepts both padded and unpadded input (matching cel-go).
 const STANDARD_INDIFFERENT: GeneralPurpose = GeneralPurpose::new(
@@ -20,9 +22,9 @@ const STANDARD_INDIFFERENT: GeneralPurpose = GeneralPurpose::new(
 );
 
 /// Register all encoder extension functions.
-pub(crate) fn register(ctx: &mut Context<'_>) {
-    ctx.add_function("base64.decode", base64_decode);
-    ctx.add_function("base64.encode", base64_encode);
+pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
+    r.add("base64.decode", base64_decode);
+    r.add("base64.encode", base64_encode);
 }
 
 /// `base64.decode(<string>) -> bytes`
@@ -43,17 +45,17 @@ fn base64_encode(b: Arc<Vec<u8>>) -> ResolveResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel::Program;
+    use cel::{Context, Program};
 
     fn eval(expr: &str) -> Value {
         let mut ctx = Context::default();
-        register(&mut ctx);
+        crate::functions::register_parts(&mut ctx, &[register]);
         Program::compile(expr).unwrap().execute(&ctx).unwrap()
     }
 
     fn eval_err(expr: &str) -> ExecutionError {
         let mut ctx = Context::default();
-        register(&mut ctx);
+        crate::functions::register_parts(&mut ctx, &[register]);
         Program::compile(expr).unwrap().execute(&ctx).unwrap_err()
     }
 

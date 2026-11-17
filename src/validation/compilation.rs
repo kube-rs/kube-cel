@@ -56,28 +56,30 @@ pub struct CompilationResult {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum CompilationError {
-    /// CEL expression failed to parse.
+    /// CEL expression failed to compile: it does not parse, or it calls a
+    /// function outside the validation environment (see
+    /// [`ErrorKind::CompilationFailure`](crate::ErrorKind::CompilationFailure)).
     Parse {
         /// The original CEL expression that failed to compile.
         rule: String,
-        /// The boxed parse error reported by the CEL compiler. Boxed (rather
-        /// than carrying the concrete `cel::ParseErrors`) so the pre-1.0 `cel`
-        /// type is not frozen into this public enum variant; reach it via
+        /// The boxed error: the parse error reported by the CEL compiler, or
+        /// the unsupported call. Boxed (rather than carrying the concrete
+        /// `cel::ParseErrors`) so the pre-1.0 `cel` type is not frozen into
+        /// this public enum variant; reach it via
         /// [`Error::source`](std::error::Error::source).
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    /// A rule's `messageExpression` failed to parse. The `rule` itself is
-    /// well-formed, but its dynamic error message cannot be compiled. Surfaced as
-    /// a compilation error (rather than silently dropped) so the rule fails
-    /// closed, mirroring the apiserver, which rejects such a CRD at registration.
+    /// A rule's `messageExpression` failed to compile, as for [`Self::Parse`].
+    /// The `rule` itself is well-formed, but its dynamic error message cannot
+    /// be compiled. Surfaced as a compilation error (rather than silently
+    /// dropped) so the rule fails closed, mirroring the apiserver, which
+    /// rejects such a CRD at registration.
     MessageExpressionParse {
         /// The rule whose `messageExpression` failed to compile.
         rule: String,
         /// The `messageExpression` that failed to compile.
         message_expression: String,
-        /// The boxed parse error reported by the CEL compiler. Boxed (rather
-        /// than carrying the concrete `cel::ParseErrors`) so the pre-1.0 `cel`
-        /// type is not frozen into this public enum variant; reach it via
+        /// The boxed error, as for [`Self::Parse`]. Reach it via
         /// [`Error::source`](std::error::Error::source).
         source: Box<dyn std::error::Error + Send + Sync>,
     },
@@ -137,9 +139,9 @@ impl std::error::Error for CompilationError {
 /// Returns [`CompilationError::Parse`] if the rule expression is invalid, or
 /// [`CompilationError::MessageExpressionParse`] if its `messageExpression` is.
 pub(crate) fn compile_rule(rule: &Rule) -> Result<CompilationResult, CompilationError> {
-    let program = Program::compile(&rule.rule).map_err(|e| CompilationError::Parse {
+    let program = crate::validation::compile(&rule.rule).map_err(|source| CompilationError::Parse {
         rule: rule.rule.clone(),
-        source: Box::new(e),
+        source,
     })?;
     let is_transition_rule = program.references().has_variable("oldSelf");
 
@@ -147,13 +149,13 @@ pub(crate) fn compile_rule(rule: &Rule) -> Result<CompilationResult, Compilation
     // rejects such a CRD at registration), mirroring the `rule` path above rather
     // than silently dropping the dynamic message.
     let message_program = match rule.message_expression.as_deref() {
-        Some(expr) => Some(
-            Program::compile(expr).map_err(|e| CompilationError::MessageExpressionParse {
+        Some(expr) => Some(crate::validation::compile(expr).map_err(|source| {
+            CompilationError::MessageExpressionParse {
                 rule: rule.rule.clone(),
                 message_expression: expr.to_string(),
-                source: Box::new(e),
-            })?,
-        ),
+                source,
+            }
+        })?),
         None => None,
     };
 
@@ -640,19 +642,18 @@ mod tests {
 /// `tests/compilation_integration.rs` when `json_to_cel` became `pub(crate)`.
 #[cfg(test)]
 mod end_to_end_tests {
-    use cel::{Context, Value};
+    use cel::Value;
     use serde_json::json;
 
     use super::{CompilationError, compile_schema};
-    use crate::{register_all, validation::values::json_to_cel};
+    use crate::validation::values::json_to_cel;
 
     /// Compile rules from a schema, bind `self`, evaluate the first program.
     fn compile_and_eval_first(schema: serde_json::Value, self_val: serde_json::Value) -> Value {
         let compiled = compile_schema(&schema);
         let cr = compiled.validations.into_iter().next().unwrap().unwrap();
 
-        let mut ctx = Context::default();
-        register_all(&mut ctx);
+        let mut ctx = crate::validation::base_context();
         ctx.add_variable_from_value("self", json_to_cel(&self_val));
         cr.program.execute(&ctx).unwrap()
     }
@@ -688,8 +689,7 @@ mod end_to_end_tests {
             Some("replicas must be >= minReplicas")
         );
 
-        let mut ctx = Context::default();
-        register_all(&mut ctx);
+        let mut ctx = crate::validation::base_context();
         ctx.add_variable_from_value("self", json_to_cel(&self_val));
         assert_eq!(compiled.program.execute(&ctx).unwrap(), Value::Bool(true));
     }
@@ -718,14 +718,12 @@ mod end_to_end_tests {
         assert_eq!(compiled.rule.message.as_deref(), Some("cannot scale down"));
         assert_eq!(compiled.rule.reason.as_deref(), Some("FieldValueForbidden"));
 
-        let mut ctx = Context::default();
-        register_all(&mut ctx);
+        let mut ctx = crate::validation::base_context();
         ctx.add_variable_from_value("self", json_to_cel(&json!({"replicas": 5})));
         ctx.add_variable_from_value("oldSelf", json_to_cel(&json!({"replicas": 3})));
         assert_eq!(compiled.program.execute(&ctx).unwrap(), Value::Bool(true));
 
-        let mut ctx2 = Context::default();
-        register_all(&mut ctx2);
+        let mut ctx2 = crate::validation::base_context();
         ctx2.add_variable_from_value("self", json_to_cel(&json!({"replicas": 1})));
         ctx2.add_variable_from_value("oldSelf", json_to_cel(&json!({"replicas": 3})));
         assert_eq!(compiled.program.execute(&ctx2).unwrap(), Value::Bool(false));
@@ -769,8 +767,7 @@ mod end_to_end_tests {
         assert_eq!(compiled.validations.len(), 3);
 
         let cr = compiled.validations[0].as_ref().unwrap();
-        let mut ctx = Context::default();
-        register_all(&mut ctx);
+        let mut ctx = crate::validation::base_context();
         ctx.add_variable_from_value("self", json_to_cel(&json!({"a": 5})));
         assert_eq!(cr.program.execute(&ctx).unwrap(), Value::Bool(true));
 
@@ -810,8 +807,7 @@ mod end_to_end_tests {
         assert_eq!(spec_compiled.validations.len(), 1);
         let spec_cr = spec_compiled.validations.into_iter().next().unwrap().unwrap();
 
-        let mut ctx = Context::default();
-        register_all(&mut ctx);
+        let mut ctx = crate::validation::base_context();
         ctx.add_variable_from_value(
             "self",
             json_to_cel(&json!({"replicas": 3, "template": {"name": "web"}})),
@@ -822,13 +818,11 @@ mod end_to_end_tests {
         assert_eq!(tmpl_compiled.validations.len(), 1);
         let tmpl_cr = tmpl_compiled.validations.into_iter().next().unwrap().unwrap();
 
-        let mut ctx2 = Context::default();
-        register_all(&mut ctx2);
+        let mut ctx2 = crate::validation::base_context();
         ctx2.add_variable_from_value("self", json_to_cel(&json!({"name": "web"})));
         assert_eq!(tmpl_cr.program.execute(&ctx2).unwrap(), Value::Bool(true));
 
-        let mut ctx3 = Context::default();
-        register_all(&mut ctx3);
+        let mut ctx3 = crate::validation::base_context();
         ctx3.add_variable_from_value("self", json_to_cel(&json!({"name": ""})));
         assert_eq!(tmpl_cr.program.execute(&ctx3).unwrap(), Value::Bool(false));
     }

@@ -10,11 +10,13 @@
 //! Mirrors `k8s.io/apiserver/pkg/cel/library/format.go` (Kubernetes 1.32+).
 
 use cel::{
-    Context, ExecutionError, ResolveResult,
+    ExecutionError, ResolveResult,
     extractors::This,
     objects::{Opaque, OptionalValue, Value},
 };
 use std::{fmt, sync::Arc};
+
+use crate::functions::Registrar;
 
 // ---------------------------------------------------------------------------
 // Format kind enum
@@ -76,25 +78,25 @@ impl Opaque for KubeFormat {
 // ---------------------------------------------------------------------------
 
 /// Register all named format extension functions.
-pub(crate) fn register(ctx: &mut Context<'_>) {
+pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
     // Factory functions
-    ctx.add_function("format.dns1123Label", format_dns1123_label);
-    ctx.add_function("format.dns1123Subdomain", format_dns1123_subdomain);
-    ctx.add_function("format.dns1035Label", format_dns1035_label);
-    ctx.add_function("format.dns1035LabelPrefix", format_dns1035_label_prefix);
-    ctx.add_function("format.dns1123LabelPrefix", format_dns1123_label_prefix);
-    ctx.add_function("format.dns1123SubdomainPrefix", format_dns1123_subdomain_prefix);
-    ctx.add_function("format.qualifiedName", format_qualified_name);
-    ctx.add_function("format.labelValue", format_label_value);
-    ctx.add_function("format.uri", format_uri);
-    ctx.add_function("format.uuid", format_uuid);
-    ctx.add_function("format.byte", format_byte);
-    ctx.add_function("format.date", format_date);
-    ctx.add_function("format.datetime", format_datetime);
-    ctx.add_function("format.named", format_named);
+    r.add("format.dns1123Label", format_dns1123_label);
+    r.add("format.dns1123Subdomain", format_dns1123_subdomain);
+    r.add("format.dns1035Label", format_dns1035_label);
+    r.add("format.dns1035LabelPrefix", format_dns1035_label_prefix);
+    r.add("format.dns1123LabelPrefix", format_dns1123_label_prefix);
+    r.add("format.dns1123SubdomainPrefix", format_dns1123_subdomain_prefix);
+    r.add("format.qualifiedName", format_qualified_name);
+    r.add("format.labelValue", format_label_value);
+    r.add("format.uri", format_uri);
+    r.add("format.uuid", format_uuid);
+    r.add("format.byte", format_byte);
+    r.add("format.date", format_date);
+    r.add("format.datetime", format_datetime);
+    r.add("format.named", format_named);
 
     // Validate method
-    ctx.add_function("validate", format_validate);
+    r.add("validate", format_validate);
 }
 
 // ---------------------------------------------------------------------------
@@ -712,11 +714,11 @@ fn validate_timezone(tz: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel::Program;
+    use cel::{Context, Program};
 
     fn eval(expr: &str) -> Value {
         let mut ctx = Context::default();
-        register(&mut ctx);
+        crate::functions::register_parts(&mut ctx, &[register]);
         Program::compile(expr).unwrap().execute(&ctx).unwrap()
     }
 

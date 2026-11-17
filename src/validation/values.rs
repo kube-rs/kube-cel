@@ -834,19 +834,18 @@ mod tests {
 mod cel_evaluation_tests {
     use std::sync::Arc;
 
-    use cel::{Context, Program, Value};
+    use cel::Value;
     use serde_json::json;
 
     use super::{json_to_cel, json_to_cel_with_compiled};
-    use crate::{register_all, validation::compilation::compile_schema};
+    use crate::validation::{compilation::compile_schema, validation_env};
 
     /// Build a context with kube-cel functions, bind `self` from JSON, compile,
     /// and return the evaluation result.
     fn eval_self(json_val: serde_json::Value, expr: &str) -> Value {
-        let mut ctx = Context::default();
-        register_all(&mut ctx);
+        let mut ctx = crate::validation::base_context();
         ctx.add_variable_from_value("self", json_to_cel(&json_val));
-        Program::compile(expr).unwrap().execute(&ctx).unwrap()
+        validation_env().compile(expr).unwrap().execute(&ctx).unwrap()
     }
 
     /// `'key' in self.<map>` must fire on the literal user-supplied key, not an
@@ -863,22 +862,20 @@ mod cel_evaluation_tests {
         let compiled = compile_schema(&schema);
         let self_val = json!({"m": {"a.b/c": "x"}});
 
-        let mut ctx = Context::default();
-        register_all(&mut ctx);
+        let mut ctx = crate::validation::base_context();
         ctx.add_variable_from_value("self", json_to_cel_with_compiled(&self_val, &compiled));
 
         // Rule from the issue: must REJECT (false) when the forbidden key is present.
-        let prog = Program::compile("!('a.b/c' in self.m)").unwrap();
+        let prog = validation_env().compile("!('a.b/c' in self.m)").unwrap();
         assert_eq!(prog.execute(&ctx).unwrap(), Value::Bool(false));
     }
 
     /// Same as `eval_self` but also binds `oldSelf`.
     fn eval_transition(json_self: serde_json::Value, json_old: serde_json::Value, expr: &str) -> Value {
-        let mut ctx = Context::default();
-        register_all(&mut ctx);
+        let mut ctx = crate::validation::base_context();
         ctx.add_variable_from_value("self", json_to_cel(&json_self));
         ctx.add_variable_from_value("oldSelf", json_to_cel(&json_old));
-        Program::compile(expr).unwrap().execute(&ctx).unwrap()
+        validation_env().compile(expr).unwrap().execute(&ctx).unwrap()
     }
 
     #[test]
@@ -933,11 +930,13 @@ mod cel_evaluation_tests {
 
     #[test]
     fn detect_oldself_reference() {
-        let prog1 = Program::compile("self.replicas >= oldSelf.replicas").unwrap();
+        let prog1 = validation_env()
+            .compile("self.replicas >= oldSelf.replicas")
+            .unwrap();
         assert!(prog1.references().has_variable("oldSelf"));
         assert!(prog1.references().has_variable("self"));
 
-        let prog2 = Program::compile("self.replicas >= 0").unwrap();
+        let prog2 = validation_env().compile("self.replicas >= 0").unwrap();
         assert!(!prog2.references().has_variable("oldSelf"));
         assert!(prog2.references().has_variable("self"));
     }

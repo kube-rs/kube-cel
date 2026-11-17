@@ -4,11 +4,13 @@
 //! matching `k8s.io/apiserver/pkg/cel/library/semverlib.go`.
 
 use cel::{
-    Context, ExecutionError, ResolveResult,
+    ExecutionError, ResolveResult,
     extractors::{Arguments, This},
     objects::{Opaque, Value},
 };
 use std::{cmp::Ordering, sync::Arc};
+
+use crate::functions::Registrar;
 
 /// A Kubernetes CEL Semver value wrapping `semver::Version`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,12 +23,12 @@ impl Opaque for KubeSemver {
 }
 
 /// Register all semver extension functions.
-pub(crate) fn register(ctx: &mut Context<'_>) {
-    ctx.add_function("semver", parse_semver);
-    ctx.add_function("isSemver", is_semver);
-    ctx.add_function("major", semver_major);
-    ctx.add_function("minor", semver_minor);
-    ctx.add_function("patch", semver_patch);
+pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
+    r.add("semver", parse_semver);
+    r.add("isSemver", is_semver);
+    r.add("major", semver_major);
+    r.add("minor", semver_minor);
+    r.add("patch", semver_patch);
     // isGreaterThan, isLessThan, compareTo registered via dispatch
 }
 
@@ -167,12 +169,11 @@ pub(crate) fn semver_compare_to(This(this): This<Value>, other: Value) -> Resolv
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel::Program;
+    use cel::{Context, Program};
 
     fn eval(expr: &str) -> Value {
         let mut ctx = Context::default();
-        register(&mut ctx);
-        crate::functions::dispatch::register(&mut ctx);
+        crate::functions::register_parts(&mut ctx, &[register, crate::functions::dispatch::register]);
         Program::compile(expr).unwrap().execute(&ctx).unwrap()
     }
 
@@ -266,8 +267,7 @@ mod tests {
 
     fn eval_err(expr: &str) -> cel::ExecutionError {
         let mut ctx = Context::default();
-        register(&mut ctx);
-        crate::functions::dispatch::register(&mut ctx);
+        crate::functions::register_parts(&mut ctx, &[register, crate::functions::dispatch::register]);
         Program::compile(expr).unwrap().execute(&ctx).unwrap_err()
     }
 

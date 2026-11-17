@@ -4,25 +4,27 @@
 //! matching the behavior of `cel-go/ext/strings.go`.
 
 use cel::{
-    Context, ExecutionError, ResolveResult,
+    ExecutionError, ResolveResult,
     extractors::{Arguments, This},
     objects::Value,
 };
 use std::sync::Arc;
 
+use crate::functions::Registrar;
+
 /// Register all string extension functions.
-pub(crate) fn register(ctx: &mut Context<'_>) {
-    ctx.add_function("charAt", char_at);
+pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
+    r.add("charAt", char_at);
     // indexOf/lastIndexOf are registered in lists.rs with runtime type dispatch
     // to avoid name collisions between string and list versions.
-    ctx.add_function("lowerAscii", lower_ascii);
-    ctx.add_function("upperAscii", upper_ascii);
-    ctx.add_function("replace", string_replace);
-    ctx.add_function("split", string_split);
-    ctx.add_function("substring", substring);
-    ctx.add_function("trim", trim);
-    ctx.add_function("join", join);
-    ctx.add_function("strings.quote", strings_quote);
+    r.add("lowerAscii", lower_ascii);
+    r.add("upperAscii", upper_ascii);
+    r.add("replace", string_replace);
+    r.add("split", string_split);
+    r.add("substring", substring);
+    r.add("trim", trim);
+    r.add("join", join);
+    r.add("strings.quote", strings_quote);
 }
 
 /// `<string>.charAt(<int>) -> <string>`
@@ -292,13 +294,11 @@ fn strings_quote(s: Arc<String>) -> ResolveResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel::Program;
+    use cel::{Context, Program};
 
     fn eval(expr: &str) -> Value {
         let mut ctx = Context::default();
-        register(&mut ctx);
-        // indexOf/lastIndexOf registered via dispatch
-        crate::functions::dispatch::register(&mut ctx);
+        crate::functions::register_parts(&mut ctx, &[register, crate::functions::dispatch::register]);
         Program::compile(expr).unwrap().execute(&ctx).unwrap()
     }
 
@@ -389,8 +389,7 @@ mod tests {
 
     fn eval_err(expr: &str) -> cel::ExecutionError {
         let mut ctx = Context::default();
-        register(&mut ctx);
-        crate::functions::dispatch::register(&mut ctx);
+        crate::functions::register_parts(&mut ctx, &[register, crate::functions::dispatch::register]);
         Program::compile(expr).unwrap().execute(&ctx).unwrap_err()
     }
 

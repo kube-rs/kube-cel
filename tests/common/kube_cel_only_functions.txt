@@ -1,0 +1,30 @@
+# Functions kube-cel implements (every feature on) that the apiserver does not
+# declare, so the validation name check refuses a call to any of them. The
+# `kube_cel_only_functions_are_listed` unit test keeps this equal to kube-cel's
+# functions minus src/validation/apiserver_functions.txt; tests/apiserver_parity.rs
+# checks that the apiserver refuses each as an undeclared reference.
+base64.decode
+base64.encode
+isCIDRv4
+isCIDRv6
+isIPv4
+isIPv6
+jsonpatch.escapeKey
+math.abs
+math.bitAnd
+math.bitNot
+math.bitOr
+math.bitShiftLeft
+math.bitShiftRight
+math.bitXor
+math.ceil
+math.floor
+math.greatest
+math.isFinite
+math.isInf
+math.isNaN
+math.least
+math.round
+math.sign
+math.sqrt
+math.trunc

@@ -3,10 +3,10 @@
 //!
 //! Every [`ValidationError`] carries a machine-readable [`ErrorKind`] so callers
 //! can branch on *why* a rule failed — the object was invalid, the rule hit a
-//! runtime error, or the rule used a CEL feature this build cannot evaluate. For
-//! the runtime cases the underlying `cel` execution error is preserved and
-//! reachable via `source()`, so you can walk the cause chain like any other
-//! `std::error::Error`.
+//! runtime error, or the rule does not compile in the Kubernetes CEL
+//! environment. For the runtime cases the underlying `cel` execution error is
+//! preserved and reachable via `source()`, so you can walk the cause chain like
+//! any other `std::error::Error`.
 //!
 //! Run with: `cargo run --example error_chain --features validation`
 
@@ -25,16 +25,17 @@ fn main() {
             // (2) the rule references a field that isn't there -> EvaluationError
             //     (compiles fine, errors at runtime; the cel error is the cause)
             {"rule": "self.maxSurge > 0", "message": "maxSurge must be positive"},
-            // (3) the rule uses a CEL macro cel 0.13 can't evaluate -> UnsupportedReference
-            {"rule": "self.zones.sortBy(z, z) == self.zones", "message": "zones must be sorted"}
+            // (3) the rule calls a function outside the apiserver's CEL environment
+            //     (the `math` library) -> CompilationFailure (the apiserver would
+            //     reject the CRD at registration)
+            {"rule": "math.abs(self.replicas) <= 10", "message": "replicas out of range"}
         ],
         "properties": {
-            "replicas": {"type": "integer"},
-            "zones": {"type": "array", "items": {"type": "string"}}
+            "replicas": {"type": "integer"}
         }
     });
 
-    let object = json!({"replicas": 0, "zones": ["b", "a"]});
+    let object = json!({"replicas": 0});
 
     let errors = Validator::new()
         .validate(&schema, &object, None)
@@ -55,14 +56,18 @@ fn main() {
             ErrorKind::EvaluationError => {
                 println!("  -> the rule failed at runtime; likely a malformed object");
             }
+            ErrorKind::CompilationFailure => {
+                println!("  -> the rule does not compile; fix the schema, not the object");
+            }
             ErrorKind::UnsupportedReference => {
-                println!("  -> coverage gap: this kube-cel build can't evaluate the rule");
+                println!("  -> the rule references something kube-cel can't evaluate");
             }
             _ => println!("  -> other ({:?})", err.kind),
         }
 
         // Walk the `source()` cause chain. Runtime failures carry the owned `cel`
-        // execution error as their cause; pure ValidationFailure has none.
+        // execution error as their cause; ValidationFailure and
+        // CompilationFailure have none (the compile error is in the message).
         let mut cause = err.source();
         if cause.is_none() {
             println!("  (no underlying cause)");

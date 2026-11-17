@@ -4,11 +4,13 @@
 //! (e.g., "1.5Gi", "500m", "100n"), matching `k8s.io/apiserver/pkg/cel/library/quantity.go`.
 
 use cel::{
-    Context, ExecutionError, ResolveResult,
+    ExecutionError, ResolveResult,
     extractors::{Arguments, This},
     objects::{Opaque, Value},
 };
 use std::{cmp::Ordering, fmt, sync::Arc};
+
+use crate::functions::Registrar;
 
 // ---------------------------------------------------------------------------
 // Internal representation
@@ -301,15 +303,15 @@ fn parse_suffix(suffix: &str) -> Result<(i32, Option<i128>), String> {
 // ---------------------------------------------------------------------------
 
 /// Register all quantity extension functions.
-pub(crate) fn register(ctx: &mut Context<'_>) {
-    ctx.add_function("quantity", cel_quantity);
-    ctx.add_function("isQuantity", cel_is_quantity);
-    ctx.add_function("isInteger", cel_is_integer);
-    ctx.add_function("asInteger", cel_as_integer);
-    ctx.add_function("asApproximateFloat", cel_as_approximate_float);
-    ctx.add_function("sign", cel_sign);
-    ctx.add_function("add", cel_add);
-    ctx.add_function("sub", cel_sub);
+pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
+    r.add("quantity", cel_quantity);
+    r.add("isQuantity", cel_is_quantity);
+    r.add("isInteger", cel_is_integer);
+    r.add("asInteger", cel_as_integer);
+    r.add("asApproximateFloat", cel_as_approximate_float);
+    r.add("sign", cel_sign);
+    r.add("add", cel_add);
+    r.add("sub", cel_sub);
     // isGreaterThan, isLessThan, compareTo registered via dispatch
     // (shared with semver_funcs)
 }
@@ -430,12 +432,11 @@ fn quantity_or_int(val: &Value, func: &str) -> Result<KubeQuantity, ExecutionErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel::Program;
+    use cel::{Context, Program};
 
     fn eval(expr: &str) -> Value {
         let mut ctx = Context::default();
-        register(&mut ctx);
-        crate::functions::dispatch::register(&mut ctx);
+        crate::functions::register_parts(&mut ctx, &[register, crate::functions::dispatch::register]);
         Program::compile(expr).unwrap().execute(&ctx).unwrap()
     }
 
@@ -598,8 +599,7 @@ mod tests {
 
     fn eval_err(expr: &str) -> cel::ExecutionError {
         let mut ctx = Context::default();
-        register(&mut ctx);
-        crate::functions::dispatch::register(&mut ctx);
+        crate::functions::register_parts(&mut ctx, &[register, crate::functions::dispatch::register]);
         Program::compile(expr).unwrap().execute(&ctx).unwrap_err()
     }
 

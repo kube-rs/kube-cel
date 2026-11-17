@@ -1,5 +1,105 @@
 # Changelog
 
+## [0.9.0] - Unreleased
+
+Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
+
+### Breaking
+- **`cel` 0.14 → 0.16.** `cel` is a public dependency (`pub use cel`), so this
+  is breaking on its own. `cel::Context` gained a second lifetime
+  (`Context<'p, 'v>`); `KubeCelExt` is implemented for `Context<'_, '_>`.
+- **`string(<IP>)` / `string(<CIDR>)` need kube-cel's `Env`.** `cel` 0.16
+  refuses a context function whose name the `Env` already declares, and the
+  standard library declares `string`, so kube-cel can no longer override
+  `string` on a context (in 0.8 it reimplemented the standard conversions to do
+  so). The IP and CIDR conversions are now `string` overloads on the `Env`
+  built by the new `new_env()`. On a plain `Context::default().with_all()`,
+  `string(ip(...))` fails with "no such overload".
+  - Migration: build the env and context with
+    `let env = Arc::new(kube_cel::new_env()); let ctx = kube_cel::new_context(Arc::clone(&env))?;`
+    and compile with `env.compile(..)`.
+- **The member form `<IP>.string()` / `<CIDR>.string()` (and `42.string()`,
+  `'a'.string()`, …) is now an error**, matching the apiserver, which rejects
+  it at compile time. Use the global form `string(x)`.
+- **`register_all` / `with_all` panic instead of silently registering
+  nothing.** On a child scope (`Context::new_inner_scope`) `cel` reports success
+  and registers nothing; on a context whose `Env` already declares one of
+  kube-cel's names, `cel` 0.16 refuses the name. Both used to pass silently.
+  Neither happens on `Context::default()` or on `new_env()`.
+- **The validation engine's CEL environment now mirrors the apiserver's base
+  environment** (`k8s.io/apiserver` `environment.MustBaseEnvSet(..)`), separate
+  from the general-purpose `new_env()`. Verdicts change:
+  - A rule, VAP expression or `messageExpression` that calls a function the
+    apiserver does not declare (`cel.bind`, the `math` library, `base64.*`,
+    `jsonpatch.escapeKey`, kube-cel's `isIPv4` / `isIPv6` / `isCIDRv4` /
+    `isCIDRv6`) or a global `min(..)` / `max(..)` (the apiserver only has
+    `<list>.min()` / `<list>.max()`) now fails to compile
+    (`ErrorKind::CompilationFailure`, `CompilationError::Parse` /
+    `MessageExpressionParse`, `VapError`). The whole AST is checked, so a call
+    evaluation never reaches (`self.s == '' || isIPv4(self.s)`, the body of a
+    comprehension over an empty list, the `messageExpression` of a rule that
+    holds) is refused too. The apiserver rejects all of these at registration;
+    all but `cel.bind` used to pass client-side: a **fail-open** divergence,
+    now closed. (`cel.bind` used to fail closed as `UnsupportedReference`.) The
+    names accepted are the functions the `k8s.io/apiserver` v0.36.1 base
+    environment declares (`src/validation/apiserver_functions.txt`, checked
+    against a live apiserver by `just parity`). One that kube-cel does not
+    implement (`optional.unwrap`, `<list>.unwrapOpt()`, the authorizer library
+    in a VAP) compiles as before, and fails closed only when evaluation reaches
+    it.
+  - String `reverse()` (`'abc'.reverse()`) is rejected (`EvaluationError`), as
+    the apiserver rejects it at registration.
+  - `sortBy` and the two-variable comprehensions (`all(i, v, …)`,
+    `exists(i, v, …)`, `transformList`, `transformMap`, …) now evaluate instead
+    of failing closed with `UnsupportedReference`. `slice`, `flatten`,
+    `distinct`, `reverse`, `sort` and `lists.range` already evaluated; they now
+    come from `cel`'s upstream `lists` extension instead of kube-cel's own
+    implementations, so, for one, `sort()` now fails on a list mixing `int`
+    and `double` ("list elements must have the same type"). The upstream
+    `lists` extension needs the `lists` feature: without it, a rule reaching a
+    list function is rejected (`UnsupportedReference`), and one using `sortBy`
+    (a macro) does not compile.
+  - `ErrorKind::UnsupportedReference` now covers a reference evaluation cannot
+    resolve (an undeclared identifier, a function the apiserver declares but
+    kube-cel does not implement or has behind a disabled feature, or a function
+    called in a form none of its overloads takes, such as `ip(..).string()`); a
+    function the apiserver does not declare is a `CompilationFailure`.
+  - Migration: none for rules the apiserver accepts. `math`, `base64.*`,
+    `jsonpatch.escapeKey`, the `isIPv4`-style helpers and global `min` / `max`
+    remain available through `new_env()` / `KubeCelExt` for general-purpose
+    evaluation.
+
+### Added
+- `new_env() -> cel::Env`: the `cel` standard library plus the overloads
+  kube-cel declares on the environment (`string(<IP>)`, `string(<CIDR>)`).
+- `new_context(env) -> Result<cel::Context, RegisterError>`: a root context on
+  `env` with every compiled-in function registered.
+- `KubeCelExt::try_register_all` / `try_with_all` and `RegisterError`
+  (`ChildScope`, `Rejected { function, source }`): the fallible forms of
+  `register_all` / `with_all`.
+
+### Changed
+- The validation engine (`Validator`, `compile_schema`, `VapEvaluator`, static
+  analysis) compiles with `Env::compile` on a shared, private `Env` instead of
+  `Program::compile`, so it sees the environment's macros and overloads.
+- The `UnsupportedReference` message no longer blames an unsupported CEL macro
+  or function; it names the reference evaluation could not resolve.
+
+### Fixed
+- README "apiserver divergence" table: the apiserver does **not** evaluate
+  `cel.bind` (its base environment has no `ext.Bindings`); it rejects the CRD at
+  registration. The `sortBy` and two-variable comprehension rows are gone (both
+  now evaluate), and rows for `math.*`, the `isIPv4`-style helpers, `base64.*` /
+  `jsonpatch.escapeKey`, global `min` / `max`, string `reverse()` and
+  `<IP>.string()` are added (all fail closed). The authz library row now covers
+  every function the apiserver declares that kube-cel does not implement
+  (`optional.unwrap`, `<list>.unwrapOpt()`, ..). A last row documents the one
+  known fail-open class: `cel` has no type checker yet
+  ([cel-rust#350](https://github.com/cel-rust/cel-rust/issues/350)), so a type,
+  arity or call-shape error the apiserver rejects at registration passes when
+  evaluation does not reach it. The claim that a passing result is always at
+  least as strict as the apiserver is narrowed accordingly.
+
 ## [0.8.0] - 2026-06-19
 
 Apiserver fidelity for schema `default`s

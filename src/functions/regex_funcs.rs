@@ -4,17 +4,19 @@
 //! matching `k8s.io/apiserver/pkg/cel/library/regex.go`.
 
 use cel::{
-    Context, ExecutionError, ResolveResult,
+    ExecutionError, ResolveResult,
     extractors::{Arguments, This},
     objects::Value,
 };
 use regex::Regex;
 use std::sync::Arc;
 
+use crate::functions::Registrar;
+
 /// Register all regex extension functions.
-pub(crate) fn register(ctx: &mut Context<'_>) {
-    ctx.add_function("find", find);
-    ctx.add_function("findAll", find_all);
+pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
+    r.add("find", find);
+    r.add("findAll", find_all);
 }
 
 /// `<string>.find(<string>) -> <string>`
@@ -64,11 +66,11 @@ fn find_all(This(this): This<Arc<String>>, Arguments(args): Arguments) -> Resolv
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel::Program;
+    use cel::{Context, Program};
 
     fn eval(expr: &str) -> Value {
         let mut ctx = Context::default();
-        register(&mut ctx);
+        crate::functions::register_parts(&mut ctx, &[register]);
         Program::compile(expr).unwrap().execute(&ctx).unwrap()
     }
 
@@ -99,7 +101,7 @@ mod tests {
 
     fn eval_err(expr: &str) -> cel::ExecutionError {
         let mut ctx = Context::default();
-        register(&mut ctx);
+        crate::functions::register_parts(&mut ctx, &[register]);
         Program::compile(expr).unwrap().execute(&ctx).unwrap_err()
     }
 

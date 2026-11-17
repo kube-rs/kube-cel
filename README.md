@@ -21,23 +21,31 @@ kube-cel = "0.8"
 ## Usage
 
 ```rust
-use kube_cel::KubeCelExt;
-use kube_cel::cel::{Context, Program};
+use std::sync::Arc;
 
-let ctx = Context::default().with_all();
+// kube-cel's Env (the cel stdlib plus the overloads kube-cel declares on it)
+// and a context on it with every compiled-in function registered.
+let env = Arc::new(kube_cel::new_env());
+let ctx = kube_cel::new_context(Arc::clone(&env)).unwrap();
 
 // String functions
-let result = Program::compile("'hello'.upperAscii()")
+let result = env.compile("'hello'.upperAscii()")
     .unwrap().execute(&ctx).unwrap();
 
 // Quantity comparison
-let result = Program::compile("quantity('1Gi').isGreaterThan(quantity('500Mi'))")
+let result = env.compile("quantity('1Gi').isGreaterThan(quantity('500Mi'))")
     .unwrap().execute(&ctx).unwrap();
 
-// Semver
-let result = Program::compile("semver('1.2.3').isLessThan(semver('2.0.0'))")
+// IP to string (an overload on kube-cel's Env)
+let result = env.compile("string(ip('192.168.0.1'))")
     .unwrap().execute(&ctx).unwrap();
 ```
+
+To add the functions to a context you already have, use the `KubeCelExt`
+extension trait: `Context::default().with_all()` (or `try_with_all()` /
+`try_register_all()` to get a `RegisterError` instead of a panic, e.g. on a child
+scope). That registers every function, but not the overloads that live on the
+`Env` (`string(<IP>)`, `string(<CIDR>)`), which need `new_env()`.
 
 ## CRD Validation Pipeline
 
@@ -230,7 +238,7 @@ let warnings = analyze_rule(
 `url`, `isURL`, `getScheme`, `getHost`, `getHostname`, `getPort`, `getEscapedPath`, `getQuery`
 
 ### IP / CIDR
-`ip`, `isIP`, `isIPv4`, `isIPv6`, `ip.isCanonical`, `family`, `isLoopback`, `isUnspecified`, `isLinkLocalMulticast`, `isLinkLocalUnicast`, `isGlobalUnicast`, `<IP>.string()`, `cidr`, `isCIDR`, `isCIDRv4`, `isCIDRv6`, `containsIP`, `containsCIDR`, `prefixLength`, `masked`, `<CIDR>.ip()`, `<CIDR>.string()`
+`ip`, `isIP`, `isIPv4`, `isIPv6`, `ip.isCanonical`, `family`, `isLoopback`, `isUnspecified`, `isLinkLocalMulticast`, `isLinkLocalUnicast`, `isGlobalUnicast`, `string(<IP>)`, `cidr`, `isCIDR`, `isCIDRv4`, `isCIDRv6`, `containsIP`, `containsCIDR`, `prefixLength`, `masked`, `<CIDR>.ip()`, `string(<CIDR>)` (the `string` overloads need `new_env()`; the member form `<IP>.string()` is an error, as in the apiserver)
 
 ### Semver
 `semver`, `isSemver`, `major`, `minor`, `patch`, `isGreaterThan`, `isLessThan`, `compareTo`
@@ -294,7 +302,7 @@ kube-cel = { version = "0.8", default-features = false, features = ["full"] }
 | Feature | Dependencies | Description |
 |---------|-------------|-------------|
 | `strings` | - | String extension functions |
-| `lists` | - | List extension functions |
+| `lists` | - | List extension functions (with `validation`, also `cel`'s upstream `lists` extension in the validation environment) |
 | `sets` | - | Set operations |
 | `regex_funcs` | `regex` | Regex find/findAll |
 | `urls` | `url` | URL parsing and accessors |
@@ -322,7 +330,8 @@ breaking changes (the Cargo convention for `0.x`).
 Two stability tiers, by surface:
 
 - **Tier 1 — registration (committed).** The `KubeCelExt` trait
-  (`with_all`/`register_all`), the `pub use cel` re-export, and the set of
+  (`with_all`/`register_all` and their `try_` forms), the `new_env`/`new_context`
+  constructors, the `pub use cel` re-export, and the set of
   registered Kubernetes CEL functions. This is the crate's core identity and
   changes only deliberately.
 - **Tier 2 — validation engine (evolving, `validation` feature).** `Validator`,
@@ -334,27 +343,59 @@ Two stability tiers, by surface:
 
 The validation pipeline aims to return the same verdict the Kubernetes API
 server would, client-side. Where it cannot today, it diverges **fail-closed** —
-it reports an error rather than silently accepting — so a passing result is
-always at least as strict as the API server, never less. These divergences are
+it reports an error rather than silently accepting — so a passing result is as
+strict as the API server, with two exceptions (the last two rows below). `cel`
+has no type checker yet
+([cel-rust#350](https://github.com/cel-rust/cel-rust/issues/350)), so a rule the
+apiserver rejects at registration for a type, arity or call-shape error can
+still pass client-side. And a rule on a schema node the object does not reach is
+not checked at all, a gap to be fixed before 0.9.0
+([#14](https://github.com/kube-rs/kube-cel/issues/14)). These divergences are
 pinned by `tests/apiserver_divergence.rs`.
 
 | Feature | API server | kube-cel | Direction |
 |---------|-----------|----------|-----------|
-| `<list>.sortBy(var, expr)` | evaluates | `UnsupportedReference` | fail-closed |
-| `cel.bind(var, init, expr)` | evaluates | `UnsupportedReference` | fail-closed |
-| Two-arg comprehensions (`all(i, v, …)`, `transformList`, `transformMap`; K8s 1.33+) | evaluates | `UnsupportedReference` | fail-closed |
+| `cel.bind(var, init, expr)` | rejects the CRD at registration (no `ext.Bindings` in the base environment) | `CompilationFailure` | fail-closed |
+| `math.*` (cel-go `ext.Math`) | rejects the CRD at registration (not in the base environment) | `CompilationFailure` | fail-closed |
+| `isIPv4`, `isIPv6`, `isCIDRv4`, `isCIDRv6` (kube-cel conveniences) | rejects the CRD at registration (not in the base environment) | `CompilationFailure` | fail-closed |
+| `base64.*` (cel-go `ext.Encoders`), `jsonpatch.escapeKey` | rejects the CRD at registration (not in the base environment; `jsonpatch` is a MutatingAdmissionPolicy library) | `CompilationFailure` | fail-closed |
+| Global `min(..)` / `max(..)` | rejects the CRD at registration (only `<list>.min()` / `<list>.max()`) | `CompilationFailure` | fail-closed |
+| String `reverse()` (`'abc'.reverse()`) | rejects the CRD at registration (no matching overload) | `EvaluationError` | fail-closed |
+| `<IP>.string()`, `<CIDR>.string()` | rejects the CRD at registration (no matching overload; only `string(<IP>)`) | `UnsupportedReference` | fail-closed |
 | Schema nesting deeper than 64 levels | enforces (rejects over-limit schemas at registration) | `SchemaTooDeep` error | fail-closed |
-| Rule whose `messageExpression` does not compile | rejects the CRD at registration | `CompilationFailure` (the rule is rejected, not just its message) | fail-closed |
-| Authz library (`authorizer.*`) | evaluates against the cluster | not available | out of scope |
+| Rule whose `messageExpression` does not compile (a syntax error, or a call refused above) | rejects the CRD at registration | `CompilationFailure` (the rule is rejected, not just its message) | fail-closed |
+| Functions the apiserver declares that kube-cel does not implement: `optional.unwrap(..)`, `<list>.unwrapOpt()`, the authz library (`authorizer.*` in a VAP), or a function whose kube-cel feature is disabled | evaluates (the authz library against the cluster) | compiles, and passes where evaluation does not reach the call; `UnsupportedReference` where it does | fail-closed (the authz library is out of scope) |
+| A schema node the object does not reach (an omitted property, the `items` of an empty list, nesting past 64 levels): a rule there that does not compile, or a `messageExpression` that does not | rejects the CRD at registration | not compiled or checked, so the object passes | **fail-open** (to be fixed before 0.9.0) |
+| No type checker: type errors (`[1, 2] == [1.0, 2.0]`, `[1, 2.0].isSorted()`), arity errors (`'a'.lowerAscii(42)`), call-shape errors (`family(ip(..))`, and the `reverse()` / `.string()` rows above), a non-string `messageExpression`, and an undeclared identifier (such as `authorizer` in a CRD rule), where evaluation does not reach the error | rejects the CRD at registration (type-checks every expression) | passes; `cel` has no type checker yet ([cel-rust#350](https://github.com/cel-rust/cel-rust/issues/350)) | **fail-open** (the one known exception) |
 
-The unsupported CEL macros above **parse** successfully but error at evaluation
-(`cel` 0.13 has no such reference), so they surface as the dedicated
-`ErrorKind::UnsupportedReference` — distinct from `EvaluationError` (reserved for
-genuine runtime errors in a supported rule), so a consumer can tell a kube-cel
-coverage gap apart from an actual rule failure. Single-argument comprehensions
-(`list.all(x, …)`, `map(x, …)`, etc.) are fully supported and do not diverge.
-The macro gaps lift once the `cel` crate gains compiler-macro support; the authz
-library requires a live API server and is out of scope for a client library.
+The validation pipeline compiles and runs rules in its own `cel` environment,
+modelled on the apiserver's base CEL environment (`k8s.io/apiserver`
+`environment.MustBaseEnvSet(..).NewExpressionsEnv()`): it enables the
+two-variable comprehensions (`all(i, v, …)`, `transformList`, `transformMap`, …)
+and, with the `lists` feature, `cel`'s `lists` extension (`sortBy`, `slice`,
+`flatten`, `distinct`, `reverse`, `sort`, `lists.range`), which evaluate as in
+the apiserver, and it leaves out what the base environment lacks: `cel.bind`, the
+`math` library, `base64.*`, `jsonpatch.escapeKey` and kube-cel's `isIPv4`-style
+helpers. (The kube-cel functions among them stay available through `new_env()` /
+`KubeCelExt` for general-purpose use; `cel.bind` needs `cel`'s `bindings`
+extension added to the `Env`.) `cel` only parses, so kube-cel walks the AST of
+every rule and `messageExpression` at compile time and refuses a call to a
+function the apiserver does not declare as `ErrorKind::CompilationFailure`, even
+in a branch evaluation never reaches (`self.s == '' || isIPv4(self.s)`), as the
+apiserver does at registration. The declared names
+(`src/validation/apiserver_functions.txt`, from the `k8s.io/apiserver` v0.36.1
+base environment) are checked against a live apiserver by `just parity`. CRD
+rules, their `messageExpression`s and VAP expressions share them, since the
+apiserver declares the same functions for all three. A function the apiserver declares but
+kube-cel does not implement (`optional.unwrap`, `<list>.unwrapOpt()`, the authz
+library) therefore compiles, and fails only when evaluation reaches it. A
+reference evaluation cannot resolve (such a function, an undeclared identifier,
+or a function called in a form none of its overloads takes) surfaces as
+`ErrorKind::UnsupportedReference`, distinct from
+`EvaluationError` (reserved for genuine runtime errors in a supported rule), so a
+consumer can tell a coverage gap apart from an actual rule failure. Either way the
+object is rejected. The authz library requires a live API server and is out of
+scope for a client library.
 
 ## Related
 
