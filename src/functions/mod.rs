@@ -24,14 +24,8 @@
 
 #[cfg(feature = "quantity")] mod quantity;
 
-#[cfg(feature = "jsonpatch")] mod jsonpatch;
-
 #[cfg(any(feature = "urls", feature = "named_format"))] mod go_url;
 #[cfg(feature = "named_format")] mod named_format;
-
-#[cfg(feature = "math")] mod math;
-
-#[cfg(feature = "encoders")] mod encoders;
 
 mod dispatch;
 mod value_ops;
@@ -58,37 +52,18 @@ pub(crate) enum Profile {
     /// Every compiled-in function: the public [`KubeCelExt`](crate::KubeCelExt)
     /// and [`new_context`](crate::new_context) surface.
     General,
-    /// The validation engine's set, mirroring the apiserver's base CEL
-    /// environment: see [`VALIDATION_EXCLUDED`] and [`register_profile`].
-    /// The validation engine also refuses, at compile time, a call to any
-    /// function this set leaves out.
+    /// The validation engine's set, on the validation `Env`, which has
+    /// `cel`'s upstream `lists` extension: see [`VALIDATION_EXCLUDED`].
     #[cfg_attr(not(feature = "validation"), allow(dead_code))]
     Validation,
 }
 
-/// Names the [`Profile::Validation`] set leaves out, on top of the whole
-/// `math`, `jsonpatch` and `encoders` (`base64.*`) libraries.
-///
-/// - `slice`, `flatten`, `distinct`, `reverse`, `sort`, `lists.range`: the
-///   validation `Env` enables `cel`'s upstream `lists` extension, which declares
-///   these as overloads (so `cel` would refuse kube-cel's versions anyway). Its
-///   implementations are used instead; string `reverse` goes away with
-///   kube-cel's `reverse`, as in the apiserver.
-/// - `isIPv4`, `isIPv6`, `isCIDRv4`, `isCIDRv6`: kube-cel conveniences the
-///   apiserver does not have. A rule using one must not pass client-side when
-///   the apiserver rejects it.
-const VALIDATION_EXCLUDED: &[&str] = &[
-    "slice",
-    "flatten",
-    "distinct",
-    "reverse",
-    "sort",
-    "lists.range",
-    "isIPv4",
-    "isIPv6",
-    "isCIDRv4",
-    "isCIDRv6",
-];
+/// Names the [`Profile::Validation`] set leaves out: the validation `Env`
+/// enables `cel`'s upstream `lists` extension, which declares these as
+/// overloads (so `cel` would refuse kube-cel's versions anyway). Its
+/// implementations are used instead; string `reverse` goes away with
+/// kube-cel's `reverse`, as in the apiserver.
+const VALIDATION_EXCLUDED: &[&str] = &["slice", "flatten", "distinct", "reverse", "sort", "lists.range"];
 
 impl Profile {
     fn excludes(self, name: &str) -> bool {
@@ -159,9 +134,7 @@ pub(crate) fn register_all(ctx: &mut cel::Context<'_, '_>) -> Result<(), crate::
 /// Registers the `profile`'s function set into `ctx` and returns the names it
 /// registered.
 ///
-/// [`Profile::Validation`] leaves out the `math`, `jsonpatch` and `encoders`
-/// libraries and the names in [`VALIDATION_EXCLUDED`], none of which the
-/// apiserver's base environment has.
+/// [`Profile::Validation`] leaves out the names in [`VALIDATION_EXCLUDED`].
 pub(crate) fn register_profile(
     ctx: &mut cel::Context<'_, '_>,
     profile: Profile,
@@ -195,23 +168,8 @@ pub(crate) fn register_profile(
     #[cfg(feature = "quantity")]
     quantity::register(&mut r);
 
-    #[cfg(feature = "jsonpatch")]
-    if profile == Profile::General {
-        jsonpatch::register(&mut r);
-    }
-
     #[cfg(feature = "named_format")]
     named_format::register(&mut r);
-
-    #[cfg(feature = "math")]
-    if profile == Profile::General {
-        math::register(&mut r);
-    }
-
-    #[cfg(feature = "encoders")]
-    if profile == Profile::General {
-        encoders::register(&mut r);
-    }
 
     // Dispatch: registers functions with name collisions (indexOf, reverse,
     // min/max, ip, isGreaterThan, etc.). Order-independent since individual

@@ -241,7 +241,7 @@ let warnings = analyze_rule(
 `url`, `isURL`, `getScheme`, `getHost`, `getHostname`, `getPort`, `getEscapedPath`, `getQuery`
 
 ### IP / CIDR
-`ip`, `isIP`, `isIPv4`, `isIPv6`, `ip.isCanonical`, `family`, `isLoopback`, `isUnspecified`, `isLinkLocalMulticast`, `isLinkLocalUnicast`, `isGlobalUnicast`, `string(<IP>)`, `cidr`, `isCIDR`, `isCIDRv4`, `isCIDRv6`, `containsIP`, `containsCIDR`, `prefixLength`, `masked`, `<CIDR>.ip()`, `string(<CIDR>)` (the `string` overloads need `new_env()`; the member form `<IP>.string()` is an error, as in the apiserver)
+`ip`, `isIP`, `ip.isCanonical`, `family`, `isLoopback`, `isUnspecified`, `isLinkLocalMulticast`, `isLinkLocalUnicast`, `isGlobalUnicast`, `string(<IP>)`, `cidr`, `isCIDR`, `containsIP`, `containsCIDR`, `prefixLength`, `masked`, `<CIDR>.ip()`, `string(<CIDR>)` (the `string` overloads need `new_env()`; the member form `<IP>.string()` is an error, as in the apiserver)
 
 ### Semver
 `semver`, `isSemver`, `major`, `minor`, `patch`, `isGreaterThan`, `isLessThan`, `compareTo`
@@ -268,20 +268,20 @@ let result = Program::compile("!format.named('uuid').value().validate('550e8400-
 // Value::Bool(true)
 ```
 
-### Math
-`math.ceil`, `math.floor`, `math.round`, `math.trunc`, `math.abs`, `math.sign`, `math.sqrt`, `math.isInf`, `math.isNaN`, `math.isFinite`, `math.bitAnd`, `math.bitOr`, `math.bitXor`, `math.bitNot`, `math.bitShiftLeft`, `math.bitShiftRight`, `math.greatest`, `math.least`
-
-### Encoders
-`base64.decode`, `base64.encode`
-
-### JSONPatch
-`jsonpatch.escapeKey`
+### Not included
+kube-cel ships only the functions the Kubernetes apiserver declares. The
+`math.*` and `base64.*` functions of cel-go's `ext.Math` and `ext.Encoders`
+are `cel`'s `math` and `encoders` extensions: add them to an `Env` of your own
+(they never reach the validation pipeline, as the apiserver has neither).
 
 ```rust
-// RFC 6901: ~ → ~0, / → ~1
-let result = Program::compile("jsonpatch.escapeKey('k8s.io/my~label')")
-    .unwrap().execute(&ctx).unwrap();
-// Value::String("k8s.io~1my~0label")
+let mut env = kube_cel::new_env();
+env.add_extension(kube_cel::cel::extensions::math)?;
+env.add_extension(kube_cel::cel::extensions::encoders)?;
+let env = Arc::new(env);
+let ctx = kube_cel::new_context(Arc::clone(&env))?;
+// math.greatest / math.least are macros: compile with env.compile(..).
+let result = env.compile("math.greatest(1, 3, 2)")?.execute(&ctx)?;
 ```
 
 ## Feature Flags
@@ -296,7 +296,7 @@ kube-cel = { version = "0.8", default-features = false, features = ["strings", "
 # already-complete default set, so you still get everything.
 kube-cel = { version = "0.8", features = ["strings", "lists"] }
 
-# Restore the whole surface (all 13 function groups + the validation engine)
+# Restore the whole surface (all 10 function groups + the validation engine)
 # in one flag, e.g. after narrowing for a downstream build profile.
 kube-cel = { version = "0.8", default-features = false, features = ["full"] }
 ```
@@ -313,11 +313,8 @@ kube-cel = { version = "0.8", default-features = false, features = ["full"] }
 | `semver_funcs` | `semver` | Semantic versioning |
 | `format` | - | String formatting |
 | `quantity` | - | Kubernetes resource quantities |
-| `jsonpatch` | - | JSONPatch key escaping (RFC 6901) |
 | `named_format` | - | Named format validation (`format.dns1123Label()`, etc.) |
-| `math` | - | Math functions (`math.ceil`, `math.abs`, bitwise, etc.) |
-| `encoders` | `base64` | Base64 encode/decode |
-| `validation` | `serde_json`, `serde`, `chrono` | CRD validation pipeline, VAP evaluation, static analysis, schema defaults |
+| `validation` | `serde_json`, `serde`, `chrono`, `base64` | CRD validation pipeline, VAP evaluation, static analysis, schema defaults |
 | `full` | *(all of the above)* | Umbrella: every extension-function group **plus** `validation`. Not in `default` (which is functions-only) |
 
 ## Versioning and stability
@@ -362,7 +359,7 @@ divergences are pinned by
 |---------|-----------|----------|-----------|
 | `cel.bind(var, init, expr)` | rejects the CRD at registration (no `ext.Bindings` in the base environment) | `CompilationFailure` | fail-closed |
 | `math.*` (cel-go `ext.Math`) | rejects the CRD at registration (not in the base environment) | `CompilationFailure` | fail-closed |
-| `isIPv4`, `isIPv6`, `isCIDRv4`, `isCIDRv6` (kube-cel conveniences) | rejects the CRD at registration (not in the base environment) | `CompilationFailure` | fail-closed |
+| `isIPv4`, `isIPv6`, `isCIDRv4`, `isCIDRv6` (kube-cel functions before 0.9) | rejects the CRD at registration (not in the base environment) | `CompilationFailure` | fail-closed |
 | `base64.*` (cel-go `ext.Encoders`), `jsonpatch.escapeKey` | rejects the CRD at registration (not in the base environment; `jsonpatch` is a MutatingAdmissionPolicy library) | `CompilationFailure` | fail-closed |
 | Global `min(..)` / `max(..)` | rejects the CRD at registration (only `<list>.min()` / `<list>.max()`) | `CompilationFailure` | fail-closed |
 | String `reverse()` (`'abc'.reverse()`) | rejects the CRD at registration (no matching overload) | `EvaluationError` | fail-closed |
@@ -381,15 +378,14 @@ modelled on the apiserver's base CEL environment (`k8s.io/apiserver`
 two-variable comprehensions (`all(i, v, …)`, `transformList`, `transformMap`, …)
 and, with the `lists` feature, `cel`'s `lists` extension (`sortBy`, `slice`,
 `flatten`, `distinct`, `reverse`, `sort`, `lists.range`), which evaluate as in
-the apiserver, and it leaves out what the base environment lacks: `cel.bind`, the
-`math` library, `base64.*`, `jsonpatch.escapeKey` and kube-cel's `isIPv4`-style
-helpers. (The kube-cel functions among them stay available through `new_env()` /
-`KubeCelExt` for general-purpose use; `cel.bind` needs `cel`'s `bindings`
-extension added to the `Env`.) `cel` only parses, so kube-cel walks the AST of
-every rule and `messageExpression` at compile time and refuses a call to a
-function the apiserver does not declare as `ErrorKind::CompilationFailure`, even
-in a branch evaluation never reaches (`self.s == '' || isIPv4(self.s)`), as the
-apiserver does at registration. The declared names
+the apiserver, and it leaves out what the base environment lacks: `cel.bind`
+and the `math` and `base64.*` libraries. (`cel` has them as its `bindings`,
+`math` and `encoders` extensions, for an `Env` of your own.) `cel` only parses,
+so kube-cel walks the AST of every rule and `messageExpression` at compile time
+and refuses a call to a function the apiserver does not declare as
+`ErrorKind::CompilationFailure`, even in a branch evaluation never reaches
+(`self.s == '' || isIPv4(self.s)`), as the apiserver does at registration. The
+declared names
 (`src/validation/apiserver_functions.txt`, from the `k8s.io/apiserver` v0.36.1
 base environment) are checked against a live apiserver by `just parity`. CRD
 rules, their `messageExpression`s and VAP expressions share them, since the

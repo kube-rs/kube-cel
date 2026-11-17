@@ -64,10 +64,36 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     kube-cel does not implement or has behind a disabled feature, or a function
     called in a form none of its overloads takes, such as `ip(..).string()`); a
     function the apiserver does not declare is a `CompilationFailure`.
-  - Migration: none for rules the apiserver accepts. `math`, `base64.*`,
-    `jsonpatch.escapeKey`, the `isIPv4`-style helpers and global `min` / `max`
+  - Migration: none for rules the apiserver accepts. Global `min` / `max`
     remain available through `new_env()` / `KubeCelExt` for general-purpose
-    evaluation.
+    evaluation; the other functions above are gone from kube-cel (next entry).
+- **kube-cel ships only functions the apiserver declares.** The `math.*`
+  functions (18) and `base64.encode` / `base64.decode`, kube-cel's copies of
+  cel-go's `ext.Math` and `ext.Encoders`, and `isIPv4`, `isIPv6`, `isCIDRv4`,
+  `isCIDRv6` and `jsonpatch.escapeKey` are removed from `new_env()`,
+  `new_context()` and `KubeCelExt`, together with the `math`, `encoders` and
+  `jsonpatch` Cargo features (a manifest that still enables one fails to
+  resolve). The validation engine already refused all of them (previous
+  entry), so verdicts do not change.
+  - Migration: add `cel`'s own extensions to the `Env` before sharing it.
+    `encoders` needs `cel`'s `ext_encoders` feature, on by default.
+    ```rust
+    let mut env = kube_cel::new_env();
+    env.add_extension(kube_cel::cel::extensions::math)?;
+    env.add_extension(kube_cel::cel::extensions::encoders)?;
+    let env = Arc::new(env);
+    let ctx = kube_cel::new_context(Arc::clone(&env))?;
+    ```
+    `cel`'s `math` has every removed `math.*` function and evaluates
+    kube-cel's former test expressions alike. `math.greatest` and
+    `math.least` are macros there, as in cel-go, so they need
+    `env.compile(..)`: `Program::compile` leaves them undeclared
+    (`UndeclaredReference("math")`).
+  - The rest have no `cel` counterpart; these expressions give the same
+    results: `isIPv4(s)` → `isIP(s) && ip(s).family() == 4` (`6` for
+    `isIPv6`), `isCIDRv4(s)` → `isCIDR(s) && cidr(s).ip().family() == 4` (`6`
+    for `isCIDRv6`), `jsonpatch.escapeKey(k)` →
+    `k.replace('~', '~0').replace('/', '~1')`.
 - **Validation verdicts follow the apiserver in more places.** Each change below
   was checked against a live kube-apiserver v1.36.1 (`just parity`):
   - Field-name escaping escapes only `__` (to `__underscores__`), `.`, `-`
@@ -174,10 +200,6 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
 - `<list>.sum()` overflow is an error instead of a panic (debug) or a wrapped
   result (release). `lists.range()` in `new_env()` refuses more than 10,000,000
   elements.
-- `math.bitShiftLeft` / `math.bitShiftRight` (general-purpose `new_env()`
-  only; the apiserver has no `math` library) shift by 64 or more to `0`, and
-  `bitShiftRight` is a logical shift; `math.greatest` / `math.least` compare
-  exactly instead of through `f64`.
 - Quantity `add` / `sub` past the `i128` range is an error instead of a panic
   or a wrapped result (the apiserver's quantities are exact, so this is a
   documented fail-closed limit).

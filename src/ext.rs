@@ -65,21 +65,16 @@ mod sealed {
 /// | `lists` | list helpers (`isSorted`, `sum`, `min`, `max`, …) | [cel-go `ext.Lists`] |
 /// | `sets` | `sets.contains`, `sets.intersects`, `sets.equivalent` | [cel-go `ext.Sets`] |
 /// | `regex_funcs` | `find`, `findAll` | [k8s apiserver library] |
-/// | `math` | `math.greatest`, `math.least`, … | [cel-go `ext.Math`] |
-/// | `encoders` | `base64.encode`, `base64.decode` | [cel-go `ext.Encoders`] |
 /// | `urls` | `url`, `isURL`, `getScheme`, … | [k8s apiserver library] |
 /// | `ip` | `ip`, `cidr`, `isIP`, `isCIDR`, … | [k8s apiserver library] |
 /// | `semver_funcs` | `semver`, `isSemver`, `major`, … | [k8s apiserver library] |
 /// | `format` | `format` | [k8s apiserver library] |
 /// | `named_format` | named-format validation | [k8s apiserver library] |
 /// | `quantity` | `quantity`, `isQuantity`, … | [k8s apiserver library] |
-/// | `jsonpatch` | `jsonpatch.escapeKey` | [k8s apiserver library] |
 ///
 /// [cel-go `ext.Strings`]: https://github.com/google/cel-go/blob/master/ext/README.md#strings
 /// [cel-go `ext.Lists`]: https://github.com/google/cel-go/blob/master/ext/README.md#lists
 /// [cel-go `ext.Sets`]: https://github.com/google/cel-go/blob/master/ext/README.md#sets
-/// [cel-go `ext.Math`]: https://github.com/google/cel-go/blob/master/ext/README.md#math
-/// [cel-go `ext.Encoders`]: https://github.com/google/cel-go/blob/master/ext/README.md#encoders
 /// [k8s apiserver library]: https://pkg.go.dev/k8s.io/apiserver/pkg/cel/library
 ///
 /// This trait is [sealed]: it is implemented only for [`cel::Context`] and
@@ -222,6 +217,26 @@ impl std::error::Error for RegisterError {
 /// let program = env.compile("string(cidr('10.0.0.0/8').ip())").unwrap();
 /// # #[cfg(feature = "ip")]
 /// assert_eq!(program.execute(&ctx), Ok(Value::String(Arc::new("10.0.0.0".into()))));
+/// ```
+///
+/// kube-cel ships only functions the Kubernetes apiserver declares. `cel`'s
+/// own extensions, such as `math` and `encoders` (cel-go's `ext.Math` and
+/// `ext.Encoders`, which the apiserver does not have), go on the same way.
+/// `math.greatest` / `math.least` are macros, so compile with [`Env::compile`]:
+///
+/// ```rust
+/// use std::sync::Arc;
+/// use kube_cel::cel::{self, Value};
+///
+/// let mut env = kube_cel::new_env();
+/// env.add_extension(cel::extensions::math).unwrap();
+/// env.add_extension(cel::extensions::encoders).unwrap();
+/// let env = Arc::new(env);
+/// let ctx = kube_cel::new_context(Arc::clone(&env)).unwrap();
+/// let program = env
+///     .compile("math.greatest(1, 3, 2) == 3 && base64.encode(b'hi') == 'aGk='")
+///     .unwrap();
+/// assert_eq!(program.execute(&ctx), Ok(Value::Bool(true)));
 /// ```
 #[must_use]
 pub fn new_env() -> Env {

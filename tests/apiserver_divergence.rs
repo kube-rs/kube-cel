@@ -89,9 +89,9 @@ fn assert_refused(rule: &str) {
 // apiserver: rejects the CRD or policy at registration ("undeclared reference",
 //            or "found no matching overload" for a global `min`/`max`): its base
 //            environment has no `ext.Bindings`, `ext.Math` or `ext.Encoders`, no
-//            `jsonpatch` (a MutatingAdmissionPolicy library), none of kube-cel's
-//            `isIPv4`/`isIPv6`/`isCIDRv4`/`isCIDRv6` conveniences, and `min`/`max`
-//            only as list members.
+//            `jsonpatch` (a MutatingAdmissionPolicy library), no
+//            `isIPv4`/`isIPv6`/`isCIDRv4`/`isCIDRv6` (kube-cel's own before 0.9),
+//            and `min`/`max` only as list members.
 // kube-cel:  CompilationFailure, from a compile-time walk of the whole AST, so a
 //            call evaluation never reaches (`true || ..`, the body of a
 //            comprehension over an empty list) is refused too. Before 0.9,

@@ -1058,7 +1058,7 @@ pub fn cases() -> Vec<ParityCase> {
         },
         // Outside the apiserver's base environment: rejected at registration.
         // kube-cel rejects them too (see tests/apiserver_divergence.rs): a call
-        // to a function the validation env lacks does not compile, and the
+        // to a function the apiserver does not declare does not compile, and the
         // member `.string()` / string `reverse()` have no overload at
         // evaluation. `math.*` and `isIPv4` used to pass client-side (fail-open).
         ParityCase {
@@ -1095,7 +1095,7 @@ pub fn cases() -> Vec<ParityCase> {
             }),
             object: json!({ "a": "10.0.0.1" }),
             expect: Expect::RegistrationRejected,
-            note: "isIPv4 is a kube-cel extra, not in the base env → rejected at registration",
+            note: "isIPv4 (kube-cel's own before 0.9) is not in the base env → rejected at registration",
         },
         ParityCase {
             kind: "PipMember",

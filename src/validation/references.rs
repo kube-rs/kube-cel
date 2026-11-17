@@ -254,18 +254,27 @@ mod tests {
             .collect()
     }
 
-    /// kube-cel registers no function for rules that the apiserver lacks: the
-    /// name check would refuse every call to it.
+    /// Every function kube-cel registers, for rules (the validation profile)
+    /// and through `new_env()` / `KubeCelExt` (the general one), is one the
+    /// apiserver declares: kube-cel ships no function Kubernetes lacks, and the
+    /// name check would refuse a call to one in a rule.
     #[test]
     fn registered_functions_are_declared_by_the_apiserver() {
-        let stray: Vec<String> = registered()
-            .into_iter()
-            .filter(|name| !apiserver_functions().contains(name.as_str()))
-            .collect();
-        assert!(
-            stray.is_empty(),
-            "registered for rules, not declared by the apiserver: {stray:?}"
-        );
+        for (profile, env) in [
+            (Profile::Validation, Arc::clone(validation_env())),
+            (Profile::General, Arc::new(crate::new_env())),
+        ] {
+            let mut ctx = cel::Context::with_env(env);
+            let stray: Vec<String> = register_profile(&mut ctx, profile)
+                .expect("kube-cel's functions register onto its Env")
+                .into_iter()
+                .filter(|name| !apiserver_functions().contains(name.as_str()))
+                .collect();
+            assert!(
+                stray.is_empty(),
+                "{profile:?} profile registers functions the apiserver does not declare: {stray:?}"
+            );
+        }
     }
 
     /// Declared = implemented ∪ declared-only, with the two disjoint. Fails
@@ -296,43 +305,6 @@ mod tests {
         assert_eq!(
             missing, listed,
             "declared by the apiserver but not implemented, vs DECLARED_ONLY"
-        );
-    }
-
-    /// `tests/common/kube_cel_only_functions.txt`, which the parity suite
-    /// checks the apiserver refuses as undeclared, lists every function kube-cel
-    /// registers that `apiserver_functions.txt` lacks.
-    #[test]
-    #[cfg(all(
-        feature = "strings",
-        feature = "lists",
-        feature = "sets",
-        feature = "regex_funcs",
-        feature = "urls",
-        feature = "ip",
-        feature = "semver_funcs",
-        feature = "format",
-        feature = "quantity",
-        feature = "jsonpatch",
-        feature = "named_format",
-        feature = "math",
-        feature = "encoders"
-    ))]
-    fn kube_cel_only_functions_are_listed() {
-        let mut ctx = cel::Context::with_env(Arc::new(crate::new_env()));
-        let unlisted: BTreeSet<String> = register_profile(&mut ctx, Profile::General)
-            .expect("kube-cel's functions register onto new_env()")
-            .into_iter()
-            .filter(|name| !apiserver_functions().contains(name.as_str()))
-            .collect();
-        let listed: BTreeSet<String> = include_str!("../../tests/common/kube_cel_only_functions.txt")
-            .lines()
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .map(str::to_owned)
-            .collect();
-        assert_eq!(
-            unlisted, listed,
-            "kube-cel's functions the apiserver does not declare, vs tests/common/kube_cel_only_functions.txt"
         );
     }
 

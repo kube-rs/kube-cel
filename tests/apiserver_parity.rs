@@ -279,43 +279,40 @@ fn listed_names(list: &str) -> Vec<&str> {
         .collect()
 }
 
-/// kube-cel's compile-time name check accepts exactly the functions the
-/// apiserver declares (`src/validation/apiserver_functions.txt`), and refuses
-/// the ones only kube-cel implements (`tests/common/kube_cel_only_functions.txt`).
+/// kube-cel's compile-time name check accepts the functions the apiserver
+/// declares (`src/validation/apiserver_functions.txt`). A unit test in
+/// `src/validation/references.rs` keeps every function kube-cel registers in
+/// that list; this checks the list against the apiserver.
 ///
 /// Each name is called with seven `dyn` arguments, which no overload takes, in
 /// a branch never evaluated: globally (`true || f(dyn(1), ..)`) and, for an
 /// undotted name, as a member (`true || dyn(0).f(dyn(1), ..)`). The apiserver
 /// type-checks every rule when the CRD is registered and refuses a declared
 /// function with "found no matching overload", an undeclared one with
-/// "undeclared reference". A declared name passes when some form gets the
-/// first and none the second (`namespace` is a reserved identifier, so its
-/// global form fails to parse); a kube-cel-only name when every form gets the
-/// second. One CRD carries every probe; it is server-side dry-run, so nothing
-/// is registered.
+/// "undeclared reference". A name passes when some form gets the first and
+/// none the second (`namespace` is a reserved identifier, so its global form
+/// fails to parse). One CRD carries every probe; it is server-side dry-run, so
+/// nothing is registered.
 #[test]
 #[ignore = "needs a live kind cluster; run via `just parity`"]
 fn function_names_match_the_apiserver() {
     let declared = listed_names(include_str!("../src/validation/apiserver_functions.txt"));
-    let kube_cel_only = listed_names(include_str!("common/kube_cel_only_functions.txt"));
     let args = (1..=7)
         .map(|i| format!("dyn({i})"))
         .collect::<Vec<_>>()
         .join(", ");
 
-    // (name, is declared, rule indices of its probes)
-    let mut probes: Vec<(&str, bool, Vec<usize>)> = Vec::new();
+    // (name, rule indices of its probes)
+    let mut probes: Vec<(&str, Vec<usize>)> = Vec::new();
     let mut rules: Vec<Value> = Vec::new();
-    for (names, is_declared) in [(&declared, true), (&kube_cel_only, false)] {
-        for name in names {
-            let mut forms = vec![format!("true || {name}({args})")];
-            if !name.contains('.') {
-                forms.push(format!("true || dyn(0).{name}({args})"));
-            }
-            let first = rules.len();
-            rules.extend(forms.into_iter().map(|rule| json!({ "rule": rule })));
-            probes.push((name, is_declared, (first..rules.len()).collect()));
+    for name in &declared {
+        let mut forms = vec![format!("true || {name}({args})")];
+        if !name.contains('.') {
+            forms.push(format!("true || dyn(0).{name}({args})"));
         }
+        let first = rules.len();
+        rules.extend(forms.into_iter().map(|rule| json!({ "rule": rule })));
+        probes.push((name, (first..rules.len()).collect()));
     }
     let crd = crd_for(
         "Pfunctions",
@@ -337,35 +334,22 @@ fn function_names_match_the_apiserver() {
         &rest[..rest.find("x-kubernetes-validations[").unwrap_or(rest.len())]
     };
     let mut mismatches = Vec::new();
-    for (name, is_declared, indices) in &probes {
+    for (name, indices) in &probes {
         let errors: Vec<&str> = indices.iter().map(|&i| error_of(i)).collect();
-        let undeclared = |e: &&str| e.contains("undeclared reference");
-        let ok = if *is_declared {
-            errors.iter().any(|e| e.contains("found no matching overload")) && !errors.iter().any(undeclared)
-        } else {
-            errors.iter().all(undeclared)
-        };
+        let ok = errors.iter().any(|e| e.contains("found no matching overload"))
+            && !errors.iter().any(|e| e.contains("undeclared reference"));
         if !ok {
-            mismatches.push(format!(
-                "{name} ({}): {errors:?}",
-                if *is_declared {
-                    "listed as declared"
-                } else {
-                    "kube-cel only"
-                }
-            ));
+            mismatches.push(format!("{name}: {errors:?}"));
         }
     }
     assert!(
         mismatches.is_empty(),
-        "function names disagree with the apiserver:\n{}",
+        "functions listed as declared that the apiserver does not declare:\n{}",
         mismatches.join("\n")
     );
     println!(
-        "function_names_match_the_apiserver: {} declared names and {} kube-cel-only names agree \
-         ({} probe rules)",
+        "function_names_match_the_apiserver: {} declared names agree ({} probe rules)",
         declared.len(),
-        kube_cel_only.len(),
         rules.len()
     );
 }

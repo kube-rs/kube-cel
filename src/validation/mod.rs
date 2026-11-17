@@ -39,8 +39,7 @@ use std::sync::{Arc, LazyLock};
 /// `transformMap`, ..) and, with the `lists` feature, `cel`'s upstream `lists`
 /// extension (`sortBy`, `slice`, `flatten`, `distinct`, `reverse`, `sort`,
 /// `lists.range`). It leaves out `bindings` (`cel.bind`), `network` and `math`,
-/// which the apiserver's base environment does not have; [`base_context`]
-/// likewise leaves out kube-cel's own functions the apiserver lacks.
+/// which the apiserver's base environment does not have.
 ///
 /// Rules must compile with [`compile`] (not [`cel::Program::compile`], which
 /// only knows the standard macros) and run on a context from [`base_context`].
@@ -95,9 +94,8 @@ pub struct RootContext {
 pub enum ErrorKind {
     /// The rule, or its `messageExpression`, does not compile: a syntax error,
     /// or a call to a function the apiserver's CEL environment does not
-    /// declare (`cel.bind`, the `math` library, `base64.*`, kube-cel's
-    /// `isIPv4`, a global `min(..)`, ..). The apiserver rejects such a CRD at
-    /// registration.
+    /// declare (`cel.bind`, the `math` library, `base64.*`, `isIPv4`, a global
+    /// `min(..)`, ..). The apiserver rejects such a CRD at registration.
     CompilationFailure,
     /// Malformed rule JSON.
     InvalidRule,

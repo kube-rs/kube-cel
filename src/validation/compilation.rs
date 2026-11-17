@@ -58,7 +58,7 @@ pub struct CompilationResult {
 #[non_exhaustive]
 pub enum CompilationError {
     /// CEL expression failed to compile: it does not parse, or it calls a
-    /// function outside the validation environment (see
+    /// function the apiserver does not declare (see
     /// [`ErrorKind::CompilationFailure`](crate::ErrorKind::CompilationFailure)).
     Parse {
         /// The original CEL expression that failed to compile.

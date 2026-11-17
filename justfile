@@ -34,7 +34,7 @@ test-no-default:
 feature-check:
     #!/usr/bin/env bash
     set -euo pipefail
-    for feature in strings lists sets regex_funcs urls ip semver_funcs format quantity jsonpatch named_format math encoders validation; do
+    for feature in strings lists sets regex_funcs urls ip semver_funcs format quantity named_format validation; do
         echo "--- checking feature: $feature ---"
         cargo check --no-default-features --features "$feature"
     done

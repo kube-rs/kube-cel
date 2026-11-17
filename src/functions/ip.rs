@@ -60,10 +60,6 @@ pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
     r.add("isLinkLocalUnicast", ip_is_link_local_unicast);
     r.add("isGlobalUnicast", ip_is_global_unicast);
 
-    // IP version convenience functions
-    r.add("isIPv4", is_ipv4);
-    r.add("isIPv6", is_ipv6);
-
     // CIDR functions
     r.add("cidr", parse_cidr);
     r.add("isCIDR", is_cidr);
@@ -71,10 +67,6 @@ pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
     r.add("containsCIDR", cidr_contains_cidr);
     r.add("prefixLength", cidr_prefix_length);
     r.add("masked", cidr_masked);
-
-    // CIDR version convenience functions
-    r.add("isCIDRv4", is_cidr_v4);
-    r.add("isCIDRv6", is_cidr_v6);
 }
 
 // --- Parsing helpers ---
@@ -327,32 +319,6 @@ fn owned_string<'b, 'v>(s: String) -> Result<CowVal<'b, 'v>, ExecutionError> {
     Ok(CowVal::Owned(val))
 }
 
-// --- IP/CIDR version convenience functions ---
-
-/// `isIPv4(<string>) -> bool`
-fn is_ipv4(s: Arc<String>) -> ResolveResult {
-    Ok(Value::Bool(parse_ip_addr(&s).is_ok_and(|addr| addr.is_ipv4())))
-}
-
-/// `isIPv6(<string>) -> bool`
-fn is_ipv6(s: Arc<String>) -> ResolveResult {
-    Ok(Value::Bool(parse_ip_addr(&s).is_ok_and(|addr| addr.is_ipv6())))
-}
-
-/// `isCIDRv4(<string>) -> bool`
-fn is_cidr_v4(s: Arc<String>) -> ResolveResult {
-    Ok(Value::Bool(
-        parse_cidr_net(&s).is_ok_and(|net| net.addr().is_ipv4()),
-    ))
-}
-
-/// `isCIDRv6(<string>) -> bool`
-fn is_cidr_v6(s: Arc<String>) -> ResolveResult {
-    Ok(Value::Bool(
-        parse_cidr_net(&s).is_ok_and(|net| net.addr().is_ipv6()),
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -598,36 +564,6 @@ mod tests {
             .execute(&ctx)
             .unwrap();
         assert_eq!(result, Value::Bool(true));
-    }
-
-    // --- IP version convenience functions ---
-
-    #[test]
-    fn test_is_ipv4() {
-        assert_eq!(eval("isIPv4('1.2.3.4')"), Value::Bool(true));
-        assert_eq!(eval("isIPv4('::1')"), Value::Bool(false));
-        assert_eq!(eval("isIPv4('not-an-ip')"), Value::Bool(false));
-    }
-
-    #[test]
-    fn test_is_ipv6() {
-        assert_eq!(eval("isIPv6('::1')"), Value::Bool(true));
-        assert_eq!(eval("isIPv6('1.2.3.4')"), Value::Bool(false));
-        assert_eq!(eval("isIPv6('not-an-ip')"), Value::Bool(false));
-    }
-
-    #[test]
-    fn test_is_cidr_v4() {
-        assert_eq!(eval("isCIDRv4('10.0.0.0/8')"), Value::Bool(true));
-        assert_eq!(eval("isCIDRv4('fd00::/64')"), Value::Bool(false));
-        assert_eq!(eval("isCIDRv4('not-a-cidr')"), Value::Bool(false));
-    }
-
-    #[test]
-    fn test_is_cidr_v6() {
-        assert_eq!(eval("isCIDRv6('fd00::/64')"), Value::Bool(true));
-        assert_eq!(eval("isCIDRv6('10.0.0.0/8')"), Value::Bool(false));
-        assert_eq!(eval("isCIDRv6('not-a-cidr')"), Value::Bool(false));
     }
 
     // --- cel-go parity tests ---

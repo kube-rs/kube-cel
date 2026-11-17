@@ -41,22 +41,10 @@ fn main() {
     run("ip family", "ip('192.168.1.1').family()");
     run("cidr.ip()", "cidr('10.0.0.0/24').ip() == ip('10.0.0.0')");
     run("string(ip)", "string(ip('192.168.1.1'))");
-    run("isIPv4", "isIPv4('192.168.1.1')");
-    run("isCIDRv6", "isCIDRv6('fd00::/64')");
 
     // Named format validation
     run(
         "dns1123Label",
         "!format.dns1123Label().validate('my-name').hasValue()",
     );
-
-    // Math
-    run("math.ceil", "math.ceil(1.2)");
-    run("math.abs", "math.abs(-5)");
-    run("math.bitAnd", "math.bitAnd(3, 5)");
-    run("math.greatest", "math.greatest(1, 3, 2)");
-
-    // Base64
-    run("base64.encode", "base64.encode(b'hello')");
-    run("base64.decode", "base64.decode('aGVsbG8=')");
 }
