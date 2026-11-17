@@ -66,7 +66,10 @@ struct Checker<'a> {
 }
 
 impl Checker<'_> {
+    /// Whether `name` is a declared function. A leading `.` makes a name
+    /// absolute (`.size(..)`, `.optional.of(..)`); `cel` drops it to resolve.
     fn known(&self, name: &str) -> bool {
+        let name = name.strip_prefix('.').unwrap_or(name);
         self.env.function(name).is_some() || self.functions.contains(name)
     }
 
@@ -87,7 +90,8 @@ impl Checker<'_> {
                 if is_identifier_path(name) {
                     match &call.target {
                         None => {
-                            if let Some(member_only) = MEMBER_ONLY.iter().find(|n| **n == name) {
+                            let bare = name.strip_prefix('.').unwrap_or(name);
+                            if let Some(member_only) = MEMBER_ONLY.iter().find(|n| **n == bare) {
                                 return Err(UnsupportedCall::GlobalForm(member_only));
                             }
                             if !self.known(name) {
@@ -182,6 +186,7 @@ mod tests {
             "{'a': 1}.transformMap(k, v, v + 1) == {'a': 2} && [1, 2].transformMapEntry(i, v, {string(i): v}) == {'0': 1, '1': 2}",
             "[1, 2].existsOne(i, v, v == 2) && [1, 2].transformList(i, v, v > 1, v) == [2]",
             "1 in [1, 2] && 'a' in {'a': 1} && !(1 > 2) && -1 < 0 && 1 % 2 == 1 && 1 / 1 == 1 && (true ? 1 : 2) == 1",
+            ".size('a') == 1 && .optional.of(1).value() == 1",
         ]);
     }
 
@@ -192,6 +197,7 @@ mod tests {
             "[3, 1, 2].sortBy(x, x) == [1, 2, 3] && lists.range(3) == [0, 1, 2] && [1, 2, 3].slice(0, 2) == [1, 2]",
             "[[1], [2]].flatten() == [1, 2] && [1, 1].distinct() == [1] && [2, 1].sort() == [1, 2] && [1, 2].reverse() == [2, 1]",
             "[1, 2].isSorted() && [1, 2].sum() == 3 && [1, 2].min() == 1 && [1, 2].max() == 2 && [1, 2].indexOf(2) == 1 && [1, 2].lastIndexOf(2) == 1",
+            ".lists.range(3) == [0, 1, 2]",
         ]);
     }
 
@@ -228,6 +234,7 @@ mod tests {
             "isSemver('1.0.0') && semver('1.2.3').major() == 1 && semver('1.2.3').minor() == 2 && semver('1.2.3').patch() == 3",
             "semver('1.0.0').isGreaterThan(semver('0.9.0')) && semver('1.0.0').isLessThan(semver('2.0.0')) && semver('1.0.0').compareTo(semver('1.0.0')) == 0",
             "sets.contains([1, 2], [1]) && sets.equivalent([1, 2], [2, 1]) && sets.intersects([1], [1, 2])",
+            ".sets.equivalent([1], [1])",
             "!format.dns1123Label().validate('abc').hasValue() && !format.named('dns1123Label').value().validate('abc').hasValue()",
             "!format.dns1123Subdomain().validate('a.b').hasValue() && !format.labelValue().validate('a').hasValue() && !format.qualifiedName().validate('a').hasValue()",
             "!format.uuid().validate('123e4567-e89b-12d3-a456-426614174000').hasValue() && !format.date().validate('2024-01-01').hasValue()",

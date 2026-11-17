@@ -113,6 +113,7 @@ fn ip_version_helpers_fail_closed() {
     assert_refused("isCIDRv4('10.0.0.0/8')");
     assert_refused("isCIDRv6('fd00::/8')");
     assert_refused("true || isIPv4('192.168.0.1')");
+    assert_refused("true || .isIPv4('192.168.0.1')");
     assert_refused("self.items.filter(x, x > 5).all(x, isIPv4(string(x)))");
     assert_refused("[].all(i, v, isIPv4(v))");
 }
@@ -129,6 +130,7 @@ fn global_min_max_fails_closed() {
     assert_refused("min(5, 3) == 3");
     assert_refused("max(self.items) == 3");
     assert_refused("true || min(1, 2) == 1");
+    assert_refused(".min(1, 2) == 1");
 }
 
 /// A `messageExpression` goes through the same check, although it is only
