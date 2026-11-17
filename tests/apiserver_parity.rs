@@ -21,7 +21,9 @@ use std::{
 use serde_json::{Value, json};
 
 mod common;
-use common::{Expect, Verdict, cases, kubecel_verdict, kubecel_verdict_with_defaults};
+use common::{
+    Expect, Verdict, cases, kubecel_compiled_verdict, kubecel_verdict, kubecel_verdict_with_defaults,
+};
 
 fn ctx() -> String {
     std::env::var("KUBE_CEL_PARITY_CTX")
@@ -101,57 +103,93 @@ fn apiserver_verdict(kind: &str, plural: &str, schema: &Value, object: &Value) -
     }
 }
 
-/// Apply only the CRD (no CR) and report whether the apiserver REJECTED it at
-/// registration — e.g. the rule fails to compile against the schema's types.
-fn apiserver_registration_rejected(kind: &str, plural: &str, schema: &Value) -> bool {
+/// Apply only the CRD (no CR) and return the apiserver's error if it REJECTED
+/// it at registration — e.g. the rule fails to compile against the schema's
+/// types — or `None` if it registered.
+fn apiserver_registration_error(kind: &str, plural: &str, schema: &Value) -> Option<String> {
     let crd = crd_for(kind, plural, schema);
-    let (ok, _out) = kubectl(&["apply", "-f", "-"], Some(&crd.to_string()));
-    !ok
+    let (ok, out) = kubectl(&["apply", "-f", "-"], Some(&crd.to_string()));
+    (!ok).then_some(out)
+}
+
+/// kube-cel's verdict on every entry point (`validate`,
+/// `validate_with_defaults`, `validate_compiled`), which must agree.
+fn kubecel_verdicts(schema: &Value, object: &Value) -> [Verdict; 3] {
+    [
+        kubecel_verdict(schema, object),
+        kubecel_verdict_with_defaults(schema, object),
+        kubecel_compiled_verdict(schema, object),
+    ]
 }
 
 /// Drive the entire shared table through the kind/kubectl path. For each case:
-/// either pin a CRD-registration rejection, or feed the identical (schema,
-/// object) to the apiserver and both kube-cel entry points and require all three
-/// to match the expected verdict.
+/// either pin a CRD-registration rejection (and kube-cel's verdict on a valid
+/// object: a rejection, or an acceptance for the documented no-type-checker
+/// fail-open class), or feed the identical (schema, object) to the apiserver
+/// and every kube-cel entry point and require all of them to match the
+/// expected verdict.
 #[test]
 #[ignore = "needs a live kind cluster; run via `just parity`"]
 fn parity_against_kind() {
     let cases = cases();
     let total = cases.len();
+    let mut fail_open = 0;
     for (i, c) in cases.iter().enumerate() {
         let n = i + 1;
+        let mut registration_error = None;
         match c.expect {
-            Expect::RegistrationRejected => {
-                assert!(
-                    apiserver_registration_rejected(c.kind, c.plural, &c.schema),
-                    "[{n}/{total}] {}: expected registration rejection — {}",
+            Expect::RegistrationRejected | Expect::RegistrationRejectedFailOpen => {
+                let Some(err) = apiserver_registration_error(c.kind, c.plural, &c.schema) else {
+                    panic!(
+                        "[{n}/{total}] {}: expected registration rejection — {}",
+                        c.kind, c.note
+                    );
+                };
+                let want = if c.expect == Expect::RegistrationRejected {
+                    Verdict::Reject
+                } else {
+                    Verdict::Accept
+                };
+                assert_eq!(
+                    kubecel_verdicts(&c.schema, &c.object),
+                    [want; 3],
+                    "[{n}/{total}] {}: kube-cel verdicts (validate, validate_with_defaults, validate_compiled) \
+                     on a registration-rejected rule ({})\n  schema={}\n  object={}",
                     c.kind,
-                    c.note
+                    c.note,
+                    c.schema,
+                    c.object
                 );
+                fail_open += usize::from(want == Verdict::Accept);
+                registration_error = err.lines().find(|l| !l.trim().is_empty()).map(str::to_owned);
             }
             Expect::Accept | Expect::Reject => {
                 let want = c.expect.verdict();
                 let api = apiserver_verdict(c.kind, c.plural, &c.schema, &c.object);
-                let kc = kubecel_verdict(&c.schema, &c.object);
-                let kcd = kubecel_verdict_with_defaults(&c.schema, &c.object);
                 assert_eq!(
                     api, want,
                     "[{n}/{total}] {}: apiserver verdict drifted from expected ({})\n  schema={}\n  object={}",
                     c.kind, c.note, c.schema, c.object
                 );
                 assert_eq!(
-                    kc, api,
-                    "[{n}/{total}] {} DIVERGENCE: apiserver={api:?} but kube-cel validate={kc:?} ({})\n  schema={}\n  object={}",
-                    c.kind, c.note, c.schema, c.object
-                );
-                assert_eq!(
-                    kcd, api,
-                    "[{n}/{total}] {} DIVERGENCE: apiserver={api:?} but kube-cel validate_with_defaults={kcd:?} ({})\n  schema={}\n  object={}",
-                    c.kind, c.note, c.schema, c.object
+                    kubecel_verdicts(&c.schema, &c.object),
+                    [api; 3],
+                    "[{n}/{total}] {} DIVERGENCE: apiserver={api:?} vs kube-cel (validate, validate_with_defaults, \
+                     validate_compiled) ({})\n  schema={}\n  object={}",
+                    c.kind,
+                    c.note,
+                    c.schema,
+                    c.object
                 );
             }
         }
         println!("ok {n}/{total} {} — {}", c.kind, c.note);
+        if let Some(err) = registration_error {
+            println!("   apiserver: {err}");
+        }
     }
-    println!("parity_against_kind: {total}/{total} cases agree with the apiserver");
+    println!(
+        "parity_against_kind: {total}/{total} cases as expected ({fail_open} of them the pinned \
+         no-type-checker fail-open, kube-cel accepting what the apiserver refuses at registration)"
+    );
 }

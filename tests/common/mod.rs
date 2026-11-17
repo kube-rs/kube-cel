@@ -12,7 +12,7 @@
 // Each runner uses a subset of these helpers, so unused items are expected.
 #![allow(dead_code)]
 
-use kube_cel::Validator;
+use kube_cel::{Validator, compile_schema};
 use serde_json::{Value, json};
 
 /// The runtime CEL-admission verdict a control plane (or kube-cel) returns for a
@@ -25,25 +25,30 @@ pub enum Verdict {
 
 /// The bucket a `(schema, object)` case is expected to land in. Mirrors the
 /// fidelity-sweep buckets (see the plan doc): `Accept`/`Reject` are the faithful
-/// runtime verdicts both engines must agree on; `RegistrationRejected` is the
-/// kube-cel-only boundary where the apiserver refuses the rule at CRD
-/// registration (no valid CRD can carry it).
+/// runtime verdicts both engines must agree on. The other two are cases the
+/// apiserver refuses at CRD registration (no valid CRD can carry the rule):
+/// `RegistrationRejected` where kube-cel rejects the object too, and
+/// `RegistrationRejectedFailOpen` where it accepts it, the one documented
+/// fail-open class (no type checker in `cel`, cel-rust#350; see
+/// `tests/apiserver_divergence.rs`).
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Expect {
     Accept,
     Reject,
     RegistrationRejected,
+    RegistrationRejectedFailOpen,
 }
 
 impl Expect {
     /// The runtime verdict this expectation pins, for the register-able cases.
-    /// Panics on `RegistrationRejected`, which never reaches runtime evaluation.
+    /// Panics on the registration-rejected ones, which never reach the
+    /// apiserver's runtime evaluation.
     pub fn verdict(self) -> Verdict {
         match self {
             Expect::Accept => Verdict::Accept,
             Expect::Reject => Verdict::Reject,
-            Expect::RegistrationRejected => {
-                panic!("RegistrationRejected has no runtime verdict")
+            Expect::RegistrationRejected | Expect::RegistrationRejectedFailOpen => {
+                panic!("a registration-rejected case has no runtime verdict")
             }
         }
     }
@@ -75,6 +80,15 @@ pub fn kubecel_verdict(schema: &Value, object: &Value) -> Verdict {
 /// alias against drift.
 pub fn kubecel_verdict_with_defaults(schema: &Value, object: &Value) -> Verdict {
     match Validator::new().validate_with_defaults(schema, object, None) {
+        Ok(()) => Verdict::Accept,
+        Err(_) => Verdict::Reject,
+    }
+}
+
+/// kube-cel's verdict via `compile_schema` + `validate_compiled`, the
+/// pre-compiled path, which must agree with [`kubecel_verdict`].
+pub fn kubecel_compiled_verdict(schema: &Value, object: &Value) -> Verdict {
+    match Validator::new().validate_compiled(&compile_schema(schema), object, None) {
         Ok(()) => Verdict::Accept,
         Err(_) => Verdict::Reject,
     }
@@ -112,9 +126,9 @@ pub fn cases() -> Vec<ParityCase> {
                 "properties": { "m": { "type": "object", "additionalProperties": true } },
                 "x-kubernetes-validations": [{ "rule": "!('a.b/c' in self.m)", "message": "forbidden key" }]
             }),
-            object: Value::Null,
-            expect: Expect::RegistrationRejected,
-            note: "`in` on a free-form map is not expressible → rejected at registration",
+            object: json!({"m": {"harmless": "x"}}),
+            expect: Expect::RegistrationRejectedFailOpen,
+            note: "`in` on a free-form map is a type error → rejected at registration; kube-cel has no type checker and accepts",
         },
         // `[]map[string]string` — forbidden key inside a LIST ELEMENT's map.
         // Exercises escaping skip through `items` recursion. Both REJECT.
@@ -379,8 +393,9 @@ pub fn cases() -> Vec<ParityCase> {
         // ── cel 0.16 validation environment (kube-rs/kube-cel#14) ─────────────
         // The validation env enables `cel`'s upstream `lists` extension and the
         // two-variable comprehensions, which the apiserver's base environment
-        // has; before 0.9 these were UnsupportedReference (fail-closed). Bounded
-        // lists keep the apiserver's cost estimate under the per-rule budget.
+        // has; before 0.9 `sortBy` and the two-variable macros were
+        // UnsupportedReference (fail-closed). Bounded lists keep the apiserver's
+        // cost estimate under the per-rule budget.
         ParityCase {
             kind: "PsortBy",
             plural: "psortbys",
@@ -461,9 +476,10 @@ pub fn cases() -> Vec<ParityCase> {
             note: "global string(ip(..)) → ACCEPT",
         },
         // Outside the apiserver's base environment: rejected at registration.
-        // kube-cel's validation env leaves these out too (fail-closed, see
-        // tests/apiserver_divergence.rs); `math.*` and `isIPv4` used to pass
-        // client-side (fail-open).
+        // kube-cel rejects them too (see tests/apiserver_divergence.rs): a call
+        // to a function the validation env lacks does not compile, and the
+        // member `.string()` / string `reverse()` have no overload at
+        // evaluation. `math.*` and `isIPv4` used to pass client-side (fail-open).
         ParityCase {
             kind: "PcelBind",
             plural: "pcelbinds",
@@ -472,7 +488,7 @@ pub fn cases() -> Vec<ParityCase> {
                 "properties": {},
                 "x-kubernetes-validations": [{ "rule": "cel.bind(x, 2, x > 0)", "message": "bind" }]
             }),
-            object: Value::Null,
+            object: json!({}),
             expect: Expect::RegistrationRejected,
             note: "cel.bind is not in the base env → rejected at registration",
         },
@@ -484,7 +500,7 @@ pub fn cases() -> Vec<ParityCase> {
                 "properties": {},
                 "x-kubernetes-validations": [{ "rule": "math.ceil(1.2) > 0.0", "message": "math" }]
             }),
-            object: Value::Null,
+            object: json!({}),
             expect: Expect::RegistrationRejected,
             note: "math.* is not in the base env → rejected at registration",
         },
@@ -496,7 +512,7 @@ pub fn cases() -> Vec<ParityCase> {
                 "properties": { "a": { "type": "string", "maxLength": 64 } },
                 "x-kubernetes-validations": [{ "rule": "isIPv4(self.a)", "message": "ipv4" }]
             }),
-            object: Value::Null,
+            object: json!({ "a": "10.0.0.1" }),
             expect: Expect::RegistrationRejected,
             note: "isIPv4 is a kube-cel extra, not in the base env → rejected at registration",
         },
@@ -508,7 +524,7 @@ pub fn cases() -> Vec<ParityCase> {
                 "properties": { "a": { "type": "string", "maxLength": 64 } },
                 "x-kubernetes-validations": [{ "rule": "ip(self.a).string() == '10.0.0.1'", "message": "ip" }]
             }),
-            object: Value::Null,
+            object: json!({ "a": "10.0.0.1" }),
             expect: Expect::RegistrationRejected,
             note: "member <IP>.string() has no overload → rejected at registration",
         },
@@ -520,9 +536,122 @@ pub fn cases() -> Vec<ParityCase> {
                 "properties": { "s": { "type": "string", "maxLength": 64 } },
                 "x-kubernetes-validations": [{ "rule": "self.s.reverse() == 'cba'", "message": "reverse" }]
             }),
-            object: Value::Null,
+            object: json!({ "s": "abc" }),
             expect: Expect::RegistrationRejected,
             note: "string reverse() has no overload → rejected at registration",
+        },
+        // A call evaluation never reaches is checked at registration too.
+        // kube-cel refuses a function outside the base environment anywhere in
+        // the AST at compile time; before, these passed client-side (fail-open).
+        ParityCase {
+            kind: "PshortIPv4",
+            plural: "pshortipv4s",
+            schema: json!({
+                "type": "object",
+                "properties": { "a": { "type": "string", "maxLength": 64 } },
+                "x-kubernetes-validations": [{ "rule": "self.a == '' || isIPv4(self.a)", "message": "ipv4" }]
+            }),
+            object: json!({ "a": "" }),
+            expect: Expect::RegistrationRejected,
+            note: "isIPv4 behind a short-circuit → still rejected at registration",
+        },
+        ParityCase {
+            kind: "PemptyTwoVar",
+            plural: "pemptytwovars",
+            schema: json!({
+                "type": "object",
+                "properties": { "l": { "type": "array", "maxItems": 10, "items": {"type": "string", "maxLength": 64} } },
+                "x-kubernetes-validations": [{ "rule": "self.l.all(i, v, isIPv4(v))", "message": "ipv4" }]
+            }),
+            object: json!({ "l": [] }),
+            expect: Expect::RegistrationRejected,
+            note: "isIPv4 in a comprehension over an empty list → still rejected at registration",
+        },
+        ParityCase {
+            kind: "Pbase64",
+            plural: "pbase64s",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "base64.encode(b'hello') == 'aGVsbG8='", "message": "base64" }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "base64.* (ext.Encoders) is not in the base env → rejected at registration",
+        },
+        ParityCase {
+            kind: "PjsonPatch",
+            plural: "pjsonpatches",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "jsonpatch.escapeKey('a/b') == 'a~1b'", "message": "jsonpatch" }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "jsonpatch.* is a MutatingAdmissionPolicy library → rejected at registration",
+        },
+        ParityCase {
+            kind: "PminGlobal",
+            plural: "pminglobals",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "min(5, 3) == 3", "message": "min" }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "global min(..) has no overload (only <list>.min()) → rejected at registration",
+        },
+        ParityCase {
+            kind: "PmsgIPv4",
+            plural: "pmsgipv4s",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "true", "messageExpression": "string(isIPv4('1.2.3.4'))" }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "isIPv4 in a messageExpression → rejected at registration",
+        },
+        // No type checker in `cel` (cel-rust#350): the one documented fail-open
+        // class. The apiserver type-checks at registration; kube-cel accepts.
+        ParityCase {
+            kind: "PmixedSorted",
+            plural: "pmixedsorteds",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "[1, 2.0].isSorted()", "message": "sorted" }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejectedFailOpen,
+            note: "mixed-type list literal is a type error → rejected at registration; kube-cel accepts",
+        },
+        ParityCase {
+            kind: "PmsgInt",
+            plural: "pmsgints",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "true", "messageExpression": "1" }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejectedFailOpen,
+            note: "non-string messageExpression → rejected at registration; kube-cel accepts",
+        },
+        ParityCase {
+            kind: "PundeclaredIdent",
+            plural: "pundeclaredidents",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "true || undeclared == 1", "message": "ident" }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejectedFailOpen,
+            note: "undeclared identifier in an unevaluated branch → rejected at registration; kube-cel accepts",
         },
     ]
 }
