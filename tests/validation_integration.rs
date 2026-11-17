@@ -265,14 +265,20 @@ fn extension_functions_in_validation() {
 
 #[test]
 fn array_items_with_transition_rule() {
+    // Map-type list: items correlate by `name` (apiserver MakeMapList), so the
+    // item transition rule fires per key regardless of order. An atomic/set list
+    // would skip it entirely — see `atomic_scalar_list_never_correlates`.
     let schema = json!({
         "type": "object",
         "properties": {
             "tags": {
                 "type": "array",
+                "x-kubernetes-list-type": "map",
+                "x-kubernetes-list-map-keys": ["name"],
                 "items": {
                     "type": "object",
                     "properties": {
+                        "name": {"type": "string"},
                         "value": {"type": "integer"}
                     },
                     "x-kubernetes-validations": [
@@ -283,12 +289,11 @@ fn array_items_with_transition_rule() {
         }
     });
 
-    let obj = json!({"tags": [{"value": 5}, {"value": 2}]});
-    let old = json!({"tags": [{"value": 3}, {"value": 4}]});
+    let obj = json!({"tags": [{"name": "a", "value": 5}, {"name": "b", "value": 2}]});
+    let old = json!({"tags": [{"name": "a", "value": 3}, {"name": "b", "value": 4}]});
     let errors = validate(&schema, &obj, Some(&old)).unwrap_err();
 
-    // tags[0]: 5 >= 3 → OK
-    // tags[1]: 2 >= 4 → FAIL
+    // a: 5 >= 3 → OK; b: 2 >= 4 → FAIL (correlated by name, not index)
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].field_path, "tags[1]");
     assert_eq!(errors[0].message, "tag value cannot decrease");
@@ -476,7 +481,11 @@ fn mixed_transition_and_non_transition_rules() {
 }
 
 #[test]
-fn array_length_mismatch_with_old_self() {
+fn atomic_scalar_list_never_correlates() {
+    // A scalar-item list can never be x-kubernetes-list-type=map (map keys need
+    // object items), so its elements never correlate to old ones (apiserver
+    // MakeMapList → emptyMapList). The item transition rule is therefore skipped
+    // for every element — index-position pairing was the old, non-faithful bug.
     let schema = json!({
         "type": "object",
         "properties": {
@@ -492,13 +501,11 @@ fn array_length_mismatch_with_old_self() {
         }
     });
 
-    // New array is longer: items[2] has no oldSelf → transition rule skipped
     let obj = json!({"items": [5, 3, 10]});
     let old = json!({"items": [3, 4]});
-    let errors = validate(&schema, &obj, Some(&old)).unwrap_err();
-    // items[0]: 5 >= 3 OK, items[1]: 3 >= 4 FAIL, items[2]: no oldSelf → skipped
-    assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0].field_path, "items[1]");
+    // No correlation → all item transition rules skipped → no errors, even though
+    // items[1] (3) is below the old index-1 value (4).
+    assert!(validate(&schema, &obj, Some(&old)).is_ok());
 }
 
 #[test]
@@ -700,7 +707,7 @@ fn optional_old_self_create_end_to_end() {
                     "replicas": {"type": "integer"}
                 },
                 "x-kubernetes-validations": [{
-                    "rule": "oldSelf == null || self.replicas >= oldSelf.replicas",
+                    "rule": "!oldSelf.hasValue() || self.replicas >= oldSelf.value().replicas",
                     "message": "cannot scale down",
                     "optionalOldSelf": true
                 }]
@@ -708,7 +715,7 @@ fn optional_old_self_create_end_to_end() {
         }
     });
 
-    // Create (no old_object): oldSelf is null, rule passes
+    // Create (no old_object): oldSelf is optional.none(), !hasValue() → rule passes
     let obj = json!({"spec": {"replicas": 1}});
     assert!(validate(&schema, &obj, None).is_ok());
 
@@ -1287,7 +1294,7 @@ fn underscore_in_field_name() {
             "my_field": {"type": "integer"}
         },
         "x-kubernetes-validations": [{
-            "rule": "self.my__field > 0",
+            "rule": "self.my_field > 0",
             "message": "my_field must be positive"
         }]
     });
@@ -1403,4 +1410,22 @@ fn schema_within_depth_cap_validates_normally() {
         !errors.iter().any(|e| e.kind == ErrorKind::SchemaTooDeep),
         "within-cap schema must not report SchemaTooDeep; got {errors:?}"
     );
+}
+
+/// A `format: date` value that does not parse is refused at its field, rules or
+/// not: the apiserver's binding fails and its OpenAPI format check refuses it.
+#[test]
+fn invalid_date_value_is_refused() {
+    let schema = json!({
+        "type": "object",
+        "properties": { "d": { "type": "string", "format": "date" } },
+        "x-kubernetes-validations": [{ "rule": "true" }]
+    });
+    for d in ["2024-02-30", "2024-3-05"] {
+        let errors = validate(&schema, &json!({"d": d}), None).unwrap_err();
+        assert_eq!(errors.len(), 1, "{d}: {errors:?}");
+        assert_eq!(errors[0].kind, ErrorKind::EvaluationError);
+        assert_eq!(errors[0].field_path, "d");
+    }
+    assert!(validate(&schema, &json!({"d": "2024-02-29"}), None).is_ok());
 }

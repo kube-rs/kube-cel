@@ -219,6 +219,16 @@ fn lists_range(n: i64) -> ResolveResult {
             "range argument must be non-negative",
         ));
     }
+    // ponytail: cap allocation — kube-cel has no runtime cost budget (the apiserver
+    // enforces one), so an unbounded `range` on untrusted input is a memory DoS.
+    // 10M covers any realistic rule; raise the ceiling if a real use needs more.
+    const MAX_RANGE: i64 = 10_000_000;
+    if n > MAX_RANGE {
+        return Err(ExecutionError::function_error(
+            "lists.range",
+            "range argument exceeds maximum (10000000)",
+        ));
+    }
     let items: Vec<Value> = (0..n).map(Value::Int).collect();
     Ok(Value::List(Arc::new(items)))
 }
@@ -290,6 +300,18 @@ mod tests {
         assert_eq!(eval("[1, 2, 3].sum()"), Value::Int(6));
         assert_eq!(eval("[1.5, 2.5].sum()"), Value::Float(4.0));
         assert_eq!(eval("[].sum()"), Value::Int(0));
+    }
+
+    #[test]
+    fn test_sum_overflow_errors() {
+        // i64::MAX + 1 must error (cel-go integer-overflow semantics), not panic
+        // in debug or silently wrap in release.
+        let mut ctx = Context::default();
+        crate::functions::register_parts(&mut ctx, &[register, crate::functions::dispatch::register]);
+        let result = Program::compile("[9223372036854775807, 1].sum()")
+            .unwrap()
+            .execute(&ctx);
+        assert!(result.is_err(), "sum overflow should error, got {result:?}");
     }
 
     #[test]

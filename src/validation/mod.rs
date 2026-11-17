@@ -292,6 +292,18 @@ fn into_result(errors: Vec<ValidationError>) -> Result<(), ValidationErrors> {
 /// [`MAX_SCHEMA_DEPTH`](crate::validation::compilation::MAX_SCHEMA_DEPTH). Surfacing this —
 /// rather than silently skipping the over-deep subtree — is what keeps the
 /// validator fail-closed: a too-deep schema cannot quietly report success.
+/// A value the apiserver cannot bind for CEL (see `values::binding_error`).
+fn binding_failure(message: String, path: &str) -> ValidationError {
+    ValidationError {
+        rule: String::new(),
+        message,
+        field_path: path.to_string(),
+        reason: None,
+        kind: ErrorKind::EvaluationError,
+        source: None,
+    }
+}
+
 fn schema_too_deep_error(path: &str) -> ValidationError {
     ValidationError {
         rule: String::new(),
@@ -475,6 +487,13 @@ impl Validator {
             return;
         }
 
+        // An old value that is JSON null is no old value: the apiserver's node
+        // `oldObj` is nil, so transition rules skip and `optionalOldSelf` binds
+        // `optional.none()` (schema/cel/validation.go validateExpressions).
+        let old_value = old_value.filter(|o| !o.is_null());
+        if let Some(message) = values::binding_error(value, &values::SchemaFormat::from_schema(schema)) {
+            errors.push(binding_failure(message, &path));
+        }
         let cel_value = json_to_cel_with_schema(value, schema);
         let cel_old = old_value.map(|o| json_to_cel_with_schema(o, schema));
         self.evaluate_validations(
@@ -510,8 +529,20 @@ impl Validator {
         }
 
         if let (Some(items_schema), Some(arr)) = (schema.get("items"), value.as_array()) {
+            // Only `x-kubernetes-list-type: map` lists correlate old↔new by key.
+            let list_map_keys: Vec<String> =
+                if schema.get("x-kubernetes-list-type").and_then(|v| v.as_str()) == Some("map") {
+                    schema
+                        .get("x-kubernetes-list-map-keys")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.iter().filter_map(|k| k.as_str().map(String::from)).collect())
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+            let correlation = MapListCorrelation::build(&list_map_keys, old_value);
             for (i, item) in arr.iter().enumerate() {
-                let old_item = old_value.and_then(|o| o.as_array()).and_then(|a| a.get(i));
+                let old_item = correlation.get(item);
                 let item_path = join_path_index(&path, i);
                 self.walk_schema(
                     items_schema,
@@ -615,6 +646,11 @@ impl Validator {
             return;
         }
 
+        // Null old value = no old value, as in `walk_schema`.
+        let old_value = old_value.filter(|o| !o.is_null());
+        if let Some(message) = values::binding_error(value, &compiled.format) {
+            errors.push(binding_failure(message, &path));
+        }
         let cel_value = json_to_cel_with_compiled(value, compiled);
         let cel_old = old_value.map(|o| json_to_cel_with_compiled(o, compiled));
         self.evaluate_compiled_results(
@@ -647,8 +683,9 @@ impl Validator {
         }
 
         if let (Some(items_compiled), Some(arr)) = (&compiled.items, value.as_array()) {
+            let correlation = MapListCorrelation::build(&compiled.list_map_keys, old_value);
             for (i, item) in arr.iter().enumerate() {
-                let old_item = old_value.and_then(|o| o.as_array()).and_then(|a| a.get(i));
+                let old_item = correlation.get(item);
                 let item_path = join_path_index(&path, i);
                 self.walk_compiled(
                     items_compiled,
@@ -807,16 +844,26 @@ impl Validator {
             return; // skip transition rule without old value
         }
 
-        // optionalOldSelf: true + no old object → child scope with oldSelf = null
-        let use_null_old_self = cel_old.is_none() && cr.rule.optional_old_self == Some(true);
-        let null_scope;
-        let effective_ctx: &Context<'_, '_> = if use_null_old_self {
-            null_scope = {
+        // optionalOldSelf: bind `oldSelf` as a CEL optional in a per-rule child
+        // scope, overriding the node's raw-old binding. apiserver's
+        // optionalOldSelfActivation resolves oldSelf to optional.none() on create
+        // and optional.of(old) on update — NOT null/raw (schema/cel/validation.go
+        // validationActivationWithOldSelf). The rule uses oldSelf.hasValue()/
+        // .value() rather than an `oldSelf == null` check.
+        let opt_scope;
+        let effective_ctx: &Context<'_, '_> = if cr.rule.optional_old_self == Some(true) {
+            opt_scope = {
                 let mut s = node_ctx.new_inner_scope();
-                s.add_variable_from_value("oldSelf", cel::Value::Null);
+                let old_self = match cel_old {
+                    Some(old) => {
+                        cel::Value::Opaque(std::sync::Arc::new(cel::objects::OptionalValue::of(old.clone())))
+                    }
+                    None => cel::Value::Opaque(std::sync::Arc::new(cel::objects::OptionalValue::none())),
+                };
+                s.add_variable_from_value("oldSelf", old_self);
                 s
             };
-            &null_scope
+            &opt_scope
         } else {
             node_ctx
         };
@@ -882,17 +929,52 @@ impl Validator {
     }
 
     /// Resolve the error message: try messageExpression first, fall back to
-    /// static message, then default.
+    /// static message, then default — applying apiserver's sanitisation rules
+    /// (see [`resolve_failure_message`]).
     fn resolve_message(&self, cr: &CompilationResult, ctx: &Context<'_, '_>) -> String {
-        if let Some(ref msg_prog) = cr.message_program
-            && let Ok(cel::Value::String(s)) = msg_prog.execute(ctx)
-        {
-            return (*s).clone();
-        }
-        cr.rule
-            .message
-            .clone()
-            .unwrap_or_else(|| format!("failed rule: {}", cr.rule.rule))
+        let expr_result = cr
+            .message_program
+            .as_ref()
+            .and_then(|prog| match prog.execute(ctx) {
+                Ok(cel::Value::String(s)) => Some((*s).clone()),
+                _ => None,
+            });
+        resolve_failure_message(expr_result.as_deref(), cr.rule.message.as_deref(), || {
+            format!("failed rule: {}", cr.rule.rule.trim())
+        })
+    }
+}
+
+/// Maximum byte length of an evaluated `messageExpression` result, matching
+/// apiserver `celconfig.MaxEvaluatedMessageExpressionSizeBytes` (5 KiB).
+pub(crate) const MAX_MESSAGE_EXPRESSION_BYTES: usize = 5 * 1024;
+
+/// Resolve a validation-failure message the way the apiserver does.
+///
+/// `expr_result` is the `messageExpression`'s evaluated value as a string (`None`
+/// when there was no messageExpression, it errored, or it produced a non-string).
+/// The apiserver trims that result and only uses it when it is non-empty,
+/// single-line and within [`MAX_MESSAGE_EXPRESSION_BYTES`]; otherwise it falls
+/// back to the trimmed static `message`, then to `default`. Both the CRD path
+/// (`evalMessageExpression`) and the VAP validator apply these identical checks,
+/// so both call sites share this guard rather than using the raw result.
+pub(crate) fn resolve_failure_message(
+    expr_result: Option<&str>,
+    message: Option<&str>,
+    default: impl FnOnce() -> String,
+) -> String {
+    if let Some(trimmed) = expr_result.map(str::trim)
+        && !trimmed.is_empty()
+        && trimmed.len() <= MAX_MESSAGE_EXPRESSION_BYTES
+        && !trimmed.contains('\n')
+    {
+        return trimmed.to_string();
+    }
+    // apiserver's ruleMessageOrDefault checks the *untrimmed* message for
+    // emptiness, then trims what it returns.
+    match message {
+        Some(m) if !m.is_empty() => m.trim().to_string(),
+        _ => default(),
     }
 }
 
@@ -959,6 +1041,89 @@ fn join_path_index(base: &str, index: usize) -> String {
         format!("[{index}]")
     } else {
         format!("{base}[{index}]")
+    }
+}
+
+/// One component of an `x-kubernetes-list-map-keys` composite key. Only scalars
+/// are keyable (apiserver's `keyStrategy`); a missing key or non-scalar value
+/// makes the whole item unkeyable, so it never correlates.
+#[derive(PartialEq, Eq, Hash)]
+enum KeyPart {
+    Bool(bool),
+    Int(i64),
+    /// A float under a single map key compares by value (`singleKeyStrategy`):
+    /// the bits of the value with `-0.0` folded into `0.0`, which Go's `==` on
+    /// `float64` map keys treats as equal.
+    Float(u64),
+    /// A float under several map keys compares by its Go `%f` rendering:
+    /// `multiKeyStrategy` joins `fmt.Fprintf("%f")` strings, so floats that
+    /// agree to six decimals are the same key there.
+    Fixed(String),
+    Str(String),
+}
+
+/// Composite key of `item` over `keys`, in schema key order. `None` if `item`
+/// isn't an object, a key is absent, or any key value is non-scalar — matching
+/// `CompositeKeyFor` in apiserver's maplist.go.
+fn composite_key(keys: &[String], item: &serde_json::Value) -> Option<Vec<KeyPart>> {
+    let obj = item.as_object()?;
+    let multi_key = keys.len() > 1;
+    let mut parts = Vec::with_capacity(keys.len());
+    for key in keys {
+        parts.push(match obj.get(key)? {
+            serde_json::Value::Bool(b) => KeyPart::Bool(*b),
+            serde_json::Value::String(s) => KeyPart::Str(s.clone()),
+            // The apiserver decodes a JSON number as an int64 when it is an
+            // integer that fits, else as a float64 (so 2^63 and 2^63 + 1 are
+            // one key there), and keys on that Go value.
+            serde_json::Value::Number(n) => match n.as_i64() {
+                Some(i) => KeyPart::Int(i),
+                // Rust's `{:.6}` and Go's `%f` round the same way.
+                None if multi_key => KeyPart::Fixed(format!("{:.6}", n.as_f64()?)),
+                None => KeyPart::Float((n.as_f64()? + 0.0).to_bits()),
+            },
+            _ => return None, // null / array / object
+        });
+    }
+    Some(parts)
+}
+
+/// Correlates new list items to old list items by `x-kubernetes-list-map-keys`,
+/// mirroring the apiserver's `MakeMapList` (schema/cel/validation.go). Only
+/// `x-kubernetes-list-type: map` lists with declared keys correlate; for every
+/// other list (set/atomic/unset) `map_keys` is empty, so [`get`](Self::get)
+/// always returns `None`, each item's `oldSelf` is absent, and transition rules
+/// are skipped — exactly as the apiserver's `emptyMapList` does.
+struct MapListCorrelation<'a> {
+    keys: &'a [String],
+    old_by_key: std::collections::HashMap<Vec<KeyPart>, &'a serde_json::Value>,
+}
+
+impl<'a> MapListCorrelation<'a> {
+    fn build(map_keys: &'a [String], old_value: Option<&'a serde_json::Value>) -> Self {
+        let mut old_by_key = std::collections::HashMap::new();
+        if !map_keys.is_empty()
+            && let Some(arr) = old_value.and_then(|o| o.as_array())
+        {
+            for item in arr {
+                if let Some(k) = composite_key(map_keys, item) {
+                    old_by_key.entry(k).or_insert(item); // first occurrence wins
+                }
+            }
+        }
+        Self {
+            keys: map_keys,
+            old_by_key,
+        }
+    }
+
+    /// The old item whose key tuple matches `new_item`, or `None`.
+    fn get(&self, new_item: &serde_json::Value) -> Option<&'a serde_json::Value> {
+        if self.old_by_key.is_empty() {
+            return None;
+        }
+        let k = composite_key(self.keys, new_item)?;
+        self.old_by_key.get(&k).copied()
     }
 }
 
@@ -1078,6 +1243,205 @@ mod tests {
         let obj = json!({"replicas": 5, "name": "app"});
         let old = json!({"replicas": 3, "name": "app"});
         assert!(validate(&schema, &obj, Some(&old)).is_ok());
+    }
+
+    // ── item 16: list-item transition correlation (apiserver MakeMapList) ──
+
+    /// `{items: [{name, value}]}` with an item-level transition rule
+    /// `self.value >= oldSelf.value`. `list_type` goes on the array node; `None`
+    /// omits the marker (atomic default). Map lists add `list-map-keys: [name]`.
+    fn list_item_transition_schema(list_type: Option<&str>) -> serde_json::Value {
+        let mut arr = json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "value": {"type": "integer"}
+                },
+                "x-kubernetes-validations": [
+                    {"rule": "self.value >= oldSelf.value", "message": "value cannot decrease"}
+                ]
+            }
+        });
+        if let Some(lt) = list_type {
+            arr["x-kubernetes-list-type"] = json!(lt);
+            if lt == "map" {
+                arr["x-kubernetes-list-map-keys"] = json!(["name"]);
+            }
+        }
+        json!({"type": "object", "properties": {"items": arr}})
+    }
+
+    #[test]
+    fn map_list_correlates_by_key_not_index() {
+        let schema = list_item_transition_schema(Some("map"));
+        // Same items, reordered. Index-correlation would pair b↔a and fail;
+        // key-correlation pairs each name with itself → all pass.
+        let old = json!({"items": [{"name":"a","value":1}, {"name":"b","value":10}]});
+        let new = json!({"items": [{"name":"b","value":10}, {"name":"a","value":1}]});
+        assert!(validate(&schema, &new, Some(&old)).is_ok());
+    }
+
+    #[test]
+    fn map_list_transition_fails_on_matched_key() {
+        let schema = list_item_transition_schema(Some("map"));
+        let old = json!({"items": [{"name":"a","value":5}, {"name":"b","value":10}]});
+        // "a" decreased 5→3, reordered so index-correlation would mis-pair.
+        let new = json!({"items": [{"name":"b","value":10}, {"name":"a","value":3}]});
+        let errors = validate(&schema, &new, Some(&old)).unwrap_err();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].message, "value cannot decrease");
+        assert_eq!(errors[0].field_path, "items[1]"); // "a" is at new index 1
+    }
+
+    #[test]
+    fn map_list_added_item_skips_transition_rule() {
+        let schema = list_item_transition_schema(Some("map"));
+        let old = json!({"items": [{"name":"a","value":5}]});
+        // "b" is new — no old correlate, so its transition rule is skipped (else
+        // `oldSelf.value` on the absent binding would error and fail the object).
+        let new = json!({"items": [{"name":"a","value":5}, {"name":"b","value":1}]});
+        assert!(validate(&schema, &new, Some(&old)).is_ok());
+    }
+
+    #[test]
+    fn atomic_list_never_correlates_items() {
+        // No list-type marker → atomic default. Index-correlation (the old bug)
+        // would pair 0↔0 and fail; the apiserver correlates only map lists, so
+        // the item transition rule is skipped even though value decreased.
+        let schema = list_item_transition_schema(None);
+        let old = json!({"items": [{"name":"a","value":5}]});
+        let new = json!({"items": [{"name":"a","value":1}]});
+        assert!(validate(&schema, &new, Some(&old)).is_ok());
+    }
+
+    #[test]
+    fn set_list_never_correlates_items() {
+        let schema = list_item_transition_schema(Some("set"));
+        let old = json!({"items": [{"name":"a","value":5}]});
+        let new = json!({"items": [{"name":"a","value":1}]});
+        assert!(validate(&schema, &new, Some(&old)).is_ok());
+    }
+
+    #[test]
+    fn map_list_correlation_compiled_path() {
+        // Same by-key correlation via the pre-compiled walk.
+        let schema = list_item_transition_schema(Some("map"));
+        let compiled = compile_schema(&schema);
+        let old = json!({"items": [{"name":"a","value":5}, {"name":"b","value":10}]});
+        let new = json!({"items": [{"name":"b","value":10}, {"name":"a","value":3}]});
+        let errors = validate_compiled(&compiled, &new, Some(&old)).unwrap_err();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].field_path, "items[1]");
+    }
+
+    #[test]
+    fn map_list_multi_key_floats_compare_as_go_percent_f() {
+        // Several map keys → floats compare by `%f` (six decimals), so
+        // 1.0000001 and 1.0000002 are the same key and the rule runs.
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "x-kubernetes-list-type": "map",
+                    "x-kubernetes-list-map-keys": ["g", "f"],
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "g": {"type": "string"},
+                            "f": {"type": "number"},
+                            "v": {"type": "integer"}
+                        },
+                        "x-kubernetes-validations": [
+                            {"rule": "self.v >= oldSelf.v", "message": "v cannot decrease"}
+                        ]
+                    }
+                }
+            }
+        });
+        let old = json!({"items": [{"g": "x", "f": 1.0000001, "v": 5}]});
+        let new = json!({"items": [{"g": "x", "f": 1.0000002, "v": 1}]});
+        assert!(validate(&schema, &new, Some(&old)).is_err());
+        assert!(validate_compiled(&compile_schema(&schema), &new, Some(&old)).is_err());
+        // Under a single key the same floats are different keys.
+        let mut single = schema.clone();
+        single["properties"]["items"]["x-kubernetes-list-map-keys"] = json!(["f"]);
+        assert!(validate(&single, &new, Some(&old)).is_ok());
+    }
+
+    #[test]
+    fn map_list_number_keys_compare_as_go_decodes_them() {
+        // Past int64 a JSON number is a float64 in the apiserver, so 2^63 and
+        // 2^63 + 1 are one key; and a single float key -0.0 equals 0.0.
+        let schema = |keys: serde_json::Value| {
+            json!({
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "x-kubernetes-list-type": "map",
+                        "x-kubernetes-list-map-keys": keys,
+                        "items": {
+                            "type": "object",
+                            "properties": {"k": {"type": "number"}, "v": {"type": "integer"}},
+                            "x-kubernetes-validations": [
+                                {"rule": "self.v >= oldSelf.v", "message": "v cannot decrease"}
+                            ]
+                        }
+                    }
+                }
+            })
+        };
+        let parse = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
+        for (old_k, new_k) in [("9223372036854775808", "9223372036854775809"), ("-0.0", "0.0")] {
+            let old = parse(&format!(r#"{{"items": [{{"k": {old_k}, "v": 5}}]}}"#));
+            let new = parse(&format!(r#"{{"items": [{{"k": {new_k}, "v": 1}}]}}"#));
+            let single = schema(json!(["k"]));
+            assert!(validate(&single, &new, Some(&old)).is_err(), "{old_k} -> {new_k}");
+            assert!(validate_compiled(&compile_schema(&single), &new, Some(&old)).is_err());
+        }
+    }
+
+    #[test]
+    fn map_list_multi_key_correlation() {
+        // Two-key list: correlate by (group, name). A missing key on an item
+        // makes it unkeyable (no correlation), so its transition rule is skipped.
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "x-kubernetes-list-type": "map",
+                    "x-kubernetes-list-map-keys": ["group", "name"],
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "group": {"type": "string"},
+                            "name": {"type": "string"},
+                            "value": {"type": "integer"}
+                        },
+                        "x-kubernetes-validations": [
+                            {"rule": "self.value >= oldSelf.value", "message": "value cannot decrease"}
+                        ]
+                    }
+                }
+            }
+        });
+        let old = json!({"items": [
+            {"group":"g","name":"a","value":5},
+            {"group":"h","name":"a","value":1}
+        ]});
+        // Reordered; (h,a) decreased 1→0 must fail, (g,a) 5→5 holds. Index would
+        // pair (g,a)↔(h,a) and (h,a)↔(g,a), giving the wrong verdicts.
+        let new = json!({"items": [
+            {"group":"h","name":"a","value":0},
+            {"group":"g","name":"a","value":5}
+        ]});
+        let errors = validate(&schema, &new, Some(&old)).unwrap_err();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].field_path, "items[0]"); // (h,a) at new index 0
     }
 
     #[test]
@@ -1255,6 +1619,48 @@ mod tests {
     }
 
     #[test]
+    fn message_expression_result_is_trimmed() {
+        // apiserver TrimSpaces the messageExpression result before using it.
+        let schema = make_schema(json!([{
+            "rule": "self.replicas >= 0",
+            "message": "static fallback",
+            "messageExpression": "'  spaced out  '"
+        }]));
+        let obj = json!({"replicas": -5, "name": "app"});
+        let errors = validate(&schema, &obj, None).unwrap_err();
+        assert_eq!(errors[0].message, "spaced out");
+    }
+
+    #[test]
+    fn empty_message_expression_falls_back_to_static() {
+        // A messageExpression that evaluates to empty/whitespace-only is rejected
+        // and the static message is used instead (apiserver: non-empty required).
+        for me in ["''", "'   '"] {
+            let schema = make_schema(json!([{
+                "rule": "self.replicas >= 0",
+                "message": "static fallback",
+                "messageExpression": me
+            }]));
+            let obj = json!({"replicas": -5, "name": "app"});
+            let errors = validate(&schema, &obj, None).unwrap_err();
+            assert_eq!(errors[0].message, "static fallback", "messageExpression {me}");
+        }
+    }
+
+    #[test]
+    fn multiline_message_expression_falls_back_to_static() {
+        // apiserver rejects a messageExpression result containing a line break.
+        let schema = make_schema(json!([{
+            "rule": "self.replicas >= 0",
+            "message": "static fallback",
+            "messageExpression": "'line one\\nline two'"
+        }]));
+        let obj = json!({"replicas": -5, "name": "app"});
+        let errors = validate(&schema, &obj, None).unwrap_err();
+        assert_eq!(errors[0].message, "static fallback");
+    }
+
+    #[test]
     fn invalid_message_expression_fails_closed() {
         let schema = make_schema(json!([{
             "rule": "self.replicas >= 0",
@@ -1273,28 +1679,57 @@ mod tests {
 
     #[test]
     fn optional_old_self_evaluated_on_create() {
+        // apiserver binds oldSelf as a CEL optional under optionalOldSelf; on
+        // create it is optional.none(), so the ratcheting rule guards with
+        // hasValue()/value() (not `oldSelf == null`).
         let schema = make_schema(json!([{
-            "rule": "oldSelf == null || self.replicas >= oldSelf.replicas",
+            "rule": "!oldSelf.hasValue() || self.replicas >= oldSelf.value().replicas",
             "message": "cannot scale down",
             "optionalOldSelf": true
         }]));
-        // Create (no old object): rule is evaluated with oldSelf = null
+        // Create (no old object): oldSelf = optional.none() → !hasValue() → passes.
         let obj = json!({"replicas": 1, "name": "app"});
-        assert!(validate(&schema, &obj, None).is_ok()); // oldSelf == null → true
+        assert!(validate(&schema, &obj, None).is_ok());
     }
 
     #[test]
     fn optional_old_self_with_old_object() {
         let schema = make_schema(json!([{
-            "rule": "oldSelf == null || self.replicas >= oldSelf.replicas",
+            "rule": "!oldSelf.hasValue() || self.replicas >= oldSelf.value().replicas",
             "message": "cannot scale down",
             "optionalOldSelf": true
         }]));
+        // Update: oldSelf = optional.of(old); scaling 3 → 1 violates the rule.
         let obj = json!({"replicas": 1, "name": "app"});
         let old = json!({"replicas": 3, "name": "app"});
         let errors = validate(&schema, &obj, Some(&old)).unwrap_err();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].message, "cannot scale down");
+    }
+
+    #[test]
+    fn optional_old_self_binds_optional_none_on_create() {
+        // Directly pin the optional nature: on create hasValue() is false.
+        let schema = make_schema(json!([{
+            "rule": "!oldSelf.hasValue()",
+            "message": "expected optional.none() on create",
+            "optionalOldSelf": true
+        }]));
+        let obj = json!({"replicas": 1, "name": "app"});
+        assert!(validate(&schema, &obj, None).is_ok());
+    }
+
+    #[test]
+    fn optional_old_self_binds_optional_of_on_update() {
+        // On update oldSelf is optional.of(old) — value() yields the old object.
+        let schema = make_schema(json!([{
+            "rule": "oldSelf.hasValue() && oldSelf.value().replicas == 3",
+            "message": "expected optional.of(old) on update",
+            "optionalOldSelf": true
+        }]));
+        let obj = json!({"replicas": 1, "name": "app"});
+        let old = json!({"replicas": 3, "name": "app"});
+        assert!(validate(&schema, &obj, Some(&old)).is_ok());
     }
 
     #[test]
@@ -1307,6 +1742,45 @@ mod tests {
         let obj = json!({"replicas": 1, "name": "app"});
         // optionalOldSelf: false → transition rule skipped on create
         assert!(validate(&schema, &obj, None).is_ok());
+    }
+
+    /// `{sub}` where `sub` is nullable and carries `rules`.
+    fn nullable_sub_schema(rules: serde_json::Value) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "sub": {
+                    "type": "object",
+                    "nullable": true,
+                    "properties": {"a": {"type": "string"}},
+                    "x-kubernetes-validations": rules
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn null_old_value_binds_optional_none() {
+        // A JSON-null old value is no old value (apiserver `oldObj == nil`).
+        let schema = nullable_sub_schema(json!([{
+            "rule": "!oldSelf.hasValue()",
+            "message": "oldSelf must be none",
+            "optionalOldSelf": true
+        }]));
+        let obj = json!({"sub": {"a": "x"}});
+        let old = json!({"sub": null});
+        assert!(validate(&schema, &obj, Some(&old)).is_ok());
+        assert!(validate_compiled(&compile_schema(&schema), &obj, Some(&old)).is_ok());
+    }
+
+    #[test]
+    fn null_old_value_skips_transition_rule() {
+        let schema =
+            nullable_sub_schema(json!([{"rule": "self.a == oldSelf.a", "message": "a is immutable"}]));
+        let obj = json!({"sub": {"a": "x"}});
+        let old = json!({"sub": null});
+        assert!(validate(&schema, &obj, Some(&old)).is_ok());
+        assert!(validate_compiled(&compile_schema(&schema), &obj, Some(&old)).is_ok());
     }
 
     #[test]

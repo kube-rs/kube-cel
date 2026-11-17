@@ -5,9 +5,9 @@
 //! values can then be bound as variables (e.g. `self`, `oldSelf`) in a CEL
 //! evaluation context.
 //!
-//! For schema-aware conversion that respects `format: "date-time"` and
-//! `format: "duration"`, use [`json_to_cel_with_schema`] or
-//! [`json_to_cel_with_compiled`].
+//! For schema-aware conversion that respects the schema's binding hints
+//! (`format: "date-time"`/`"date"`/`"duration"`/`"byte"`, and `type: "number"`),
+//! use [`json_to_cel_with_schema`] or [`json_to_cel_with_compiled`].
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -32,9 +32,19 @@ pub enum SchemaFormat {
     /// keeping it a string would diverge (e.g. `size()` returns the encoded
     /// length).
     Bytes,
+    /// `format: "date"` — `YYYY-MM-DD` strings bind as CEL `Timestamp` (midnight
+    /// UTC). The apiserver parses them with `strfmt.RFC3339FullDate`, so date
+    /// fields support the timestamp accessors (`getFullYear()` etc.); keeping
+    /// them strings would diverge.
+    Date,
     /// `x-kubernetes-int-or-string: true` — field can be int or string.
     /// Primarily a marker to prevent format: "date-time" etc from being interpreted.
     IntOrString,
+    /// `type: "number"` — JSON numbers bind as CEL `double`, even when the value
+    /// is integral. YAML→JSON translation turns `1.0` into `1`, so the apiserver
+    /// converts *every* numeric variant to `types.Double` under `type: number`;
+    /// binding `1` as an int would make `self.x / 2` integer division.
+    Number,
     /// No recognized format or not a string type.
     #[default]
     None,
@@ -46,8 +56,14 @@ impl SchemaFormat {
         if schema.get("x-kubernetes-int-or-string").and_then(|v| v.as_bool()) == Some(true) {
             return SchemaFormat::IntOrString;
         }
+        // The apiserver switches on `type` first (`UnstructuredToVal`): a
+        // `type: number` value is a double whatever its `format` says.
+        if schema.get("type").and_then(|t| t.as_str()) == Some("number") {
+            return SchemaFormat::Number;
+        }
         match schema.get("format").and_then(|f| f.as_str()) {
             Some("date-time") => SchemaFormat::DateTime,
+            Some("date") => SchemaFormat::Date,
             Some("duration") => SchemaFormat::Duration,
             Some("byte") => SchemaFormat::Bytes,
             _ => SchemaFormat::None,
@@ -68,27 +84,57 @@ impl SchemaFormat {
 /// 3. `f64` — for all other numeric values (floating-point)
 #[must_use]
 pub(crate) fn json_to_cel(value: &serde_json::Value) -> Value {
+    json_to_cel_impl(value, true)
+}
+
+/// Like [`json_to_cel`] but leaves object keys **unescaped** (literal names).
+///
+/// VAP objects are unstructured — there is no schema declaring struct fields — so
+/// the apiserver binds `object`/`oldObject`/`params` without the field-name
+/// escaping that CRD `self` uses. Map entries are accessed by their literal keys
+/// (e.g. `object.metadata.labels['app.kubernetes.io/name']`); escaping them would
+/// break every special-character key, label and annotation lookup included.
+#[must_use]
+pub(crate) fn json_to_cel_raw(value: &serde_json::Value) -> Value {
+    json_to_cel_impl(value, false)
+}
+
+fn json_to_cel_impl(value: &serde_json::Value, escape_keys: bool) -> Value {
     match value {
         serde_json::Value::Null => Value::Null,
         serde_json::Value::Bool(b) => Value::Bool(*b),
-        serde_json::Value::Number(n) => convert_number(n),
+        serde_json::Value::Number(n) => convert_number(n, &SchemaFormat::None),
         serde_json::Value::String(s) => Value::String(Arc::new(s.clone())),
         serde_json::Value::Array(arr) => {
-            let items: Vec<Value> = arr.iter().map(json_to_cel).collect();
+            let items: Vec<Value> = arr.iter().map(|v| json_to_cel_impl(v, escape_keys)).collect();
             Value::List(Arc::new(items))
         }
         serde_json::Value::Object(obj) => {
             let mut map = HashMap::with_capacity(obj.len());
             for (k, v) in obj {
-                map.insert(Key::String(Arc::new(escape_field_name(k))), json_to_cel(v));
+                let key = if escape_keys {
+                    escape_field_name(k)
+                } else {
+                    k.clone()
+                };
+                map.insert(Key::String(Arc::new(key)), json_to_cel_impl(v, escape_keys));
             }
             Value::Map(Map { map: Arc::new(map) })
         }
     }
 }
 
+/// Convert a JSON number using the schema's binding hint.
+///
+/// Under `type: number` the schema wins over the JSON representation: the
+/// apiserver's `UnstructuredToVal` maps `int`/`int32`/`int64`/`float32`/`float64`
+/// alike to `types.Double` there, because YAML→JSON translation collapses whole
+/// floats (`1.0`) to integers (`1`).
 #[inline]
-fn convert_number(n: &serde_json::Number) -> Value {
+fn convert_number(n: &serde_json::Number, format: &SchemaFormat) -> Value {
+    if *format == SchemaFormat::Number {
+        return Value::Float(n.as_f64().unwrap_or(f64::NAN));
+    }
     if let Some(i) = n.as_i64() {
         Value::Int(i)
     } else if let Some(u) = n.as_u64() {
@@ -111,7 +157,7 @@ pub(crate) fn json_to_cel_with_schema(value: &serde_json::Value, schema: &serde_
     match value {
         serde_json::Value::Null => Value::Null,
         serde_json::Value::Bool(b) => Value::Bool(*b),
-        serde_json::Value::Number(n) => convert_number(n),
+        serde_json::Value::Number(n) => convert_number(n, &format),
         serde_json::Value::String(s) => convert_string_with_format(s, &format),
         serde_json::Value::Array(arr) => {
             let items_schema = schema.get("items");
@@ -178,7 +224,7 @@ pub(crate) fn json_to_cel_with_compiled(value: &serde_json::Value, compiled: &Co
     match value {
         serde_json::Value::Null => Value::Null,
         serde_json::Value::Bool(b) => Value::Bool(*b),
-        serde_json::Value::Number(n) => convert_number(n),
+        serde_json::Value::Number(n) => convert_number(n, &compiled.format),
         serde_json::Value::String(s) => convert_string_with_format(s, &compiled.format),
         serde_json::Value::Array(arr) => {
             let items: Vec<Value> = arr
@@ -238,6 +284,15 @@ fn convert_string_with_format(s: &str, format: &SchemaFormat) -> Value {
             }
             Value::String(Arc::new(s.to_string()))
         }
+        // `strfmt.RFC3339FullDate` is Go's fixed-width `2006-01-02`, so a
+        // one-digit month/day ("2026-7-2") is a parse error there while chrono's
+        // `%m`/`%d` would accept it — hence the exact-length guard.
+        // An invalid date stays a string here; the validator reports it as an
+        // error at its field (see `binding_error`), as the apiserver does.
+        SchemaFormat::Date => match parse_date(s) {
+            Some(ts) => Value::Timestamp(ts),
+            None => Value::String(Arc::new(s.to_string())),
+        },
         SchemaFormat::Duration => {
             if let Some(d) = parse_go_duration(s) {
                 return Value::Duration(d);
@@ -250,8 +305,34 @@ fn convert_string_with_format(s: &str, format: &SchemaFormat) -> Value {
             // upstream; fall back to the raw string rather than failing here.
             Err(_) => Value::String(Arc::new(s.to_string())),
         },
-        SchemaFormat::IntOrString => Value::String(Arc::new(s.to_string())),
-        SchemaFormat::None => Value::String(Arc::new(s.to_string())),
+        SchemaFormat::IntOrString | SchemaFormat::Number | SchemaFormat::None => {
+            Value::String(Arc::new(s.to_string()))
+        }
+    }
+}
+
+/// A `format: date` string as the apiserver binds it:
+/// `time.Parse(strfmt.RFC3339FullDate, s)`, Go's fixed-width `2006-01-02`, so
+/// a one-digit month or day ("2026-7-2") is an error there while chrono's
+/// `%m`/`%d` would accept it, hence the exact-length guard.
+pub(crate) fn parse_date(s: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    if s.len() != 10 {
+        return None;
+    }
+    let date = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()?;
+    Some(date.and_hms_opt(0, 0, 0)?.and_utc().fixed_offset())
+}
+
+/// Why the apiserver cannot bind `value` under `format`, if it cannot: its
+/// binding returns an error, and its OpenAPI format check refuses the object
+/// whether or not a rule reads the field. Only formats whose parser here
+/// matches the apiserver's exactly are checked, so this never refuses a value
+/// the apiserver accepts.
+pub(crate) fn binding_error(value: &serde_json::Value, format: &SchemaFormat) -> Option<String> {
+    let s = value.as_str()?;
+    match format {
+        SchemaFormat::Date if parse_date(s).is_none() => Some(format!("Invalid date formatted string {s}")),
+        _ => None,
     }
 }
 
@@ -543,6 +624,80 @@ mod tests {
         let value = json!("2024-01-01T00:00:00Z");
         let result = json_to_cel_with_schema(&value, &schema);
         assert!(matches!(result, Value::Timestamp(_)));
+    }
+
+    #[test]
+    fn number_type_wins_over_a_string_format() {
+        for format in ["date", "date-time", "duration", "byte"] {
+            let schema = json!({ "type": "number", "format": format });
+            assert_eq!(
+                SchemaFormat::from_schema(&schema),
+                SchemaFormat::Number,
+                "{format}"
+            );
+            assert_eq!(
+                json_to_cel_with_schema(&json!(1), &schema),
+                Value::Float(1.0),
+                "{format}"
+            );
+        }
+    }
+
+    #[test]
+    fn date_format_parses_to_timestamp() {
+        // apiserver: `case "date": time.Parse(strfmt.RFC3339FullDate, str)` →
+        // types.Timestamp, so date fields support the timestamp accessors.
+        let schema = json!({ "type": "string", "format": "date" });
+        let result = json_to_cel_with_schema(&json!("2024-03-05"), &schema);
+        let Value::Timestamp(ts) = result else {
+            panic!("expected Timestamp, got {result:?}");
+        };
+        assert_eq!(ts.to_rfc3339(), "2024-03-05T00:00:00+00:00");
+    }
+
+    #[test]
+    fn date_format_invalid_is_a_binding_error() {
+        let schema = json!({ "type": "string", "format": "date" });
+        let format = SchemaFormat::from_schema(&schema);
+        // Go's fixed-width layout rejects a one-digit month, and Go's calendar
+        // a day out of range; so must we.
+        for s in ["2024-3-05", "2024-02-30", "not-a-date", "2024-03-05T00:00:00Z"] {
+            assert!(parse_date(s).is_none(), "{s} should not parse as a date");
+            assert!(binding_error(&json!(s), &format).is_some(), "{s}");
+        }
+        assert!(binding_error(&json!("2024-03-05"), &format).is_none());
+    }
+
+    #[test]
+    fn number_type_binds_integral_value_as_double() {
+        // The divergence this pins: `{"x": 1}` under `type: number` is a CEL
+        // double upstream, so `self.x / 2` is 0.5 — not integer division.
+        let schema = json!({ "type": "number" });
+        assert_eq!(json_to_cel_with_schema(&json!(1), &schema), Value::Float(1.0));
+        assert_eq!(json_to_cel_with_schema(&json!(1.5), &schema), Value::Float(1.5));
+    }
+
+    #[test]
+    fn integer_type_stays_int() {
+        let schema = json!({ "type": "integer" });
+        assert_eq!(json_to_cel_with_schema(&json!(1), &schema), Value::Int(1));
+    }
+
+    #[test]
+    fn number_type_binds_double_through_compiled_schema() {
+        // The compiled path carries the same hint, so both entry points agree.
+        let schema = json!({
+            "type": "object",
+            "properties": { "x": { "type": "number" } }
+        });
+        let compiled = crate::validation::compilation::compile_schema(&schema);
+        let Value::Map(m) = json_to_cel_with_compiled(&json!({"x": 1}), &compiled) else {
+            panic!("expected Map");
+        };
+        assert_eq!(
+            m.map.get(&Key::String(Arc::new("x".into()))),
+            Some(&Value::Float(1.0))
+        );
     }
 
     #[test]

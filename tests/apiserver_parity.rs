@@ -4,9 +4,7 @@
 //! `kubectl apply --dry-run=server` over a CRD wrapping each schema; server
 //! dry-run runs CEL admission but persists nothing) and asserts kube-cel's
 //! [`Validator`] agrees on every case. This pins kube-cel to ground truth and
-//! catches divergences a hand-written expectation would miss. The same table is
-//! also exercised in-process by `envtest_parity.rs`; any disagreement between the
-//! two runners is itself a finding.
+//! catches divergences a hand-written expectation would miss.
 //!
 //! The tests are `#[ignore]`, so `cargo test` skips them (no cluster in CI).
 //! Run via `just parity`, which provisions a throwaway kind cluster and exports
@@ -23,6 +21,7 @@ use serde_json::{Value, json};
 mod common;
 use common::{
     Expect, Verdict, cases, kubecel_compiled_verdict, kubecel_verdict, kubecel_verdict_with_defaults,
+    transition_cases,
 };
 
 fn ctx() -> String {
@@ -73,9 +72,8 @@ fn crd_for(kind: &str, plural: &str, schema: &Value) -> Value {
     })
 }
 
-/// Apply a CRD wrapping `schema` under a unique `kind`, then server-dry-run the
-/// `object` as a CR and return the apiserver's CEL-admission verdict.
-fn apiserver_verdict(kind: &str, plural: &str, schema: &Value, object: &Value) -> Verdict {
+/// Apply a CRD wrapping `schema` under a unique `kind` and wait until it serves.
+fn register_crd(kind: &str, plural: &str, schema: &Value) {
     let crd = crd_for(kind, plural, schema);
     let (ok, out) = kubectl(&["apply", "-f", "-"], Some(&crd.to_string()));
     assert!(ok, "CRD apply failed for {kind}: {out}");
@@ -89,12 +87,22 @@ fn apiserver_verdict(kind: &str, plural: &str, schema: &Value, object: &Value) -
         None,
     );
     assert!(ok, "CRD {plural}.x.test never became Established: {out}");
+}
 
+/// `object` as a `probe` CR of `kind`, with `metadata` extended by `meta`.
+fn cr_for(kind: &str, object: &Value, meta: Value) -> Value {
     let mut cr = object.clone();
     cr["apiVersion"] = json!("x.test/v1");
     cr["kind"] = json!(kind);
     cr["metadata"] = json!({ "name": "probe" });
-    let (ok, out) = kubectl(&["apply", "--dry-run=server", "-f", "-"], Some(&cr.to_string()));
+    if let (Some(md), Some(extra)) = (cr["metadata"].as_object_mut(), meta.as_object()) {
+        md.extend(extra.clone());
+    }
+    cr
+}
+
+/// Read a server-dry-run outcome as a CEL-admission verdict.
+fn dry_run_verdict(kind: &str, (ok, out): (bool, String)) -> Verdict {
     if ok {
         Verdict::Accept
     } else if out.contains("is invalid") || out.contains("Invalid value") {
@@ -102,6 +110,57 @@ fn apiserver_verdict(kind: &str, plural: &str, schema: &Value, object: &Value) -
     } else {
         panic!("unexpected apiserver error (not a CEL rejection) for {kind}: {out}");
     }
+}
+
+/// Apply a CRD wrapping `schema` under a unique `kind`, then server-dry-run the
+/// `object` as a CR and return the apiserver's CEL-admission verdict.
+fn apiserver_verdict(kind: &str, plural: &str, schema: &Value, object: &Value) -> Verdict {
+    register_crd(kind, plural, schema);
+    let cr = cr_for(kind, object, json!({}));
+    dry_run_verdict(
+        kind,
+        kubectl(&["apply", "--dry-run=server", "-f", "-"], Some(&cr.to_string())),
+    )
+}
+
+/// Store `old` as a real CR, then server-dry-run `object` as a full replace of
+/// it (PUT, so nulls survive as written) and return the verdict on the update.
+fn apiserver_update_verdict(
+    kind: &str,
+    plural: &str,
+    schema: &Value,
+    old: &Value,
+    object: &Value,
+) -> Verdict {
+    register_crd(kind, plural, schema);
+    let resource = format!("{plural}.x.test");
+    // A rerun against the same cluster finds the previous run's object.
+    let (ok, out) = kubectl(
+        &["delete", &resource, "probe", "--ignore-not-found", "--wait"],
+        None,
+    );
+    assert!(ok, "deleting a stale {kind} failed: {out}");
+    let (ok, out) = kubectl(
+        &["create", "-f", "-"],
+        Some(&cr_for(kind, old, json!({})).to_string()),
+    );
+    assert!(ok, "{kind}: the old object must pass validation on create: {out}");
+    let (ok, rv) = kubectl(
+        &[
+            "get",
+            &resource,
+            "probe",
+            "-o",
+            "jsonpath={.metadata.resourceVersion}",
+        ],
+        None,
+    );
+    assert!(ok, "reading {kind}'s resourceVersion failed: {rv}");
+    let cr = cr_for(kind, object, json!({ "resourceVersion": rv.trim() }));
+    dry_run_verdict(
+        kind,
+        kubectl(&["replace", "--dry-run=server", "-f", "-"], Some(&cr.to_string())),
+    )
 }
 
 /// Apply only the CRD (no CR) and return the apiserver's error if it REJECTED
@@ -132,11 +191,11 @@ fn crd_rejection(kind: &str, plural: &str, (ok, out): (bool, String)) -> Option<
 
 /// kube-cel's verdict on every entry point (`validate`,
 /// `validate_with_defaults`, `validate_compiled`), which must agree.
-fn kubecel_verdicts(schema: &Value, object: &Value) -> [Verdict; 3] {
+fn kubecel_verdicts(schema: &Value, object: &Value, old: Option<&Value>) -> [Verdict; 3] {
     [
-        kubecel_verdict(schema, object),
-        kubecel_verdict_with_defaults(schema, object),
-        kubecel_compiled_verdict(schema, object),
+        kubecel_verdict(schema, object, old),
+        kubecel_verdict_with_defaults(schema, object, old),
+        kubecel_compiled_verdict(schema, object, old),
     ]
 }
 
@@ -169,7 +228,7 @@ fn parity_against_kind() {
                     Verdict::Accept
                 };
                 assert_eq!(
-                    kubecel_verdicts(&c.schema, &c.object),
+                    kubecel_verdicts(&c.schema, &c.object, None),
                     [want; 3],
                     "[{n}/{total}] {}: kube-cel verdicts (validate, validate_with_defaults, validate_compiled) \
                      on a registration-rejected rule ({})\n  schema={}\n  object={}",
@@ -190,7 +249,7 @@ fn parity_against_kind() {
                     c.kind, c.note, c.schema, c.object
                 );
                 assert_eq!(
-                    kubecel_verdicts(&c.schema, &c.object),
+                    kubecel_verdicts(&c.schema, &c.object, None),
                     [api; 3],
                     "[{n}/{total}] {} DIVERGENCE: apiserver={api:?} vs kube-cel (validate, validate_with_defaults, \
                      validate_compiled) ({})\n  schema={}\n  object={}",
@@ -309,4 +368,37 @@ fn function_names_match_the_apiserver() {
         kube_cel_only.len(),
         rules.len()
     );
+}
+
+/// Drive the update table: the apiserver stores each case's `old`, then judges
+/// `object` as an update of it, so transition rules run against a real
+/// `oldSelf`. kube-cel gets `(object, Some(old))` on every entry point.
+#[test]
+#[ignore = "needs a live kind cluster; run via `just parity`"]
+fn transition_parity_against_kind() {
+    let cases = transition_cases();
+    let total = cases.len();
+    for (i, c) in cases.iter().enumerate() {
+        let n = i + 1;
+        let want = c.expect.verdict();
+        let api = apiserver_update_verdict(c.kind, c.plural, &c.schema, &c.old, &c.object);
+        assert_eq!(
+            api, want,
+            "[{n}/{total}] {}: apiserver verdict drifted from expected ({})\n  schema={}\n  old={}\n  object={}",
+            c.kind, c.note, c.schema, c.old, c.object
+        );
+        assert_eq!(
+            kubecel_verdicts(&c.schema, &c.object, Some(&c.old)),
+            [api; 3],
+            "[{n}/{total}] {} DIVERGENCE: apiserver={api:?} vs kube-cel (validate, validate_with_defaults, \
+             validate_compiled) ({})\n  schema={}\n  old={}\n  object={}",
+            c.kind,
+            c.note,
+            c.schema,
+            c.old,
+            c.object
+        );
+        println!("ok {n}/{total} {} — {}", c.kind, c.note);
+    }
+    println!("transition_parity_against_kind: {total}/{total} update cases as expected");
 }

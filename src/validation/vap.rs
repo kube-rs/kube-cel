@@ -33,7 +33,7 @@ use cel::{
     objects::{Key, Map},
 };
 
-use crate::validation::values::json_to_cel;
+use crate::validation::values::json_to_cel_raw;
 
 /// Group/Version/Kind identifier.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -252,11 +252,11 @@ impl VapEvaluator {
         let mut ctx = crate::validation::base_context();
 
         // Bind `object`
-        let _ = ctx.add_variable("object", json_to_cel(&self.object));
+        let _ = ctx.add_variable("object", json_to_cel_raw(&self.object));
 
         // Bind `oldObject` — null when not provided (e.g. CREATE)
         let old_object_val = match &self.old_object {
-            Some(v) => json_to_cel(v),
+            Some(v) => json_to_cel_raw(v),
             None => Value::Null,
         };
         let _ = ctx.add_variable("oldObject", old_object_val);
@@ -266,12 +266,12 @@ impl VapEvaluator {
 
         // Bind `params` only when provided
         if let Some(params) = &self.params {
-            let _ = ctx.add_variable("params", json_to_cel(params));
+            let _ = ctx.add_variable("params", json_to_cel_raw(params));
         }
 
         // Bind `namespaceObject` only when provided
         if let Some(ns) = &self.namespace_object {
-            let _ = ctx.add_variable("namespaceObject", json_to_cel(ns));
+            let _ = ctx.add_variable("namespaceObject", json_to_cel_raw(ns));
         }
 
         ctx
@@ -335,17 +335,20 @@ impl VapEvaluator {
                         message: None,
                     },
                     Ok(Value::Bool(false)) => {
-                        let msg = ce
-                            .message_program
-                            .as_ref()
-                            .and_then(|prog| match prog.execute(&ctx) {
-                                Ok(Value::String(s)) => Some((*s).clone()),
-                                _ => None,
-                            })
-                            .or_else(|| ce.message.clone())
-                            .unwrap_or_else(|| {
-                                format!("validation expression '{}' evaluated to false", ce.expression)
-                            });
+                        let expr_result =
+                            ce.message_program
+                                .as_ref()
+                                .and_then(|prog| match prog.execute(&ctx) {
+                                    Ok(Value::String(s)) => Some((*s).clone()),
+                                    _ => None,
+                                });
+                        // Same sanitisation as the CRD path (trim + reject empty/
+                        // multi-line/oversize), and apiserver's VAP default message.
+                        let msg = super::resolve_failure_message(
+                            expr_result.as_deref(),
+                            ce.message.as_deref(),
+                            || format!("failed expression: {}", ce.expression.trim()),
+                        );
                         VapResult {
                             expression: ce.expression.clone(),
                             passed: false,
@@ -623,6 +626,29 @@ mod tests {
             message_expression: None,
         }]);
         assert!(results[0].passed);
+    }
+
+    #[test]
+    fn vap_object_keys_not_escaped() {
+        // VAP objects are unstructured: special-character map keys (labels,
+        // annotations) are accessed by their literal name, not the CRD
+        // field-escaped form. Escaping would make this lookup fail.
+        let evaluator = VapEvaluator::builder()
+            .object(json!({
+                "metadata": {"labels": {"app.kubernetes.io/name": "web"}}
+            }))
+            .request(AdmissionRequest::default())
+            .build();
+        let results = evaluator.evaluate(&[VapExpression {
+            expression: "object.metadata.labels['app.kubernetes.io/name'] == 'web'".into(),
+            message: None,
+            message_expression: None,
+        }]);
+        assert!(
+            results[0].passed,
+            "literal label key should be accessible, got {:?}",
+            results[0].message
+        );
     }
 
     #[test]

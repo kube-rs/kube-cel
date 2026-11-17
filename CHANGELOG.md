@@ -68,6 +68,29 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     `jsonpatch.escapeKey`, the `isIPv4`-style helpers and global `min` / `max`
     remain available through `new_env()` / `KubeCelExt` for general-purpose
     evaluation.
+- **Validation verdicts follow the apiserver in more places.** Each change below
+  was checked against a live kube-apiserver v1.36.1 (`just parity`):
+  - Field-name escaping escapes only `__` (to `__underscores__`), `.`, `-`
+    and `/`; a single `_` stays as it is. A rule on a field `my_field` is
+    `self.my_field`, as in the apiserver, no longer `self.my__field`.
+  - Under `optionalOldSelf: true`, `oldSelf` is a CEL optional:
+    `optional.none()` on create, `optional.of(old)` on update. Write
+    `!oldSelf.hasValue() || … oldSelf.value() …` instead of
+    `oldSelf == null || …`.
+  - Item-level transition rules pair each new list item with the old item of
+    the same `x-kubernetes-list-map-keys` in an `x-kubernetes-list-type: map`
+    list, instead of the old item at the same index. With several keys, float
+    key values compare to six decimals, as the apiserver's `%f` key does.
+  - A JSON-null old value counts as no old value: a transition rule skips, and
+    under `optionalOldSelf` the rule sees `optional.none()`.
+  - `type: number` binds as `double` even when the JSON number is integral
+    (`self.x / 2.0` with `x: 1` is `0.5`), whatever its `format`; `format:
+    date` binds as a timestamp, and a `format: date` string that is not a
+    valid date is an `EvaluationError` at its field.
+  - Map-list number keys compare as the apiserver decodes JSON: an integer
+    past int64 is a float (2^63 and 2^63 + 1 are one key), and a single float
+    key `-0.0` equals `0.0`.
+  - Migration: none for rules the apiserver accepts.
 
 ### Added
 - `new_env() -> cel::Env`: the `cel` standard library plus the overloads
@@ -86,6 +109,18 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   or function; it names the reference evaluation could not resolve.
 
 ### Fixed
+- Schema defaults fill in under a parent that was itself just defaulted
+  (`spec: {default: {}}` with a defaulted `spec.x`), and a present-but-null
+  field that is not `nullable` takes its default, as in the apiserver. A
+  `default: null` is no default and is skipped.
+- A `messageExpression` result is trimmed, and an empty, multi-line or
+  over-5 KiB result falls back to `message` (CRD rules and VAP validations).
+- VAP `object` / `oldObject` / `params` / `namespaceObject` are bound without
+  field-name escaping, so `object.metadata.labels['app.kubernetes.io/name']`
+  resolves.
+- `<list>.sum()` overflow is an error instead of a panic (debug) or a wrapped
+  result (release). `lists.range()` in `new_env()` refuses more than 10,000,000
+  elements.
 - README "apiserver divergence" table: the apiserver does **not** evaluate
   `cel.bind` (its base environment has no `ext.Bindings`); it rejects the CRD at
   registration. The `sortBy` and two-variable comprehension rows are gone (both

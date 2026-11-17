@@ -30,8 +30,16 @@ pub(crate) fn val_le(a: &Value, b: &Value) -> Result<bool, ExecutionError> {
 
 pub(crate) fn val_add(a: &Value, b: &Value) -> Result<Value, ExecutionError> {
     match (a, b) {
-        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
-        (Value::UInt(a), Value::UInt(b)) => Ok(Value::UInt(a + b)),
+        // cel-go errors on integer overflow rather than wrapping; a raw `a + b`
+        // here panics in debug builds and silently wraps in release.
+        (Value::Int(a), Value::Int(b)) => a
+            .checked_add(*b)
+            .map(Value::Int)
+            .ok_or_else(|| ExecutionError::function_error("sum", "integer overflow")),
+        (Value::UInt(a), Value::UInt(b)) => a
+            .checked_add(*b)
+            .map(Value::UInt)
+            .ok_or_else(|| ExecutionError::function_error("sum", "unsigned integer overflow")),
         (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
         _ => Err(ExecutionError::function_error(
             "sum",

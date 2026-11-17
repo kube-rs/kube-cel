@@ -30,6 +30,20 @@ pub fn apply_defaults(schema: &serde_json::Value, value: &serde_json::Value) -> 
     apply_defaults_inner(schema, value, 0)
 }
 
+/// A schema node's `default`, unless it is `null`: the apiserver skips a nil
+/// default everywhere (defaulting/algorithm.go `Default`), also inside a parent
+/// it has just defaulted.
+fn default_of(schema: &serde_json::Value) -> Option<&serde_json::Value> {
+    schema.get("default").filter(|d| !d.is_null())
+}
+
+/// Whether `v` is JSON `null` under a non-`nullable` schema node — the apiserver
+/// condition (`isNonNullableNull`, defaulting/algorithm.go) for replacing a
+/// present-but-null field with its `default`. A `nullable: true` node keeps null.
+fn is_non_nullable_null(v: &serde_json::Value, schema: &serde_json::Value) -> bool {
+    v.is_null() && schema.get("nullable").and_then(serde_json::Value::as_bool) != Some(true)
+}
+
 fn apply_defaults_inner(
     schema: &serde_json::Value,
     value: &serde_json::Value,
@@ -63,21 +77,37 @@ fn apply_defaults_inner(
             }
 
             let mut result = obj.clone();
-            // 1. Fill missing declared-property defaults.
+            // 1. Fill declared-property defaults when the field is missing OR
+            //    present-but-null and non-nullable (apiserver `isNonNullableNull`).
             for (key, prop_schema) in props {
-                if !result.contains_key(key)
-                    && let Some(default_val) = prop_schema.get("default")
-                {
+                let needs_default = match result.get(key) {
+                    None => true,
+                    Some(v) => is_non_nullable_null(v, prop_schema),
+                };
+                if needs_default && let Some(default_val) = default_of(prop_schema) {
                     result.insert(key.clone(), default_val.clone());
                 }
             }
-            // 2. Recurse into existing children: a declared property uses its own
-            //    schema; any other key falls to `additionalProperties` (map value).
-            for (key, val) in obj {
-                if let Some(prop_schema) = props.get(key) {
-                    result.insert(key.clone(), apply_defaults_inner(prop_schema, val, depth + 1));
+            // 2. Recurse into every child now present — including defaults just
+            //    inserted by step 1 — so nested defaults inside an inserted object
+            //    default get filled too. Mirrors the apiserver's `for k := range x`
+            //    over the mutated map. A declared property uses its own schema and
+            //    was already defaulted above; any other key falls to
+            //    `additionalProperties`, where a present-but-null map value takes
+            //    the map's `default` before recursion.
+            let keys: Vec<String> = result.keys().cloned().collect();
+            for key in keys {
+                if let Some(child_schema) = props.get(&key) {
+                    let val = result[&key].clone();
+                    result.insert(key, apply_defaults_inner(child_schema, &val, depth + 1));
                 } else if let Some(add_schema) = additional {
-                    result.insert(key.clone(), apply_defaults_inner(add_schema, val, depth + 1));
+                    let mut val = result[&key].clone();
+                    if is_non_nullable_null(&val, add_schema)
+                        && let Some(default_val) = default_of(add_schema)
+                    {
+                        val = default_val.clone();
+                    }
+                    result.insert(key, apply_defaults_inner(add_schema, &val, depth + 1));
                 }
             }
             serde_json::Value::Object(result)
@@ -86,7 +116,16 @@ fn apply_defaults_inner(
             if let Some(items_schema) = schema.get("items") {
                 let items: Vec<_> = arr
                     .iter()
-                    .map(|item| apply_defaults_inner(items_schema, item, depth + 1))
+                    .map(|item| {
+                        // A present-but-null non-nullable item takes items.default
+                        // before recursion (apiserver defaults each array element).
+                        let base = if is_non_nullable_null(item, items_schema) {
+                            default_of(items_schema).unwrap_or(item)
+                        } else {
+                            item
+                        };
+                        apply_defaults_inner(items_schema, base, depth + 1)
+                    })
                     .collect();
                 serde_json::Value::Array(items)
             } else {
@@ -131,31 +170,53 @@ fn apply_defaults_compiled_inner(
             }
 
             let mut result = obj.clone();
-            // 1. Fill missing declared-property defaults (default lives on the child node).
+            // 1. Fill declared-property defaults when the field is missing OR
+            //    present-but-null and non-nullable (default lives on the child node).
             for (key, child) in &compiled.properties {
-                if !result.contains_key(key)
-                    && let Some(default_val) = &child.default
-                {
+                let needs_default = match result.get(key) {
+                    None => true,
+                    Some(v) => v.is_null() && !child.nullable,
+                };
+                if needs_default && let Some(default_val) = &child.default {
                     result.insert(key.clone(), default_val.clone());
                 }
             }
-            // 2. Recurse into existing children: declared property, else map value.
-            for (key, val) in obj {
-                if let Some(child) = compiled.properties.get(key) {
-                    result.insert(key.clone(), apply_defaults_compiled_inner(child, val, depth + 1));
+            // 2. Recurse into every child now present — including defaults just
+            //    inserted by step 1 — so nested defaults inside an inserted object
+            //    default get filled (matches apiserver `for k := range x`). A
+            //    present-but-null map value takes `additionalProperties.default`.
+            let keys: Vec<String> = result.keys().cloned().collect();
+            for key in keys {
+                if let Some(child) = compiled.properties.get(&key) {
+                    let val = result[&key].clone();
+                    result.insert(key, apply_defaults_compiled_inner(child, &val, depth + 1));
                 } else if let Some(add) = additional {
-                    result.insert(key.clone(), apply_defaults_compiled_inner(add, val, depth + 1));
+                    let mut val = result[&key].clone();
+                    if val.is_null()
+                        && !add.nullable
+                        && let Some(default_val) = &add.default
+                    {
+                        val = default_val.clone();
+                    }
+                    result.insert(key, apply_defaults_compiled_inner(add, &val, depth + 1));
                 }
             }
             serde_json::Value::Object(result)
         }
         serde_json::Value::Array(arr) => {
             if let Some(items) = &compiled.items {
-                let items: Vec<_> = arr
+                let elems: Vec<_> = arr
                     .iter()
-                    .map(|item| apply_defaults_compiled_inner(items, item, depth + 1))
+                    .map(|item| {
+                        let base = if item.is_null() && !items.nullable {
+                            items.default.as_ref().unwrap_or(item)
+                        } else {
+                            item
+                        };
+                        apply_defaults_compiled_inner(items, base, depth + 1)
+                    })
                     .collect();
-                serde_json::Value::Array(items)
+                serde_json::Value::Array(elems)
             } else {
                 value.clone()
             }
@@ -168,6 +229,26 @@ fn apply_defaults_compiled_inner(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn null_default_is_skipped() {
+        // The apiserver skips a nil default, also inside a parent it defaulted.
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "spec": {
+                    "type": "object",
+                    "default": {},
+                    "properties": {"x": {"type": "string", "nullable": true, "default": null}}
+                },
+                "y": {"type": "string", "nullable": true, "default": null}
+            }
+        });
+        let want = json!({"spec": {}});
+        assert_eq!(apply_defaults(&schema, &json!({})), want);
+        let compiled = crate::validation::compilation::compile_schema(&schema);
+        assert_eq!(apply_defaults_compiled(&compiled, &json!({})), want);
+    }
 
     #[test]
     fn apply_defaults_fills_missing_field() {
@@ -308,6 +389,77 @@ mod tests {
         assert_eq!(
             via_compiled,
             json!({ "list": [ { "p": 80 } ], "m": { "a": { "x": "d" } } })
+        );
+    }
+
+    // ── present-but-null default injection (apiserver isNonNullableNull) ──
+
+    #[test]
+    fn apply_defaults_replaces_null_declared_property() {
+        // A present-but-null non-nullable field takes its default (not just a
+        // missing one), matching apiserver defaulting/algorithm.go.
+        let schema = json!({
+            "type": "object",
+            "properties": { "timeout": {"type": "string", "default": "30s"} }
+        });
+        let value = json!({"timeout": null});
+        assert_eq!(apply_defaults(&schema, &value), json!({"timeout": "30s"}));
+    }
+
+    #[test]
+    fn apply_defaults_keeps_null_when_nullable() {
+        // `nullable: true` → isNonNullableNull is false → null is preserved.
+        let schema = json!({
+            "type": "object",
+            "properties": { "timeout": {"type": "string", "default": "30s", "nullable": true} }
+        });
+        let value = json!({"timeout": null});
+        assert_eq!(apply_defaults(&schema, &value), json!({"timeout": null}));
+    }
+
+    #[test]
+    fn apply_defaults_replaces_null_map_value() {
+        // A null map value under additionalProperties takes the map's default.
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": {"type": "string", "default": "d"}
+        });
+        let value = json!({"a": null, "b": "keep"});
+        assert_eq!(apply_defaults(&schema, &value), json!({"a": "d", "b": "keep"}));
+    }
+
+    #[test]
+    fn apply_defaults_replaces_null_array_item() {
+        // A null array element takes items.default before recursion.
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "list": {"type": "array", "items": {"type": "string", "default": "x"}}
+            }
+        });
+        let value = json!({"list": ["a", null, "c"]});
+        assert_eq!(apply_defaults(&schema, &value), json!({"list": ["a", "x", "c"]}));
+    }
+
+    #[test]
+    fn apply_defaults_null_injection_compiled_parity() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "timeout": {"type": "string", "default": "30s"},
+                "keepNull": {"type": "string", "default": "z", "nullable": true},
+                "list": {"type": "array", "items": {"type": "string", "default": "x"}}
+            },
+            "additionalProperties": {"type": "string", "default": "d"}
+        });
+        let value = json!({"timeout": null, "keepNull": null, "list": [null], "extra": null});
+        let via_schema = apply_defaults(&schema, &value);
+        let compiled = crate::validation::compilation::compile_schema(&schema);
+        let via_compiled = apply_defaults_compiled(&compiled, &value);
+        assert_eq!(via_schema, via_compiled);
+        assert_eq!(
+            via_compiled,
+            json!({"timeout": "30s", "keepNull": null, "list": ["x"], "extra": "d"})
         );
     }
 }

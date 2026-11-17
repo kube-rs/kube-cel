@@ -112,7 +112,9 @@ let schema = json!({
 });
 ```
 
-Invalid strings gracefully fall back to `Value::String`.
+A `format: date` string that is not a valid date is an `EvaluationError` at its
+field, as the apiserver refuses it; other invalid strings fall back to
+`Value::String`.
 
 ### Field name escaping
 

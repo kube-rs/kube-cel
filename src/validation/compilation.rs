@@ -27,8 +27,9 @@ pub struct Rule {
     /// JSONPath to the field that caused the failure.
     #[serde(default)]
     pub field_path: Option<String>,
-    /// Whether `oldSelf` is optional. When `true`, transition rules are
-    /// evaluated even on create (with `oldSelf` bound to null).
+    /// Whether `oldSelf` is optional. When `true`, the transition rule is
+    /// evaluated even on create, with `oldSelf` bound as a CEL optional:
+    /// `optional.none()` on create, `optional.of(old)` on update.
     #[serde(default)]
     pub optional_old_self: Option<bool>,
 }
@@ -241,6 +242,17 @@ pub struct CompiledSchema {
     /// defaulting pass to fill a missing field before CEL evaluation, mirroring
     /// the apiserver's admission order (defaults applied before CEL rules run).
     pub default: Option<serde_json::Value>,
+    /// `x-kubernetes-list-map-keys`, but populated **only** when this node is an
+    /// `x-kubernetes-list-type: map` array. Empty for set/atomic/unset lists.
+    /// Drives old↔new item correlation for transition rules: a non-empty value
+    /// means items are matched by key (not index), mirroring the apiserver's
+    /// `MakeMapList` (schema/cel/validation.go). Empty means no correlation, so
+    /// `oldSelf` is absent per item and transition rules are skipped.
+    pub list_map_keys: Vec<String>,
+    /// Whether `nullable: true` is set on this node. The defaulting pass injects
+    /// a `default` into a present-but-`null` field only when the field is **not**
+    /// nullable (apiserver `isNonNullableNull`, defaulting/algorithm.go).
+    pub nullable: bool,
 }
 
 impl CompiledSchema {
@@ -301,6 +313,8 @@ fn compile_schema_inner(schema: &serde_json::Value, depth: usize) -> CompiledSch
             preserve_unknown_fields: false,
             embedded_resource: false,
             default: None,
+            list_map_keys: Vec::new(),
+            nullable: false,
         };
     }
 
@@ -345,7 +359,21 @@ fn compile_schema_inner(schema: &serde_json::Value, depth: usize) -> CompiledSch
         .and_then(|v| v.as_bool())
         == Some(true);
 
-    let default = schema.get("default").cloned();
+    // A `default: null` is no default (the apiserver skips nil defaults).
+    let default = schema.get("default").filter(|d| !d.is_null()).cloned();
+
+    let nullable = schema.get("nullable").and_then(serde_json::Value::as_bool) == Some(true);
+
+    // Only `x-kubernetes-list-type: map` lists correlate old↔new items by key.
+    let list_map_keys = if schema.get("x-kubernetes-list-type").and_then(|v| v.as_str()) == Some("map") {
+        schema
+            .get("x-kubernetes-list-map-keys")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|k| k.as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     CompiledSchema {
         validations,
@@ -363,6 +391,8 @@ fn compile_schema_inner(schema: &serde_json::Value, depth: usize) -> CompiledSch
         preserve_unknown_fields,
         embedded_resource,
         default,
+        list_map_keys,
+        nullable,
     }
 }
 

@@ -1,9 +1,8 @@
-//! Shared parity-case table — the single source of truth for BOTH parity
-//! runners (`apiserver_parity.rs` via kind/kubectl, `envtest_parity.rs` via the
-//! in-process `envtest` apiserver). Each row is pure data: a CRD-expressible
-//! schema (carrying an `x-kubernetes-validations` rule), an instance object, and
-//! the expected outcome. A case is written ONCE here and proven under both
-//! control planes; any disagreement between the two runners is itself a finding.
+//! Shared parity-case table — the single source of truth for the live parity
+//! runner `apiserver_parity.rs` (kind/kubectl). Each row is pure data: a
+//! CRD-expressible schema (carrying an `x-kubernetes-validations` rule), an
+//! instance object, and the expected outcome. A case is written ONCE here and
+//! proven against the real kube-apiserver.
 //!
 //! This module is included (`mod common;`) by each parity test crate, so it is
 //! compiled per-runner. It pulls in `kube_cel` + `serde_json`, both available
@@ -68,8 +67,8 @@ pub struct ParityCase {
 
 /// kube-cel's verdict via plain `validate` (which, as of 0.8, applies schema
 /// defaults before evaluating CEL — matching the apiserver's admission order).
-pub fn kubecel_verdict(schema: &Value, object: &Value) -> Verdict {
-    match Validator::new().validate(schema, object, None) {
+pub fn kubecel_verdict(schema: &Value, object: &Value, old: Option<&Value>) -> Verdict {
+    match Validator::new().validate(schema, object, old) {
         Ok(()) => Verdict::Accept,
         Err(_) => Verdict::Reject,
     }
@@ -78,8 +77,8 @@ pub fn kubecel_verdict(schema: &Value, object: &Value) -> Verdict {
 /// kube-cel's verdict via the explicit `validate_with_defaults` alias. Should be
 /// identical to [`kubecel_verdict`] since 0.8; runners assert both to guard the
 /// alias against drift.
-pub fn kubecel_verdict_with_defaults(schema: &Value, object: &Value) -> Verdict {
-    match Validator::new().validate_with_defaults(schema, object, None) {
+pub fn kubecel_verdict_with_defaults(schema: &Value, object: &Value, old: Option<&Value>) -> Verdict {
+    match Validator::new().validate_with_defaults(schema, object, old) {
         Ok(()) => Verdict::Accept,
         Err(_) => Verdict::Reject,
     }
@@ -87,11 +86,207 @@ pub fn kubecel_verdict_with_defaults(schema: &Value, object: &Value) -> Verdict 
 
 /// kube-cel's verdict via `compile_schema` + `validate_compiled`, the
 /// pre-compiled path, which must agree with [`kubecel_verdict`].
-pub fn kubecel_compiled_verdict(schema: &Value, object: &Value) -> Verdict {
-    match Validator::new().validate_compiled(&compile_schema(schema), object, None) {
+pub fn kubecel_compiled_verdict(schema: &Value, object: &Value, old: Option<&Value>) -> Verdict {
+    match Validator::new().validate_compiled(&compile_schema(schema), object, old) {
         Ok(()) => Verdict::Accept,
         Err(_) => Verdict::Reject,
     }
+}
+
+/// An update case: the apiserver stores `old` first (a real create), then
+/// server-dry-runs `object` as a full replace of it, so rules that read
+/// `oldSelf` run. kube-cel gets the same pair as `(object, Some(old))`. `old`
+/// must itself pass validation on create. `expect` is `Accept` or `Reject`.
+pub struct TransitionCase {
+    pub kind: &'static str,
+    pub plural: &'static str,
+    pub schema: Value,
+    pub old: Value,
+    pub object: Value,
+    pub expect: Expect,
+    pub note: &'static str,
+}
+
+/// Update cases (transition rules, `optionalOldSelf`, list-item correlation).
+pub fn transition_cases() -> Vec<TransitionCase> {
+    vec![
+        // optionalOldSelf binds `oldSelf` as `optional.of(old)` on update
+        // (`validationActivationWithOldSelf`), so `hasValue()`/`value()` work.
+        TransitionCase {
+            kind: "TxOptionalOf",
+            plural: "txoptionalofs",
+            schema: json!({
+                "type": "object",
+                "properties": { "n": { "type": "integer" } },
+                "x-kubernetes-validations": [{
+                    "rule": "!oldSelf.hasValue() || oldSelf.value().n <= self.n",
+                    "message": "n cannot decrease",
+                    "optionalOldSelf": true
+                }]
+            }),
+            old: json!({"n": 1}),
+            object: json!({"n": 3}),
+            expect: Expect::Accept,
+            note: "optionalOldSelf on update: oldSelf = optional.of(old), value().n = 1 <= 3 → ACCEPT",
+        },
+        // An old value that is JSON null is no old value. The apiserver's
+        // node `oldObj` is then nil, so `optionalOldSelf` binds `optional.none()`
+        // (`validationActivationWithOldSelf`), not `optional.of(null)`.
+        TransitionCase {
+            kind: "TxOldNullOptional",
+            plural: "txoldnulloptionals",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "sub": {
+                        "type": "object",
+                        "nullable": true,
+                        "properties": { "a": { "type": "string" } },
+                        "x-kubernetes-validations": [{
+                            "rule": "!oldSelf.hasValue()",
+                            "message": "oldSelf must be none",
+                            "optionalOldSelf": true
+                        }]
+                    }
+                }
+            }),
+            old: json!({"sub": null}),
+            object: json!({"sub": {"a": "x"}}),
+            expect: Expect::Accept,
+            note: "old sub is null → optionalOldSelf binds optional.none() → ACCEPT",
+        },
+        // The same with a plain transition rule: a null old value leaves it no
+        // comparable old value and is skipped (`compiled.UsesOldSelf && oldObj == nil`).
+        TransitionCase {
+            kind: "TxOldNullPlain",
+            plural: "txoldnullplains",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "sub": {
+                        "type": "object",
+                        "nullable": true,
+                        "properties": { "a": { "type": "string" } },
+                        "x-kubernetes-validations": [{ "rule": "self.a == oldSelf.a", "message": "a is immutable" }]
+                    }
+                }
+            }),
+            old: json!({"sub": null}),
+            object: json!({"sub": {"a": "x"}}),
+            expect: Expect::Accept,
+            note: "old sub is null → transition rule skipped → ACCEPT",
+        },
+        // List items correlate old↔new only for `x-kubernetes-list-type: map`,
+        // by key (`MakeMapList`): a reorder pairs each item with its own old self.
+        // (The list is not called `items`: kubectl reads a top-level `items` as a
+        // List of objects.)
+        TransitionCase {
+            kind: "TxMapListByKey",
+            plural: "txmaplistbykeys",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "entries": {
+                        "type": "array",
+                        "x-kubernetes-list-type": "map",
+                        "x-kubernetes-list-map-keys": ["name"],
+                        "items": {
+                            "type": "object",
+                            "required": ["name"],
+                            "properties": { "name": { "type": "string" }, "v": { "type": "integer" } },
+                            "x-kubernetes-validations": [{ "rule": "self.v >= oldSelf.v", "message": "v cannot decrease" }]
+                        }
+                    }
+                }
+            }),
+            old: json!({"entries": [{"name": "a", "v": 1}, {"name": "b", "v": 10}]}),
+            object: json!({"entries": [{"name": "b", "v": 10}, {"name": "a", "v": 1}]}),
+            expect: Expect::Accept,
+            note: "map list reordered: items correlate by key, not index → ACCEPT",
+        },
+        // With several map keys the apiserver correlates by a string key
+        // built with Go `%f` for floats (`multiKeyStrategy`), so key values that
+        // agree to six decimals are the same item and the transition rule runs.
+        TransitionCase {
+            kind: "TxMultiKeyFloat",
+            plural: "txmultikeyfloats",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "entries": {
+                        "type": "array",
+                        "x-kubernetes-list-type": "map",
+                        "x-kubernetes-list-map-keys": ["g", "f"],
+                        "items": {
+                            "type": "object",
+                            "required": ["g", "f"],
+                            "properties": {
+                                "g": { "type": "string" },
+                                "f": { "type": "number" },
+                                "v": { "type": "integer" }
+                            },
+                            "x-kubernetes-validations": [{ "rule": "self.v >= oldSelf.v", "message": "v cannot decrease" }]
+                        }
+                    }
+                }
+            }),
+            old: json!({"entries": [{"g": "x", "f": 1.0000001, "v": 5}]}),
+            object: json!({"entries": [{"g": "x", "f": 1.0000002, "v": 1}]}),
+            expect: Expect::Reject,
+            note: "multi-key floats compare as %f (1.000000 both) → correlated, 1 < 5 → REJECT",
+        },
+        // A number key that does not fit an int64 is a float64 in the apiserver
+        // (JSON decoding keeps only int64-sized integers), so 2^63 and 2^63 + 1
+        // are the same key there and the items correlate.
+        TransitionCase {
+            kind: "TxKeyU64",
+            plural: "txkeyu64s",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "entries": {
+                        "type": "array",
+                        "x-kubernetes-list-type": "map",
+                        "x-kubernetes-list-map-keys": ["k"],
+                        "items": {
+                            "type": "object",
+                            "required": ["k"],
+                            "properties": { "k": { "type": "number" }, "v": { "type": "integer" } },
+                            "x-kubernetes-validations": [{ "rule": "self.v >= oldSelf.v", "message": "v cannot decrease" }]
+                        }
+                    }
+                }
+            }),
+            old: json!({"entries": [{"k": 9223372036854775808u64, "v": 5}]}),
+            object: json!({"entries": [{"k": 9223372036854775809u64, "v": 1}]}),
+            expect: Expect::Reject,
+            note: "keys 2^63 and 2^63+1 are one float64 key → correlated, 1 < 5 → REJECT",
+        },
+        TransitionCase {
+            kind: "TxKeyNegZero",
+            plural: "txkeynegzeros",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "entries": {
+                        "type": "array",
+                        "x-kubernetes-list-type": "map",
+                        "x-kubernetes-list-map-keys": ["k"],
+                        "items": {
+                            "type": "object",
+                            "required": ["k"],
+                            "properties": { "k": { "type": "number" }, "v": { "type": "integer" } },
+                            "x-kubernetes-validations": [{ "rule": "self.v >= oldSelf.v", "message": "v cannot decrease" }]
+                        }
+                    }
+                }
+            }),
+            old: json!({"entries": [{"k": -0.0, "v": 5}]}),
+            object: json!({"entries": [{"k": 0.0, "v": 1}]}),
+            expect: Expect::Reject,
+            note: "single key -0.0 and 0.0 compare equal → correlated, 1 < 5 → REJECT",
+        },
+    ]
 }
 
 /// The shared parity table. Phase 2 of the fidelity sweep appends rows here; the
@@ -215,6 +410,37 @@ pub fn cases() -> Vec<ParityCase> {
             expect: Expect::Accept,
             note: "dotted declared field reached via escaped identifier → ACCEPT",
         },
+        // Single-underscore declared field. The apiserver escapes ONLY `__`
+        // (matcher `(__|[-./]|…)`), so `my_field` stays literal and the rule
+        // references it as-is. Pins the P0 fix: pre-fix kube-cel over-escaped the
+        // object key to `my__field`, so `self.my_field` errored → REJECT while the
+        // apiserver ACCEPTs. Both must ACCEPT now.
+        ParityCase {
+            kind: "PstructUnderscore",
+            plural: "pstructunderscores",
+            schema: json!({
+                "type": "object",
+                "properties": { "my_field": { "type": "string" } },
+                "x-kubernetes-validations": [{ "rule": "self.my_field == 'ok'", "message": "bad" }]
+            }),
+            object: json!({"my_field": "ok"}),
+            expect: Expect::Accept,
+            note: "single-underscore field is NOT escaped (apiserver escapes only __) → ACCEPT",
+        },
+        // Double-underscore declared field: `a__b` IS escaped, to
+        // `a__underscores__b`. Pins the other half of the P0 fix.
+        ParityCase {
+            kind: "PstructDunder",
+            plural: "pstructdunders",
+            schema: json!({
+                "type": "object",
+                "properties": { "a__b": { "type": "string" } },
+                "x-kubernetes-validations": [{ "rule": "self.a__underscores__b == 'ok'", "message": "bad" }]
+            }),
+            object: json!({"a__b": "ok"}),
+            expect: Expect::Accept,
+            note: "double-underscore field reached via __underscores__ escape → ACCEPT",
+        },
         // ── DEFAULTS fidelity (kube-rs/kube-cel#9, fixed in 0.8) ──────────────
         // The apiserver applies schema `default`s BEFORE evaluating CEL. As of
         // 0.8, plain `validate` does too, so these now assert PARITY.
@@ -266,6 +492,65 @@ pub fn cases() -> Vec<ParityCase> {
             object: json!({ "spec": {} }),
             expect: Expect::Reject,
             note: "nested default makes spec.x present → REJECT",
+        },
+        // Missing PARENT with an object `default`: the apiserver inserts the
+        // default `{}` then RECURSES into it, filling nested defaults (its second
+        // loop is `for k := range x` over the mutated map). Pins the P1 fix —
+        // pre-fix kube-cel recursed over the ORIGINAL object, so a defaulted
+        // parent's own children never filled: `self.spec.x` errored → REJECT while
+        // the apiserver ACCEPTs. (Distinct from `Pdefnest`, where spec is present.)
+        ParityCase {
+            kind: "Pdefmissing",
+            plural: "pdefmissings",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "spec": {
+                        "type": "object",
+                        "default": {},
+                        "properties": { "x": { "type": "string", "default": "d" } }
+                    }
+                },
+                "x-kubernetes-validations": [{ "rule": "self.spec.x == 'd'", "message": "spec.x must be d" }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "missing parent gets default {} then nested default fills spec.x=d → ACCEPT (recurse-into-inserted)",
+        },
+        // A non-nullable field that is present but null takes its default
+        // (defaulting/algorithm.go `isNonNullableNull`), so the rule sees 'd'.
+        ParityCase {
+            kind: "Pdefnull",
+            plural: "pdefnulls",
+            schema: json!({
+                "type": "object",
+                "properties": { "x": { "type": "string", "default": "d" } },
+                "x-kubernetes-validations": [{ "rule": "self.x == 'd'", "message": "x must be d" }]
+            }),
+            object: json!({"x": null}),
+            expect: Expect::Accept,
+            note: "present-but-null non-nullable field takes its default → ACCEPT",
+        },
+        // A `default: null` is no default: the apiserver skips nil defaults
+        // (defaulting/algorithm.go), also inside a parent it just defaulted, so
+        // `spec` becomes `{}` and `spec.x` stays absent.
+        ParityCase {
+            kind: "PdefNullChild",
+            plural: "pdefnullchilds",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "spec": {
+                        "type": "object",
+                        "default": {},
+                        "properties": { "x": { "type": "string", "nullable": true, "default": null } }
+                    }
+                },
+                "x-kubernetes-validations": [{ "rule": "!has(self.spec.x)", "message": "x must stay absent" }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "default: null is skipped inside a defaulted parent → spec.x absent → ACCEPT",
         },
         // Defaulted field inside ARRAY items: defaulting recurses into items.
         ParityCase {
@@ -326,6 +611,116 @@ pub fn cases() -> Vec<ParityCase> {
             object: json!({}),
             expect: Expect::Accept,
             note: "default fills required field → self.x == 'd' → ACCEPT",
+        },
+        // ── BINDING fidelity (audit 2026-07-25) ───────────────────────────────
+        // D1 — `type: number` holding an integral JSON number. The apiserver's
+        // `UnstructuredToVal` maps int/int32/int64/float32/float64 alike to
+        // `types.Double` under `type: number` (YAML→JSON collapses `1.0` to `1`),
+        // so `self.x / 2.0` is 0.5. kube-cel bound `Value::Int(1)` from the JSON
+        // representation alone, ignoring the schema type.
+        ParityCase {
+            kind: "PnumDouble",
+            plural: "pnumdoubles",
+            schema: json!({
+                "type": "object",
+                "properties": { "x": { "type": "number" } },
+                "x-kubernetes-validations": [{ "rule": "self.x / 2.0 == 0.5", "message": "half" }]
+            }),
+            object: json!({"x": 1}),
+            expect: Expect::Accept,
+            note: "type:number binds double, so 1/2.0 == 0.5 → ACCEPT (D1)",
+        },
+        // The binding itself: an integral `1` under `type: number` is a double,
+        // not an int. (`self.x / 2.0` cannot tell: on an int it errors, which
+        // rejects too.)
+        ParityCase {
+            kind: "PnumNotInt",
+            plural: "pnumnotints",
+            schema: json!({
+                "type": "object",
+                "properties": { "x": { "type": "number" } },
+                "x-kubernetes-validations": [{ "rule": "type(self.x) == double", "message": "not double" }]
+            }),
+            object: json!({"x": 1}),
+            expect: Expect::Accept,
+            note: "type:number binds an integral 1 as double, not int → ACCEPT",
+        },
+        // `type` decides the binding before `format`: a string format on a
+        // `type: number` field changes nothing.
+        ParityCase {
+            kind: "PnumFormat",
+            plural: "pnumformats",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "d": { "type": "number", "format": "date" },
+                    "t": { "type": "number", "format": "date-time" },
+                    "u": { "type": "number", "format": "duration" },
+                    "b": { "type": "number", "format": "byte" }
+                },
+                "x-kubernetes-validations": [{
+                    "rule": "type(self.d) == double && type(self.t) == double && type(self.u) == double && type(self.b) == double",
+                    "message": "not double"
+                }]
+            }),
+            object: json!({"d": 1, "t": 1, "u": 1, "b": 1}),
+            expect: Expect::Accept,
+            note: "type:number with a string format still binds double → ACCEPT",
+        },
+        // `type: integer` is unaffected — the control for D1.
+        ParityCase {
+            kind: "PintStays",
+            plural: "pintstays",
+            schema: json!({
+                "type": "object",
+                "properties": { "x": { "type": "integer" } },
+                "x-kubernetes-validations": [{ "rule": "self.x / 2 == 0", "message": "int div" }]
+            }),
+            object: json!({"x": 1}),
+            expect: Expect::Accept,
+            note: "type:integer keeps integer division → ACCEPT (D1 control)",
+        },
+        // D2 — `format: date` binds as a Timestamp upstream
+        // (`time.Parse(strfmt.RFC3339FullDate, str)`), so the timestamp
+        // accessors work. kube-cel left it a string → the rule errored.
+        ParityCase {
+            kind: "PdateFmt",
+            plural: "pdatefmts",
+            schema: json!({
+                "type": "object",
+                "properties": { "d": { "type": "string", "format": "date" } },
+                "x-kubernetes-validations": [{ "rule": "self.d.getFullYear() == 2024", "message": "year" }]
+            }),
+            object: json!({"d": "2024-03-05"}),
+            expect: Expect::Accept,
+            note: "format:date binds as timestamp → getFullYear()==2024 → ACCEPT (D2)",
+        },
+        // A `format: date` string that does not parse is an error, not a
+        // string: the apiserver's binding fails (and its OpenAPI format check
+        // refuses the object even when no rule reads the field).
+        ParityCase {
+            kind: "PdateBad",
+            plural: "pdatebads",
+            schema: json!({
+                "type": "object",
+                "properties": { "d": { "type": "string", "format": "date" } },
+                "x-kubernetes-validations": [{ "rule": "self.d == self.d", "message": "d" }]
+            }),
+            object: json!({"d": "2024-02-30"}),
+            expect: Expect::Reject,
+            note: "invalid date (day out of range) is an error → REJECT",
+        },
+        ParityCase {
+            kind: "PdateBadUnread",
+            plural: "pdatebadunreads",
+            schema: json!({
+                "type": "object",
+                "properties": { "d": { "type": "string", "format": "date" } },
+                "x-kubernetes-validations": [{ "rule": "true", "message": "always" }]
+            }),
+            object: json!({"d": "2024-3-05"}),
+            expect: Expect::Reject,
+            note: "invalid date no rule reads is still refused → REJECT",
         },
         // ── FIDELITY-SWEEP findings (2026-06-19), fixed in 0.8 ────────────────
         // Each row reproduces a measured divergence with the OLD (buggy) expected

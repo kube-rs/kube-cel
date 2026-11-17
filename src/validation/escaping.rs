@@ -1,9 +1,9 @@
 //! Field name escaping for Kubernetes CEL.
 //!
 //! Kubernetes CEL requires escaping JSON field names that collide with CEL
-//! reserved words or contain special characters (`_`, `.`, `-`, `/`).
+//! reserved words or contain `__`, `.`, `-` or `/` (a single `_` stays as-is).
 //! This module implements the same escaping rules as the Go apiserver
-//! (`apiserver/schema/cel/model`).
+//! (`k8s.io/apiserver/pkg/cel/escaping.go`).
 
 /// CEL reserved words that must be escaped as `__keyword__`.
 const CEL_RESERVED_WORDS: &[&str] = &[
@@ -32,16 +32,23 @@ const CEL_RESERVED_WORDS: &[&str] = &[
 
 /// Escape a JSON field name for use as a CEL map key.
 ///
-/// Rules (mutually exclusive, checked in order):
+/// Mirrors the apiserver `Escape` (`k8s.io/apiserver/pkg/cel/escaping.go`,
+/// matcher `(__|[-./]|[^a-zA-Z0-9-./_])`). Rules, checked in order:
 /// 1. If the name exactly matches a CEL reserved word → `__keyword__`
-/// 2. If the name contains `_`, `.`, `-`, or `/` → character-level substitution
-/// 3. Otherwise → return unchanged
+/// 2. Otherwise substitute each occurrence:
+///    - `__` (double underscore) → `__underscores__`
+///    - `.` → `__dot__`
+///    - `-` → `__dash__`
+///    - `/` → `__slash__`
 ///
-/// Character substitutions (rule 2):
-/// - `_` → `__`
-/// - `.` → `__dot__`
-/// - `-` → `__dash__`
-/// - `/` → `__slash__`
+///    A single `_` is a valid CEL identifier character and is left untouched —
+///    only a `__` pair is escaped (matching the apiserver's leftmost-first pass).
+/// 3. Names with none of those sequences are returned unchanged.
+///
+/// Note: the apiserver additionally makes names containing characters outside
+/// `[a-zA-Z0-9-./_]` inaccessible (its `Escape` returns `ok=false`); this helper
+/// passes such characters through unchanged. Declared structural properties do
+/// not hit that case in practice.
 #[must_use]
 #[inline]
 pub(crate) fn escape_field_name(name: &str) -> String {
@@ -50,16 +57,20 @@ pub(crate) fn escape_field_name(name: &str) -> String {
         return format!("__{name}__");
     }
 
-    // Rule 2: contains special characters
-    if name.contains('_') || name.contains('.') || name.contains('-') || name.contains('/') {
+    // Rule 2: only `__`, `.`, `-`, `/` are escaped (a single `_` is left as-is).
+    if name.contains("__") || name.contains('.') || name.contains('-') || name.contains('/') {
         let mut escaped = String::with_capacity(name.len() * 2);
-        for ch in name.chars() {
+        let mut chars = name.chars().peekable();
+        while let Some(ch) = chars.next() {
             match ch {
-                '_' => escaped.push_str("__"),
+                '_' if chars.peek() == Some(&'_') => {
+                    chars.next(); // consume the paired underscore
+                    escaped.push_str("__underscores__");
+                }
                 '.' => escaped.push_str("__dot__"),
                 '-' => escaped.push_str("__dash__"),
                 '/' => escaped.push_str("__slash__"),
-                _ => escaped.push(ch),
+                other => escaped.push(other),
             }
         }
         return escaped;
@@ -107,13 +118,25 @@ mod tests {
     }
 
     #[test]
-    fn underscore_doubling() {
-        assert_eq!(escape_field_name("my_field"), "my__field");
+    fn single_underscore_unchanged() {
+        // apiserver escapes only `__`; a lone `_` is a valid CEL identifier char.
+        assert_eq!(escape_field_name("my_field"), "my_field");
+    }
+
+    #[test]
+    fn double_underscore_escaping() {
+        assert_eq!(escape_field_name("a__b"), "a__underscores__b");
+    }
+
+    #[test]
+    fn triple_underscore_leftmost_pair() {
+        // Leftmost-first: the first `__` escapes, the trailing lone `_` stays.
+        assert_eq!(escape_field_name("a___b"), "a__underscores___b");
     }
 
     #[test]
     fn mixed_special_characters() {
-        assert_eq!(escape_field_name("a-b_c.d"), "a__dash__b__c__dot__d");
+        assert_eq!(escape_field_name("a-b_c.d"), "a__dash__b_c__dot__d");
     }
 
     #[test]
@@ -140,8 +163,8 @@ mod tests {
     }
 
     #[test]
-    fn leading_underscore() {
-        assert_eq!(escape_field_name("_private"), "__private");
+    fn leading_single_underscore_unchanged() {
+        assert_eq!(escape_field_name("_private"), "_private");
     }
 
     #[test]
