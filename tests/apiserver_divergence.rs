@@ -6,12 +6,14 @@
 //! - **fail-closed** — kube-cel reports an error where the apiserver would
 //!   accept the object (a false positive; safe, but not faithful).
 //! - **fail-open** — kube-cel accepts where the apiserver would reject (a false
-//!   negative; dangerous). There should be **none** of these, with two
+//!   negative; dangerous). There should be **none** of these, with three
 //!   documented exceptions: the errors only a type checker catches, which `cel`
 //!   does not have yet (cel-rust#350), see [`no_type_checker_fails_open`]; and,
-//!   until it is fixed before 0.9.0 (#14), rules on schema nodes the object does
-//!   not reach, see [`unreached_schema_node_fails_open`]. The depth case used to
-//!   be one and was fixed in S4 (P1-A), for objects that reach the depth.
+//!   until they are fixed before 0.9.0 (#14), rules on schema nodes the object
+//!   does not reach, see [`unreached_schema_node_fails_open`], and `format()`'s
+//!   output, see [`format_numeric_verbs_fail_open`] and [`format_s_fail_open`].
+//!   The depth case used to be one and was fixed in S4 (P1-A), for objects that
+//!   reach the depth.
 //!
 //! Each test locks the *current measured* behavior so a divergence cannot
 //! change silently. The human-readable summary lives in the README
@@ -380,6 +382,84 @@ fn unreached_schema_node_fails_open() {
         Validator::new().validate(&deep, &json!({}), None).is_ok(),
         "an over-deep schema with a shallow object is a known fail-open (unreached node)"
     );
+}
+
+// ── `format()` output — fail OPEN (fix before 0.9.0) ─────────────────────────
+// apiserver: cel-go v0.26's formatter (`ext.Strings` version 2). It prints `%f`
+//            and `%e` through golang.org/x/text's locale printer, a negative
+//            `%b` / `%o` / `%x` as sign and magnitude, and refuses `%f` / `%e`
+//            on a non-double at runtime. Its `%s` takes Go's `%g` digits (which
+//            break a rounding tie differently from Rust), escapes every code
+//            point Go does not print (unassigned ones too), and writes a type
+//            value as a type. All checked on v1.36.1 and with k8s.io/apiserver
+//            v0.36.1 `MustBaseEnvSet(1.36)`.
+// kube-cel:  Go `fmt`-style `%f` / `%e` that accept an int, two's complement,
+//            Rust's shortest digits, an approximation of Go's printable set,
+//            and a type value as a string. So a rule comparing either output
+//            holds on one side only. Pinned so the tests fail once fixed.
+
+#[test]
+fn format_numeric_verbs_fail_open() {
+    // kube-cel's own output: these hold here and fail on the apiserver.
+    for rule in [
+        "'%.2f'.format([1500.0]) == '1500.00'",
+        "'%.2e'.format([1500.0]) == '1.50e+03'",
+        "'%.2e'.format([0.0]) == '0.00e+00'",
+        "'%.1e'.format([0.0000015]) == '1.5e-06'",
+        "'%f'.format([dyn(1)]) == '1.000000'",
+        "'%.1f'.format([dyn(5)]) == '5.0'",
+        "'%b'.format([-5]) == '1111111111111111111111111111111111111111111111111111111111111011'",
+        "'%o'.format([-8]) == '1777777777777777777770'",
+        "'%x'.format([-255]) == 'ffffffffffffff01'",
+        "'%X'.format([-255]) == 'FFFFFFFFFFFFFF01'",
+    ] {
+        assert!(
+            run_rule(rule).is_ok(),
+            "{rule}: expected the known fail-open to pass"
+        );
+    }
+    // The apiserver's output: these hold there and fail here.
+    for rule in [
+        "'%.2f'.format([1500.0]) == '1,500.00'",
+        "'%.2e'.format([1500.0]) == '1.500000×10⁰³'",
+        "'%b'.format([-5]) == '-101'",
+        "'%o'.format([-8]) == '-10'",
+        "'%x'.format([-255]) == '-ff'",
+        "'%X'.format([-255]) == '-FF'",
+    ] {
+        assert!(
+            run_rule(rule).is_err(),
+            "{rule}: kube-cel unexpectedly matches the apiserver"
+        );
+    }
+}
+
+#[test]
+fn format_s_fail_open() {
+    // kube-cel's own output: these hold here and fail on the apiserver.
+    for rule in [
+        r#"'%s'.format([1000000000000000.25]) == '1.0000000000000003e+15'"#,
+        r#"'%s'.format([['\u0378']]) == '["\u0378"]'"#,
+        r#"'%s'.format([['\uffff']]) == '["\uffff"]'"#,
+        r#"'%s'.format([[type(1)]]) == '["int"]'"#,
+    ] {
+        assert!(
+            run_rule(rule).is_ok(),
+            "{rule}: expected the known fail-open to pass"
+        );
+    }
+    // The apiserver's output: these hold there and fail here.
+    for rule in [
+        r#"'%s'.format([1000000000000000.25]) == '1.0000000000000002e+15'"#,
+        r#"'%s'.format([['\u0378']]) == '["\\u0378"]'"#,
+        r#"'%s'.format([['\uffff']]) == '["\\uffff"]'"#,
+        r#"'%s'.format([[type(1)]]) == '[int]'"#,
+    ] {
+        assert!(
+            run_rule(rule).is_err(),
+            "{rule}: kube-cel unexpectedly matches the apiserver"
+        );
+    }
 }
 
 // ── `lists` extension and two-variable comprehensions — faithful since 0.9 ──

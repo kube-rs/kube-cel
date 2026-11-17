@@ -156,25 +156,37 @@ fn math_bit_not(v: i64) -> ResolveResult {
 }
 
 /// `math.bitShiftLeft(int, int) -> int`
+///
+/// cel-go: negative shift → error; shift ≥ 64 → 0. Go shifts have no upper
+/// bound and yield 0 past the type width, whereas Rust's `<<` panics (debug)
+/// or masks the count (release), so the wide case is handled explicitly.
 fn math_bit_shift_left(v: i64, shift: i64) -> ResolveResult {
-    if !(0..=63).contains(&shift) {
+    if shift < 0 {
         return Err(ExecutionError::function_error(
             "math.bitShiftLeft",
-            "shift amount must be between 0 and 63",
+            "negative shift amount",
         ));
     }
-    Ok(Value::Int(v << shift))
+    Ok(Value::Int(if shift >= 64 { 0 } else { v << shift }))
 }
 
 /// `math.bitShiftRight(int, int) -> int`
+///
+/// cel-go: negative shift → error; shift ≥ 64 → 0. The shift is **logical**
+/// (`types.Int(types.Uint(v) >> bs)`), so the sign bit is not extended —
+/// Rust's `>>` on `i64` is arithmetic, hence the cast through `u64`.
 fn math_bit_shift_right(v: i64, shift: i64) -> ResolveResult {
-    if !(0..=63).contains(&shift) {
+    if shift < 0 {
         return Err(ExecutionError::function_error(
             "math.bitShiftRight",
-            "shift amount must be between 0 and 63",
+            "negative shift amount",
         ));
     }
-    Ok(Value::Int(v >> shift))
+    Ok(Value::Int(if shift >= 64 {
+        0
+    } else {
+        ((v as u64) >> shift) as i64
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -192,20 +204,22 @@ fn math_sqrt(v: f64) -> ResolveResult {
 // Variadic greatest / least
 // ---------------------------------------------------------------------------
 
-/// Compare two numeric values, returning ordering.
+/// Compare two numeric values exactly.
+///
+/// cel-go's `math.greatest`/`math.least` delegate to each value's `Comparer`
+/// (exact typed comparison), NOT float promotion — so two `int`s above 2^53
+/// that round to the same `f64` still compare correctly. `lists.min`/`max`
+/// already route through `value_ops::compare_values`; match them here.
 fn numeric_cmp(a: &Value, b: &Value) -> Result<std::cmp::Ordering, ExecutionError> {
-    // Promote to f64 for cross-type comparison
-    let fa = to_f64(a)?;
-    let fb = to_f64(b)?;
-    fa.partial_cmp(&fb)
-        .ok_or_else(|| ExecutionError::function_error("math.greatest/least", "cannot compare NaN values"))
+    ensure_numeric(a)?;
+    ensure_numeric(b)?;
+    super::value_ops::compare_values(a, b)
+        .map_err(|_| ExecutionError::function_error("math.greatest/least", "cannot compare values"))
 }
 
-fn to_f64(v: &Value) -> Result<f64, ExecutionError> {
+fn ensure_numeric(v: &Value) -> Result<(), ExecutionError> {
     match v {
-        Value::Int(n) => Ok(*n as f64),
-        Value::UInt(n) => Ok(*n as f64),
-        Value::Float(f) => Ok(*f),
+        Value::Int(_) | Value::UInt(_) | Value::Float(_) => Ok(()),
         _ => Err(ExecutionError::function_error(
             "math.greatest/least",
             "expected numeric argument",
@@ -392,9 +406,25 @@ mod tests {
 
     #[test]
     fn test_bit_shift_invalid() {
+        // Only negative shifts are errors (cel-go: "negative offset").
         eval_err("math.bitShiftLeft(1, -1)");
-        eval_err("math.bitShiftLeft(1, 64)");
         eval_err("math.bitShiftRight(1, -1)");
+    }
+
+    #[test]
+    fn test_bit_shift_wide_is_zero() {
+        // cel-go: shift >= 64 yields 0 (Go's shift has no upper bound), not an error.
+        assert_eq!(eval("math.bitShiftLeft(1, 64)"), Value::Int(0));
+        assert_eq!(eval("math.bitShiftLeft(1, 100)"), Value::Int(0));
+        assert_eq!(eval("math.bitShiftRight(1, 64)"), Value::Int(0));
+    }
+
+    #[test]
+    fn test_bit_shift_right_is_logical() {
+        // Logical (unsigned) shift: the sign bit is not extended.
+        // -1 (all ones) >> 1 == i64::MAX; arithmetic shift would give -1.
+        assert_eq!(eval("math.bitShiftRight(-1, 1)"), Value::Int(i64::MAX));
+        assert_eq!(eval("math.bitShiftRight(-1, 63)"), Value::Int(1));
     }
 
     // -- Square root --
@@ -458,6 +488,21 @@ mod tests {
     #[test]
     fn test_greatest_single_float() {
         assert_eq!(eval("math.greatest(-0.5)"), Value::Float(-0.5));
+    }
+
+    #[test]
+    fn test_greatest_least_exact_large_ints() {
+        // 2^53 and 2^53+1 collapse to the same f64, so float promotion would
+        // call them equal and return the wrong argument. Exact comparison must
+        // keep them distinct.
+        assert_eq!(
+            eval("math.greatest(9007199254740992, 9007199254740993)"),
+            Value::Int(9007199254740993)
+        );
+        assert_eq!(
+            eval("math.least(9007199254740993, 9007199254740992)"),
+            Value::Int(9007199254740992)
+        );
     }
 
     #[test]

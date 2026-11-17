@@ -347,14 +347,17 @@ Two stability tiers, by surface:
 The validation pipeline aims to return the same verdict the Kubernetes API
 server would, client-side. Where it cannot today, it diverges **fail-closed** —
 it reports an error rather than silently accepting — so a passing result is as
-strict as the API server, with two exceptions (the last two rows below). `cel`
+strict as the API server, with three exceptions (the last three rows below). `cel`
 has no type checker yet
 ([cel-rust#350](https://github.com/cel-rust/cel-rust/issues/350)), so a rule the
 apiserver rejects at registration for a type, arity or call-shape error can
 still pass client-side. And a rule on a schema node the object does not reach is
 not checked at all, a gap to be fixed before 0.9.0
-([#14](https://github.com/kube-rs/kube-cel/issues/14)). These divergences are
-pinned by `tests/apiserver_divergence.rs`.
+([#14](https://github.com/kube-rs/kube-cel/issues/14)). So is part of
+`format()`'s output (`%f`, `%e`, `%b`, `%o`, `%x`, `%X`, and `%s` in a few
+cases), which differs from the cel-go v0.26 the apiserver uses. These
+divergences are pinned by
+`tests/apiserver_divergence.rs`.
 
 | Feature | API server | kube-cel | Direction |
 |---------|-----------|----------|-----------|
@@ -369,6 +372,7 @@ pinned by `tests/apiserver_divergence.rs`.
 | Schema nesting deeper than 64 levels | enforces (rejects over-limit schemas at registration) | `SchemaTooDeep` error | fail-closed |
 | Rule whose `messageExpression` does not compile (a syntax error, or a call refused above) | rejects the CRD at registration | `CompilationFailure` (the rule is rejected, not just its message) | fail-closed |
 | Functions the apiserver declares that kube-cel does not implement: `optional.unwrap(..)`, `<list>.unwrapOpt()`, the authz library (`authorizer.*` in a VAP), or a function whose kube-cel feature is disabled | evaluates (the authz library against the cluster) | compiles, and passes where evaluation does not reach the call; `UnsupportedReference` where it does | fail-closed (the authz library is out of scope) |
+| `format()` output: `%f`, `%e`, `%b`, `%o`, `%x`, `%X`, and `%s` in a few cases | prints `%f` / `%e` through a locale printer (`'%.2f'.format([1500.0])` is `1,500.00`, `'%.2e'.format([1500.0])` is `1.500000×10⁰³`, the precision ignored), a negative `%b` / `%o` / `%x` as sign and magnitude (`'%b'.format([-5])` is `-101`), and refuses `%f` / `%e` on a non-double; `%s` breaks a `%g` rounding tie Go's way (`1.0000000000000002e+15`), escapes unassigned code points (`["\u0378"]`) and writes a nested type as `[int]` | `1500.00`, `1.50e+03`, two's complement (`1111…1011`), `%f` on an int, `1.0000000000000003e+15`, the raw code point, `["int"]` | **fail-open** (to be fixed before 0.9.0) |
 | A schema node the object does not reach (an omitted property, the `items` of an empty list, nesting past 64 levels): a rule there that does not compile, or a `messageExpression` that does not | rejects the CRD at registration | not compiled or checked, so the object passes | **fail-open** (to be fixed before 0.9.0) |
 | No type checker: type errors (`[1, 2] == [1.0, 2.0]`, `[1, 2.0].isSorted()`), arity errors (`'a'.lowerAscii(42)`), call-shape errors (`family(ip(..))`, and the `reverse()` / `.string()` rows above), a non-string `messageExpression`, and an undeclared identifier (such as `authorizer` in a CRD rule), where evaluation does not reach the error | rejects the CRD at registration (type-checks every expression) | passes; `cel` has no type checker yet ([cel-rust#350](https://github.com/cel-rust/cel-rust/issues/350)) | **fail-open** (the one known exception) |
 

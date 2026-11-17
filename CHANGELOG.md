@@ -108,6 +108,23 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     `v` and refuse a fourth component (`1.2.3.4`).
   - Quantity comparison is exact for magnitudes beyond `i128` scaling
     (`compareTo` used to call quantities 3 apart equal there).
+- **Strings and `format()` follow cel-go v0.26**, the version kube-apiserver
+  v1.36.1 uses (each checked live):
+  - `indexOf` / `lastIndexOf`: a negative offset is an error; with an offset an
+    empty needle returns the offset unchanged (`'hello'.indexOf('', -5)` is
+    `-5`), and `lastIndexOf` with an offset at or past the length is `-1`.
+  - `split('')` splits into characters without empty ends; `join()` errors on
+    a non-string element.
+  - `%s`: a whole double prints without `.0` and turns scientific from exponent
+    6 (`1e+06`); inside a list or map a double is `%.6f` and an infinity is
+    quoted, map entries are sorted, and timestamps, durations, bytes and
+    strings are written as CEL literals (`[duration("3600s")]`, `[b"abc"]`);
+    a top-level timestamp is RFC 3339 and a duration its seconds (`5400s`).
+    Bytes that are not UTF-8, and values with no `%s` form (an IP, a quantity),
+    are errors.
+  - Not yet: `%f`, `%e`, `%b`, `%o`, `%x`, `%X` and a few `%s` cases still
+    print differently from the apiserver; this is a documented fail-open,
+    to be fixed before 0.9.0.
 
 ### Added
 - `new_env() -> cel::Env`: the `cel` standard library plus the overloads
@@ -138,6 +155,10 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
 - `<list>.sum()` overflow is an error instead of a panic (debug) or a wrapped
   result (release). `lists.range()` in `new_env()` refuses more than 10,000,000
   elements.
+- `math.bitShiftLeft` / `math.bitShiftRight` (general-purpose `new_env()`
+  only; the apiserver has no `math` library) shift by 64 or more to `0`, and
+  `bitShiftRight` is a logical shift; `math.greatest` / `math.least` compare
+  exactly instead of through `f64`.
 - Quantity `add` / `sub` past the `i128` range is an error instead of a panic
   or a wrapped result (the apiserver's quantities are exact, so this is a
   documented fail-closed limit).

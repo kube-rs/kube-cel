@@ -726,21 +726,6 @@ pub fn cases() -> Vec<ParityCase> {
         // Each row reproduces a measured divergence with the OLD (buggy) expected
         // value, so it pins that kube-cel now agrees with the apiserver.
         //
-        // F1a — `string.format()` `%e` used Rust's exponent (`1.50e3`); cel-go
-        // emits Go's signed, zero-padded `1.50e+03`. The old equality is now
-        // false on BOTH sides → REJECT (was fail-open ACCEPT).
-        ParityCase {
-            kind: "PfmtExp",
-            plural: "pfmtexps",
-            schema: json!({
-                "type": "object",
-                "properties": {},
-                "x-kubernetes-validations": [{ "rule": "'val: %.2e'.format([1500.0]) == 'val: 1.50e3'", "message": "exp" }]
-            }),
-            object: json!({}),
-            expect: Expect::Reject,
-            note: "format %e is Go-style 1.50e+03, not 1.50e3 → REJECT (F1a)",
-        },
         // F1b — `%s` on a map emitted `{\"a\": 1}` (space after colon); cel-go
         // emits `{\"a\":1}`. Old equality now false on both → REJECT.
         ParityCase {
@@ -920,6 +905,61 @@ pub fn cases() -> Vec<ParityCase> {
             object: json!({}),
             expect: Expect::Accept,
             note: "lenient semver: lowercase v only, no fourth component → ACCEPT",
+        },
+        // ── strings / format vs cel-go v0.26 ──────────────────────────────────
+        // kube-cel keeps its own strings and format libraries; the apiserver's
+        // are cel-go v0.26 `ext.Strings`.
+        //
+        // indexOf / lastIndexOf: with an offset, an empty needle returns the offset as is
+        // (even negative or past the end), and `lastIndexOf` returns -1 for an
+        // offset at or past the length.
+        ParityCase {
+            kind: "PstrIndexOffset",
+            plural: "pstrindexoffsets",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "'hello'.lastIndexOf('o', 5) == -1 && 'hello'.indexOf('', -5) == -5 && 'hello'.lastIndexOf('', 100) == 100 && 'hello'.lastIndexOf('', -3) == -3 && 'hello'.lastIndexOf('o', 4) == 4 && 'hello'.lastIndexOf('') == 5 && 'héllo'.lastIndexOf('l', 2) == 2",
+                    "message": "index"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "indexOf/lastIndexOf offsets follow cel-go v0.26 → ACCEPT",
+        },
+        // `%s` converts bytes with ConvertToType(String), which
+        // errors on invalid UTF-8; kube-cel printed U+FFFD instead.
+        ParityCase {
+            kind: "PfmtBadUtf8",
+            plural: "pfmtbadutf8s",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "'%s'.format([b'\\xff']) != 'x'", "message": "bytes" }]
+            }),
+            object: json!({}),
+            expect: Expect::Reject,
+            note: "%s on invalid UTF-8 bytes is an evaluation error → REJECT",
+        },
+        // `%s` follows cel-go v0.26's formatter (ext/formatting.go):
+        // a top-level double is Go `%g` (scientific from exponent 6), a nested
+        // one `%.6f` with infinities quoted, map keys sorted, and nested
+        // durations, timestamps and bytes written as CEL literals.
+        ParityCase {
+            kind: "PfmtNested",
+            plural: "pfmtnesteds",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "'%s'.format([1000000.0]) == '1e+06' && '%s'.format([123456.0]) == '123456' && '%s'.format([[1.5]]) == '[1.500000]' && '%s'.format([[1.0/0.0]]) == '[\"+Inf\"]' && '%s'.format([{'b': 1, 'a': 2}]) == '{\"a\":2, \"b\":1}' && '%s'.format([[duration('1h')]]) == '[duration(\"3600s\")]' && '%s'.format([[timestamp('2024-01-15T10:30:00Z')]]) == '[timestamp(\"2024-01-15T10:30:00Z\")]' && '%s'.format([[b'abc']]) == '[b\"abc\"]' && '%s'.format([['a\"b']]) == '[\"a\\\\\"b\"]'",
+                    "message": "nested"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "%s renders doubles and nested values like cel-go v0.26 → ACCEPT",
         },
         // ── cel 0.16 validation environment (kube-rs/kube-cel#14) ─────────────
         // The validation env enables `cel`'s upstream `lists` extension and the

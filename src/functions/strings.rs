@@ -57,17 +57,27 @@ pub(crate) fn string_index_of(This(this): This<Arc<String>>, Arguments(args): Ar
             ));
         }
     };
-    let offset: usize = match args.get(1) {
-        Some(Value::Int(n)) => (*n).max(0) as usize,
+    let offset = match args.get(1) {
+        Some(Value::Int(n)) => *n,
         _ => 0,
     };
+    // cel-go v0.26 (`indexOfOffset`) returns the offset as is for an empty
+    // needle, before any range check: `'hello'.indexOf('', -5)` is -5.
+    if search.is_empty() {
+        return Ok(Value::Int(offset));
+    }
+    // Otherwise a negative offset errors (it does NOT clamp to 0), and one past
+    // the end falls through to an empty scan → -1.
+    if offset < 0 {
+        return Err(ExecutionError::function_error(
+            "indexOf",
+            format!("index out of range: {offset}"),
+        ));
+    }
+    let offset = offset as usize;
 
     let chars: Vec<char> = this.chars().collect();
     let search_chars: Vec<char> = search.chars().collect();
-
-    if search_chars.is_empty() {
-        return Ok(Value::Int(offset as i64));
-    }
 
     for i in offset..chars.len() {
         if i + search_chars.len() <= chars.len() && chars[i..i + search_chars.len()] == search_chars[..] {
@@ -102,15 +112,23 @@ pub(crate) fn string_last_index_of(
     // may extend PAST that index. (The previous implementation treated it as an
     // exclusive upper bound the whole match had to fit under, which diverged
     // fail-open from the apiserver.) Without it, any start position is allowed.
+    // cel-go v0.26 `lastIndexOfOffset`: an empty needle returns the offset as
+    // is (even negative or past the end); otherwise a negative offset errors and
+    // one at or past the length returns -1. Without an offset an empty needle is
+    // found at `len`, and any start position is allowed.
     let max_start: i64 = match args.get(1) {
+        Some(Value::Int(n)) if search_chars.is_empty() => return Ok(Value::Int(*n)),
+        Some(Value::Int(n)) if *n < 0 => {
+            return Err(ExecutionError::function_error(
+                "lastIndexOf",
+                format!("index out of range: {n}"),
+            ));
+        }
+        Some(Value::Int(n)) if *n >= len => return Ok(Value::Int(-1)),
         Some(Value::Int(n)) => *n,
+        _ if search_chars.is_empty() => return Ok(Value::Int(len)),
         _ => len,
     };
-
-    if search_chars.is_empty() {
-        // The empty string is found at the offset itself, clamped to [0, len].
-        return Ok(Value::Int(max_start.clamp(0, len)));
-    }
 
     // Highest start index we may scan: bounded by `max_start` and by the room
     // the search string needs to fit within the haystack.
@@ -179,6 +197,36 @@ fn string_split(This(this): This<Arc<String>>, Arguments(args): Arguments) -> Re
         }
     };
 
+    // Go's strings.Split/SplitN treat an empty separator as "split after each
+    // UTF-8 rune" (`"abc" -> [a b c]`); Rust's str::split("") instead yields
+    // leading/trailing empty strings. Handle the empty separator to match cel-go.
+    if separator.is_empty() {
+        let chars: Vec<char> = this.chars().collect();
+        let parts: Vec<Value> = match args.get(1) {
+            Some(Value::Int(n)) if *n == 0 => vec![],
+            // n>0 and short of the rune count: first n-1 runes, then the remainder
+            // as a single element (Go SplitN semantics).
+            // Compared as i64 before narrowing: on a 32-bit target `n as usize`
+            // truncates (4294967296 → 0) and the slicing below would panic.
+            Some(Value::Int(n)) if *n > 0 && *n < chars.len() as i64 => {
+                let n = *n as usize;
+                let mut v: Vec<Value> = chars[..n - 1]
+                    .iter()
+                    .map(|c| Value::String(Arc::new(c.to_string())))
+                    .collect();
+                let rest: String = chars[n - 1..].iter().collect();
+                v.push(Value::String(Arc::new(rest)));
+                v
+            }
+            // No limit, negative limit, or limit >= rune count: every rune.
+            _ => chars
+                .iter()
+                .map(|c| Value::String(Arc::new(c.to_string())))
+                .collect(),
+        };
+        return Ok(Value::List(Arc::new(parts)));
+    }
+
     let parts: Vec<Value> = match args.get(1) {
         Some(Value::Int(n)) if *n == 0 => vec![],
         Some(Value::Int(n)) if *n < 0 => this
@@ -186,7 +234,7 @@ fn string_split(This(this): This<Arc<String>>, Arguments(args): Arguments) -> Re
             .map(|s| Value::String(Arc::new(s.to_string())))
             .collect(),
         Some(Value::Int(n)) => this
-            .splitn(*n as usize, separator.as_str())
+            .splitn(usize::try_from(*n).unwrap_or(usize::MAX), separator.as_str())
             .map(|s| Value::String(Arc::new(s.to_string())))
             .collect(),
         _ => this
@@ -250,13 +298,21 @@ fn join(This(this): This<Arc<Vec<Value>>>, Arguments(args): Arguments) -> Resolv
         _ => String::new(),
     };
 
-    let parts: Vec<String> = this
-        .iter()
-        .map(|v| match v {
-            Value::String(s) => s.to_string(),
-            other => format!("{other:?}"),
-        })
-        .collect();
+    // cel-go's join is typed `list(string)` and errors on a non-string element
+    // rather than rendering it (the old Debug format leaked Rust reprs like
+    // `Int(1)` into user-visible output and was a fail-open verdict).
+    let mut parts: Vec<String> = Vec::with_capacity(this.len());
+    for v in this.iter() {
+        match v {
+            Value::String(s) => parts.push(s.to_string()),
+            other => {
+                return Err(ExecutionError::function_error(
+                    "join",
+                    format!("join: invalid input: expected string, got {:?}", other.type_of()),
+                ));
+            }
+        }
+    }
 
     Ok(Value::String(Arc::new(parts.join(&separator))))
 }
@@ -415,8 +471,8 @@ mod tests {
     fn test_index_of_with_offset() {
         // offset past first occurrence
         assert_eq!(eval("'abcabc'.indexOf('abc', 1)"), Value::Int(3));
-        // negative offset clamps to 0
-        assert_eq!(eval("'hello'.indexOf('h', -5)"), Value::Int(0));
+        // negative offset errors (cel-go: "index out of range"), not clamps to 0
+        eval_err("'hello'.indexOf('h', -5)");
         // offset past end
         assert_eq!(eval("'hello'.indexOf('h', 100)"), Value::Int(-1));
     }
@@ -428,6 +484,65 @@ mod tests {
         assert_eq!(eval("'abcabc'.lastIndexOf('abc', 3)"), Value::Int(3));
         // empty search returns the offset
         assert_eq!(eval("'hello'.lastIndexOf('', 3)"), Value::Int(3));
+        // negative offset errors (cel-go), not -1/clamp
+        eval_err("'hello'.lastIndexOf('l', -1)");
+    }
+
+    #[test]
+    fn index_of_offsets_follow_cel_go_v026() {
+        // Each checked on kube-apiserver v1.36.1 (cel-go v0.26).
+        // An offset at or past the length finds nothing for lastIndexOf.
+        assert_eq!(eval("'hello'.lastIndexOf('o', 5)"), Value::Int(-1));
+        assert_eq!(eval("'hello'.lastIndexOf('o', 4)"), Value::Int(4));
+        // An empty needle returns the offset as is, unchecked.
+        assert_eq!(eval("'hello'.indexOf('', -5)"), Value::Int(-5));
+        assert_eq!(eval("'hello'.indexOf('', 100)"), Value::Int(100));
+        assert_eq!(eval("'hello'.lastIndexOf('', 100)"), Value::Int(100));
+        assert_eq!(eval("'hello'.lastIndexOf('', -3)"), Value::Int(-3));
+        // Without an offset an empty needle is found at the length.
+        assert_eq!(eval("'hello'.lastIndexOf('')"), Value::Int(5));
+        eval_err("'hello'.indexOf('h', -5)");
+    }
+
+    #[test]
+    fn test_split_limit_past_u32() {
+        // A limit past u32::MAX keeps every part (Go SplitN with n > count). On
+        // a 32-bit target `n as usize` used to truncate it and panic.
+        let parts = |expr: &str| match eval(expr) {
+            Value::List(l) => l.len(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(parts("'abc'.split('', 4294967296)"), 3);
+        assert_eq!(parts("'abc'.split('', 4294967298)"), 3);
+        assert_eq!(parts("'a,b,c'.split(',', 4294967296)"), 3);
+    }
+
+    #[test]
+    fn test_split_empty_separator() {
+        // Go strings.Split with "" splits after each rune (no leading/trailing "").
+        assert_eq!(
+            eval("'abc'.split('')"),
+            Value::List(Arc::new(vec![
+                Value::String(Arc::new("a".into())),
+                Value::String(Arc::new("b".into())),
+                Value::String(Arc::new("c".into())),
+            ]))
+        );
+        // SplitN: first n-1 runes, then the remainder as one element.
+        assert_eq!(
+            eval("'abcde'.split('', 3)"),
+            Value::List(Arc::new(vec![
+                Value::String(Arc::new("a".into())),
+                Value::String(Arc::new("b".into())),
+                Value::String(Arc::new("cde".into())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_join_non_string_errors() {
+        // cel-go's join is list(string): non-string elements error, not Debug-format.
+        eval_err("[1, 2].join('-')");
     }
 
     #[test]

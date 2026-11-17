@@ -90,7 +90,7 @@ fn format_string(This(fmt): This<Arc<String>>, args: Value) -> ResolveResult {
         arg_idx += 1;
 
         match verb {
-            's' => format_s(arg, &mut result),
+            's' => format_s(arg, &mut result)?,
             'd' => format_d(arg, &mut result)?,
             'f' => format_f(arg, precision.unwrap_or(6), &mut result)?,
             'e' => format_e(arg, precision.unwrap_or(6), &mut result)?,
@@ -110,78 +110,257 @@ fn format_string(This(fmt): This<Arc<String>>, args: Value) -> ResolveResult {
     Ok(Value::String(Arc::new(result)))
 }
 
-/// %s — string representation of any value.
-fn format_s(val: &Value, out: &mut String) {
+/// `%s`, as cel-go v0.26 `FormatString` (ext/formatting.go: the formatter of
+/// `ext.Strings` below version 4, which the apiserver's base environment uses).
+/// A scalar is converted like `string(x)`; a list or map is written with its
+/// elements as CEL literals (see [`format_nested`]).
+fn format_s(val: &Value, out: &mut String) -> Result<(), ExecutionError> {
     match val {
-        Value::String(s) => out.push_str(s),
-        Value::Int(n) => out.push_str(&n.to_string()),
-        Value::UInt(n) => out.push_str(&n.to_string()),
-        Value::Float(f) => out.push_str(&format_float_default(*f)),
-        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-        Value::Null => out.push_str("null"),
-        Value::List(list) => {
-            out.push('[');
-            for (i, item) in list.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                format_s_quoted(item, out);
-            }
-            out.push(']');
+        Value::List(list) => format_list(list, out),
+        Value::Map(map) => format_map(map, out),
+        Value::Null => {
+            out.push_str("null");
+            Ok(())
         }
-        Value::Map(map) => {
-            out.push('{');
-            let mut first = true;
-            for (key, value) in map.map.iter() {
-                if !first {
-                    out.push_str(", ");
-                }
-                first = false;
-                format_key(key, out);
-                // cel-go renders map entries as `key:value` (no space after the
-                // colon — `fmt.Sprintf("%s:%s", ...)`); entries are joined by
-                // `, `. Matching this avoids a fail-open `.format()` divergence.
-                out.push(':');
-                format_s_quoted(value, out);
-            }
-            out.push('}');
+        other => {
+            out.push_str(&to_cel_string(other)?);
+            Ok(())
         }
-        other => out.push_str(&format!("{other:?}")),
     }
 }
 
-/// Format a map key.
-fn format_key(key: &Key, out: &mut String) {
-    match key {
-        Key::String(s) => {
-            out.push('"');
-            out.push_str(s);
-            out.push('"');
+/// cel-go's `ConvertToType(StringType)` for a scalar: a double is Go `%g`,
+/// bytes must be UTF-8, a timestamp is RFC3339Nano and a duration seconds + "s".
+/// Anything else (an IP, a quantity, a URL, ..) has no `%s` form in cel-go.
+fn to_cel_string(val: &Value) -> Result<String, ExecutionError> {
+    Ok(match val {
+        Value::String(s) => s.to_string(),
+        Value::Int(n) => n.to_string(),
+        Value::UInt(n) => n.to_string(),
+        Value::Float(f) => format_float_default(*f),
+        Value::Bool(b) => b.to_string(),
+        Value::Bytes(b) => utf8_bytes(b)?.to_owned(),
+        Value::Timestamp(_) | Value::Duration(_) => {
+            cel_value_to_string(val).expect("timestamps and durations always convert")
         }
-        Key::Int(n) => out.push_str(&n.to_string()),
-        Key::Uint(n) => out.push_str(&n.to_string()),
-        Key::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-    }
+        other => {
+            return Err(ExecutionError::function_error(
+                "format",
+                format!("%s does not format {}", other.type_of()),
+            ));
+        }
+    })
 }
 
-/// Like format_s but wraps strings in quotes (for nested display).
-fn format_s_quoted(val: &Value, out: &mut String) {
+/// A list element or map value, as cel-go's `clauseForType` + `quoteForCEL`
+/// write it: a valid CEL literal. Strings and bytes are Go-quoted (`"a"`,
+/// `b"a"`), a double is `%.6f` (an infinity or NaN quoted), and a timestamp or
+/// duration is wrapped as `timestamp("…")` / `duration("…")`.
+fn format_nested(val: &Value, out: &mut String) -> Result<(), ExecutionError> {
     match val {
-        Value::String(s) => {
-            out.push('"');
-            out.push_str(s);
-            out.push('"');
+        Value::String(s) => out.push_str(&go_quote(s)),
+        Value::Bytes(b) => {
+            out.push('b');
+            out.push_str(&go_quote(utf8_bytes(b)?));
         }
-        _ => format_s(val, out),
+        Value::Float(f) if f.is_finite() => out.push_str(&format!("{f:.6}")),
+        // Go's `%.6f` of ±Inf/NaN is "+Inf"/"-Inf"/"NaN", the same as `%g`.
+        Value::Float(f) => out.push_str(&go_quote(&format_float_default(*f))),
+        Value::Timestamp(_) => {
+            out.push_str("timestamp(");
+            out.push_str(&go_quote(&to_cel_string(val)?));
+            out.push(')');
+        }
+        Value::Duration(_) => {
+            out.push_str("duration(");
+            out.push_str(&go_quote(&to_cel_string(val)?));
+            out.push(')');
+        }
+        other => format_s(other, out)?,
+    }
+    Ok(())
+}
+
+fn format_list(list: &[Value], out: &mut String) -> Result<(), ExecutionError> {
+    out.push('[');
+    for (i, item) in list.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        format_nested(item, out)?;
+    }
+    out.push(']');
+    Ok(())
+}
+
+/// `{key:value, ..}`, entries sorted by the written key (cel-go
+/// `sort.SliceStable` on the quoted key string, so `-1` < `10` < `2`).
+fn format_map(map: &cel::objects::Map, out: &mut String) -> Result<(), ExecutionError> {
+    let mut entries = Vec::with_capacity(map.map.len());
+    for (key, value) in map.map.iter() {
+        let key = match key {
+            Key::String(s) => go_quote(s),
+            Key::Int(n) => n.to_string(),
+            Key::Uint(n) => n.to_string(),
+            Key::Bool(b) => b.to_string(),
+        };
+        let mut written = String::new();
+        format_nested(value, &mut written)?;
+        entries.push((key, written));
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    out.push('{');
+    for (i, (key, value)) in entries.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(key);
+        out.push(':');
+        out.push_str(value);
+    }
+    out.push('}');
+    Ok(())
+}
+
+/// Go's `%q` (`strconv.Quote`): double quotes, `\"` and `\\`, the C escapes,
+/// `\xNN` below space and for DEL, `\uNNNN` / `\UNNNNNNNN` for other characters
+/// Go does not print. Go's `unicode.IsPrint` needs category tables; this treats
+/// controls, separators other than the space, and the format characters and
+/// private-use ranges below as non-printing, and keeps the rest (an unassigned
+/// code point is escaped by Go but kept here).
+fn go_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{07}' => out.push_str("\\a"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{0b}' => out.push_str("\\v"),
+            c if c < ' ' || c == '\u{7f}' => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c if go_prints(c) => out.push(c),
+            c if (c as u32) < 0x10000 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push_str(&format!("\\U{:08x}", c as u32)),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// An approximation of Go's `unicode.IsPrint` (see [`go_quote`]).
+fn go_prints(c: char) -> bool {
+    let u = c as u32;
+    let format_char = matches!(
+        u,
+        0xAD | 0x600..=0x605
+            | 0x61C
+            | 0x6DD
+            | 0x70F
+            | 0x890..=0x891
+            | 0x8E2
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0001
+            | 0xE0020..=0xE007F
+    );
+    let private_use = matches!(u, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD);
+    c == ' ' || !(c.is_control() || c.is_whitespace() || format_char || private_use)
+}
+
+/// Bytes as UTF-8 text, as cel-go's `ConvertToType(StringType)` requires.
+fn utf8_bytes(b: &[u8]) -> Result<&str, ExecutionError> {
+    std::str::from_utf8(b).map_err(|_| {
+        ExecutionError::function_error("format", "invalid UTF-8 in bytes, cannot convert to string")
+    })
+}
+
+/// Render a `Timestamp`/`Duration` to string exactly as cel-go's
+/// `ConvertToType(StringType)` — the conversion behind both `string(x)` and the
+/// `%s` format verb on the apiserver. Timestamps use `time.RFC3339Nano`;
+/// durations use total seconds + `"s"`
+/// (`strconv.FormatFloat(d.Seconds(), 'f', -1, 64) + "s"`), NOT Go's
+/// `Duration.String()` `"1h0m0s"` form. Returns `None` for other value types.
+///
+/// Uses only inherent `chrono` methods on the bound value, so it needs no
+/// direct `chrono` dependency.
+fn cel_value_to_string(v: &Value) -> Option<String> {
+    match v {
+        Value::Timestamp(t) => {
+            // RFC3339Nano: date-time, then fractional seconds with ALL trailing
+            // zeros removed (Go trims; chrono's `%.f` would keep them, so trim the
+            // zero-padded `%9f` by hand), then "Z" for UTC else the ±hh:mm offset.
+            let mut s = t.format("%Y-%m-%dT%H:%M:%S").to_string();
+            let frac = t.format("%9f").to_string();
+            let frac = frac.trim_end_matches('0');
+            if !frac.is_empty() {
+                s.push('.');
+                s.push_str(frac);
+            }
+            if t.offset().local_minus_utc() == 0 {
+                s.push('Z');
+            } else {
+                s.push_str(&t.format("%:z").to_string());
+            }
+            Some(s)
+        }
+        Value::Duration(d) => {
+            // cel-go: FormatFloat(d.Seconds(), 'f', -1, 64) + "s". Go's `'f'` and
+            // Rust's `Display` are both shortest and never exponential, so agree.
+            // `Seconds()` adds whole seconds and the nanosecond remainder as two
+            // floats; dividing the nanosecond total rounds differently.
+            let secs = d.num_nanoseconds().map_or_else(
+                || d.num_seconds() as f64,
+                |n| (n / 1_000_000_000) as f64 + (n % 1_000_000_000) as f64 / 1e9,
+            );
+            Some(format!("{secs}s"))
+        }
+        _ => None,
     }
 }
 
 fn format_float_default(f: f64) -> String {
-    if f == f.trunc() && f.is_finite() {
-        // Display whole floats without trailing zeros but with at least one decimal
-        let s = format!("{f:.1}");
-        s
+    // cel-go renders a double for `%s` through Go's `%g` (common/types/double.go
+    // `ConvertToType(String)` = `fmt.Sprintf("%g", f)`): shortest round-trip
+    // digits, infinities as "+Inf"/"-Inf", NaN as "NaN", and scientific notation
+    // when the decimal exponent is < -4 or >= 6 (strconv uses precision 6 for
+    // that choice when printing the shortest digits; 21 is `%v`'s threshold).
+    if f.is_nan() {
+        return "NaN".to_string();
+    }
+    if f.is_infinite() {
+        return if f > 0.0 {
+            "+Inf".to_string()
+        } else {
+            "-Inf".to_string()
+        };
+    }
+    // Rust's `{:e}` gives the shortest mantissa + a bare exponent (e.g. "1e0",
+    // "1.5e0", "1e21", "-1.2e-7"); use the exponent to pick the notation.
+    let sci = format!("{f:e}");
+    let epos = sci.find('e').expect("{:e} always emits 'e'");
+    let exp: i32 = sci[epos + 1..].parse().expect("{:e} exponent is an integer");
+    if !(-4..6).contains(&exp) {
+        // Go `%g` scientific form: shortest mantissa + `e` + signed 2-digit exp.
+        let mantissa = &sci[..epos];
+        let sign = if exp < 0 { '-' } else { '+' };
+        format!("{mantissa}e{sign}{:02}", exp.abs())
     } else {
+        // In this range Go `%g` uses plain decimal, matching Rust's `Display`.
         f.to_string()
     }
 }
@@ -355,14 +534,6 @@ mod tests {
     }
 
     #[test]
-    fn test_format_e() {
-        // Go-style exponent: always signed, zero-padded to >= 2 digits.
-        assert_eq!(eval_str("'val: %.2e'.format([1500.0])"), "val: 1.50e+03");
-        assert_eq!(eval_str("'%.2e'.format([0.0])"), "0.00e+00");
-        assert_eq!(eval_str("'%.1e'.format([0.0000015])"), "1.5e-06");
-    }
-
-    #[test]
     fn test_format_s_map() {
         // cel-go renders `key:value` with no space after the colon.
         assert_eq!(eval_str("'%s'.format([{'a': 1}])"), "{\"a\":1}");
@@ -477,14 +648,108 @@ mod tests {
 
     #[test]
     fn test_format_s_float() {
-        assert_eq!(eval_str("'%s'.format([1.0])"), "1.0");
+        // cel-go's %s on a double is Go's `%g`: a whole double is "1", not "1.0".
+        assert_eq!(eval_str("'%s'.format([1.0])"), "1");
         assert_eq!(eval_str("'%s'.format([1.5])"), "1.5");
+        assert_eq!(eval_str("'%s'.format([100000.0])"), "100000");
+        assert_eq!(eval_str("'%s'.format([0.0001])"), "0.0001");
+        // Scientific form kicks in at exponent < -4 or >= 21 (Go %g).
+        assert_eq!(eval_str("'%s'.format([0.00001])"), "1e-05");
+        assert_eq!(eval_str("'%s'.format([1e21])"), "1e+21");
     }
 
     #[test]
-    fn test_format_f_int() {
-        // %f should accept int as well
-        assert_eq!(eval_str("'%.1f'.format([5])"), "5.0");
+    fn test_format_s_infinity() {
+        // cel-go's double→string goes through Go's %g: "+Inf"/"-Inf", not "inf".
+        assert_eq!(eval_str("'%s'.format([1.0 / 0.0])"), "+Inf");
+        assert_eq!(eval_str("'%s'.format([-1.0 / 0.0])"), "-Inf");
+    }
+
+    #[test]
+    fn test_format_s_bytes() {
+        // Top-level %s renders bytes as their UTF-8 text (no b"" wrapper), not
+        // Rust's Debug `Bytes([...])`.
+        assert_eq!(eval_str("'%s'.format([b'hello'])"), "hello");
+    }
+
+    #[test]
+    fn test_format_s_matches_cel_go_v026() {
+        // Expected strings are cel-go v0.26 output, through
+        // k8s.io/apiserver v0.36.1 `MustBaseEnvSet(1.36)`.
+        let cases: &[(&str, &str)] = &[
+            ("'%s'.format([1000000.0])", "1e+06"),
+            ("'%s'.format([123456.0])", "123456"),
+            ("'%s'.format([0.00001])", "1e-05"),
+            ("'%s'.format([1e21])", "1e+21"),
+            ("'%s'.format([1.5])", "1.5"),
+            ("'%s'.format([-0.0])", "-0"),
+            ("'%s'.format([[1.5]])", "[1.500000]"),
+            ("'%s'.format([[1.0/0.0, -1.0/0.0]])", "[\"+Inf\", \"-Inf\"]"),
+            ("'%s'.format([{'b': 1, 'a': 2}])", "{\"a\":2, \"b\":1}"),
+            ("'%s'.format([[duration('1h')]])", "[duration(\"3600s\")]"),
+            (
+                "'%s'.format([[timestamp('2024-01-15T10:30:00Z')]])",
+                "[timestamp(\"2024-01-15T10:30:00Z\")]",
+            ),
+            ("'%s'.format([[b'abc']])", "[b\"abc\"]"),
+            ("'%s'.format([['a\"b']])", "[\"a\\\"b\"]"),
+            ("'%s'.format([[1u]])", "[1]"),
+            ("'%s'.format([[true, null]])", "[true, null]"),
+            ("'%s'.format([{1: 'x', 2: 'y'}])", "{1:\"x\", 2:\"y\"}"),
+            ("'%s'.format([{true: 1, false: 2}])", "{false:2, true:1}"),
+            (
+                "'%s'.format([duration('894385949.183117216s')])",
+                "894385949.1831173s",
+            ),
+            ("'%s'.format([duration('-1.5s')])", "-1.5s"),
+            (
+                "'%s'.format([timestamp('2024-01-15T10:30:00+09:00')])",
+                "2024-01-15T10:30:00+09:00",
+            ),
+            ("'%s'.format([[['x']]])", "[[\"x\"]]"),
+            ("'%s'.format([{'k': [1.5]}])", "{\"k\":[1.500000]}"),
+            ("'%s'.format([['é\\n\\t\\\\']])", "[\"é\\n\\t\\\\\"]"),
+            ("'%s'.format([[-0.0]])", "[-0.000000]"),
+            (
+                "'%s'.format([{'z': 1, 'Z': 2, 'a': 3}])",
+                "{\"Z\":2, \"a\":3, \"z\":1}",
+            ),
+            (
+                "'%s'.format([{-1: 'a', 10: 'b', 2: 'c'}])",
+                "{-1:\"a\", 10:\"b\", 2:\"c\"}",
+            ),
+            (
+                "'%s'.format([['\u{a0}', '\u{200b}']])",
+                "[\"\\u00a0\", \"\\u200b\"]",
+            ),
+            ("'%s'.format([1e-7])", "1e-07"),
+            ("'%s'.format([1.7976931348623157e308])", "1.7976931348623157e+308"),
+            ("'%s'.format([[1e21]])", "[1000000000000000000000.000000]"),
+        ];
+        for (expr, want) in cases {
+            assert_eq!(eval_str(expr), *want, "{expr}");
+        }
+        eval_err("'%s'.format([b'\\xff'])");
+        eval_err("'%s'.format([[b'\\xff']])");
+    }
+
+    #[test]
+    fn test_format_s_refuses_what_cel_go_cannot_convert() {
+        // Invalid UTF-8 errors, top level and nested, instead of U+FFFD.
+        eval_err("'%s'.format([b'\\xff'])");
+        eval_err("'%s'.format([[b'\\xff']])");
+        assert_eq!(eval_str("'%s'.format([b'h\\xc3\\xa9'])"), "hé");
+    }
+
+    #[test]
+    fn test_format_s_duration_timestamp() {
+        // cel-go's %s renders these via ConvertToType(String): duration →
+        // seconds+"s", timestamp → RFC3339Nano — not Rust's Debug fallback.
+        assert_eq!(eval_str("'%s'.format([duration('1h30m')])"), "5400s");
+        assert_eq!(
+            eval_str("'%s'.format([timestamp('2024-01-15T10:30:00Z')])"),
+            "2024-01-15T10:30:00Z"
+        );
     }
 
     #[test]
@@ -511,12 +776,6 @@ mod tests {
     #[test]
     fn test_format_b_bool_false() {
         assert_eq!(eval_str("'%b'.format([false])"), "0");
-    }
-
-    #[test]
-    fn test_format_b_negative_int() {
-        // Rust outputs two's complement for negative i64
-        assert_eq!(eval_str("'%b'.format([-5])"), format!("{:b}", -5i64));
     }
 
     #[test]
