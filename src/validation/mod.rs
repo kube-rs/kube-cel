@@ -19,10 +19,7 @@ use crate::validation::{
     values::{json_to_cel_with_compiled, json_to_cel_with_schema},
 };
 use cel::{Context, Env, Program};
-use std::{
-    collections::HashSet,
-    sync::{Arc, LazyLock},
-};
+use std::sync::{Arc, LazyLock};
 
 /// The `cel` environment that CRD rules and VAP expressions compile and run
 /// against, shared by every [`Validator`], [`compile_schema`](crate::compile_schema)
@@ -61,26 +58,13 @@ pub(crate) fn base_context() -> Context<'static, 'static> {
     ctx
 }
 
-/// The names of the functions [`base_context`] registers.
-fn validation_functions() -> &'static HashSet<String> {
-    static NAMES: LazyLock<HashSet<String>> = LazyLock::new(|| {
-        let mut ctx = Context::with_env(Arc::clone(validation_env()));
-        crate::functions::register_profile(&mut ctx, crate::functions::Profile::Validation)
-            .expect("kube-cel's functions register onto its validation Env")
-            .into_iter()
-            .collect()
-    });
-    &NAMES
-}
-
 /// Compiles a CRD rule, a VAP expression or either's `messageExpression` on
-/// [`validation_env`], refusing a call to a function the validation
-/// environment does not have even where evaluation would never reach it, as
-/// the apiserver does at registration (see [`references`]).
+/// [`validation_env`], refusing a call to a function the apiserver does not
+/// declare even where evaluation would never reach it, as the apiserver does
+/// at registration (see [`references`]).
 pub(crate) fn compile(source: &str) -> Result<Program, Box<dyn std::error::Error + Send + Sync>> {
-    let env = validation_env();
-    let program = env.compile(source)?;
-    references::check(program.expression(), env, validation_functions())?;
+    let program = validation_env().compile(source)?;
+    references::check(program.expression())?;
     Ok(program)
 }
 
@@ -103,10 +87,10 @@ pub struct RootContext {
 #[non_exhaustive]
 pub enum ErrorKind {
     /// The rule, or its `messageExpression`, does not compile: a syntax error,
-    /// or a call to a function outside the apiserver's base CEL environment
-    /// (`cel.bind`, the `math` library, `base64.*`, kube-cel's `isIPv4`, a
-    /// global `min(..)`, ..) or in a kube-cel feature disabled at compile
-    /// time. The apiserver rejects such a CRD at registration.
+    /// or a call to a function the apiserver's CEL environment does not
+    /// declare (`cel.bind`, the `math` library, `base64.*`, kube-cel's
+    /// `isIPv4`, a global `min(..)`, ..). The apiserver rejects such a CRD at
+    /// registration.
     CompilationFailure,
     /// Malformed rule JSON.
     InvalidRule,
@@ -117,11 +101,14 @@ pub enum ErrorKind {
     /// Runtime evaluation error.
     EvaluationError,
     /// Evaluating the rule reached a reference it could not resolve: an
-    /// undeclared identifier, or a function called in a form no overload
-    /// takes (`ip(..).string()`). A call to a function the environment lacks
-    /// altogether is a [`Self::CompilationFailure`] instead. The object is
-    /// rejected (fail-closed); distinct from [`Self::EvaluationError`] so
-    /// callers can tell a coverage gap apart from a genuine runtime error.
+    /// undeclared identifier, a function the apiserver declares but kube-cel
+    /// does not implement (`optional.unwrap`, `<list>.unwrapOpt()`, the
+    /// `authorizer` library) or implements only behind a disabled feature, or
+    /// a function called in a form no overload takes (`ip(..).string()`). A
+    /// call to a function the apiserver does not declare at all is a
+    /// [`Self::CompilationFailure`] instead. The object is rejected
+    /// (fail-closed); distinct from [`Self::EvaluationError`] so callers can
+    /// tell a coverage gap apart from a genuine runtime error.
     UnsupportedReference,
     /// Schema nesting exceeded the maximum supported depth.
     /// The over-deep subtree was refused rather than skipped, so validation
@@ -860,19 +847,20 @@ impl Validator {
             }
             Err(e) => {
                 // The rule compiled but evaluation failed. Calls to functions
-                // the environment lacks were refused at compile time (see
-                // `references`); an `UndeclaredReference` here is an
-                // undeclared identifier, or a function called in a form none
-                // of its overloads takes, classified distinctly so callers can
-                // tell a coverage gap from a real runtime error. Either way the
-                // owned `ExecutionError` is the cause and is preserved via
-                // `source()`.
+                // the apiserver does not declare were refused at compile time
+                // (see `references`); an `UndeclaredReference` here is an
+                // undeclared identifier, a declared function kube-cel does not
+                // implement, or a function called in a form none of its
+                // overloads takes, classified distinctly so callers can tell a
+                // coverage gap from a real runtime error. Either way the owned
+                // `ExecutionError` is the cause and is preserved via `source()`.
                 let (kind, message) = match &e {
                     cel::ExecutionError::UndeclaredReference(name) => (
                         ErrorKind::UnsupportedReference,
                         format!(
                             "rule references '{name}', which kube-cel cannot resolve here (undeclared, \
-                             or not callable in this form); it cannot be evaluated client-side"
+                             a function kube-cel does not implement, or not callable in this form); \
+                             it cannot be evaluated client-side"
                         ),
                     ),
                     _ => (ErrorKind::EvaluationError, format!("rule evaluation error: {e}")),

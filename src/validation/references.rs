@@ -6,8 +6,21 @@
 //! of a comprehension over an empty list, a `messageExpression` of a rule that
 //! holds) would then pass, where the apiserver, which checks every call when
 //! the CRD or policy is registered, rejects it. This walks the whole AST and
-//! refuses a call to any function the validation environment does not have, so
-//! such an expression fails to compile client-side too.
+//! refuses a call to any function the apiserver does not declare, so such an
+//! expression fails to compile client-side too.
+//!
+//! The names accepted are the ones the apiserver declares
+//! (`apiserver_functions.txt`, from the `k8s.io/apiserver` base environment,
+//! checked against a live apiserver by `tests/apiserver_parity.rs`), not the
+//! ones kube-cel implements. CRD rules,
+//! their `messageExpression`s and policy expressions share the list: the
+//! apiserver declares the same functions for all three, the `authorizer`
+//! library included (what a policy adds is the `authorizer` variable). A
+//! function the apiserver declares but kube-cel does not implement
+//! (`optional.unwrap`, `<list>.unwrapOpt()`, the `authorizer` library, a
+//! function whose kube-cel feature is disabled) therefore compiles, as the
+//! apiserver accepts it, and fails closed with `UnsupportedReference` only if
+//! evaluation reaches the call.
 //!
 //! It checks names only. Type, arity and call-shape errors (`[1, 2.0].isSorted()`,
 //! `'a'.lowerAscii(42)`, `family(ip(..))`) still need a type checker: see the
@@ -15,31 +28,44 @@
 //! global `min(..)`/`max(..)`, which kube-cel's functions accept but the
 //! apiserver only has as `<list>.min()`/`<list>.max()`.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::LazyLock};
 
 use cel::common::ast::{EntryExpr, Expr, IdedExpr};
 
-/// Functions the validation set has as `<list>.f()` but not as `f(..)`.
+/// Functions the apiserver has as `<list>.f()` but kube-cel also takes as
+/// `f(..)`.
 const MEMBER_ONLY: &[&str] = &["min", "max"];
+
+/// The functions the apiserver declares, from `apiserver_functions.txt`.
+fn apiserver_functions() -> &'static HashSet<&'static str> {
+    static NAMES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+        include_str!("apiserver_functions.txt")
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect()
+    });
+    &NAMES
+}
 
 /// Why [`check`] refused an expression.
 #[derive(Debug)]
 pub(crate) enum UnsupportedCall {
-    /// A call to a function the validation environment does not have, as
-    /// written: `isIPv4`, `math.ceil`.
+    /// A call to a function the apiserver does not declare, as written:
+    /// `isIPv4`, `math.ceil`.
     Function(String),
-    /// A global call to a function the environment only has as a member.
+    /// A global call to a function the apiserver only has as a member.
     GlobalForm(&'static str),
 }
 
 impl std::fmt::Display for UnsupportedCall {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            UnsupportedCall::Function(name) => write!(
-                f,
-                "call to '{name}': no such function in the Kubernetes CEL environment \
-                 (or its kube-cel feature is disabled)"
-            ),
+            UnsupportedCall::Function(name) => {
+                write!(
+                    f,
+                    "call to '{name}': no such function in the Kubernetes CEL environment"
+                )
+            }
             UnsupportedCall::GlobalForm(name) => write!(
                 f,
                 "no global '{name}' in the Kubernetes CEL environment; call it on a list: <list>.{name}()"
@@ -50,27 +76,23 @@ impl std::fmt::Display for UnsupportedCall {
 
 impl std::error::Error for UnsupportedCall {}
 
-/// Checks every call in `expr` against the functions `env` declares and the
-/// context `functions` registered.
-pub(crate) fn check(
-    expr: &IdedExpr,
-    env: &cel::Env,
-    functions: &HashSet<String>,
-) -> Result<(), UnsupportedCall> {
-    Checker { env, functions }.walk(expr)
+/// Checks every call in `expr` against the functions the apiserver declares.
+pub(crate) fn check(expr: &IdedExpr) -> Result<(), UnsupportedCall> {
+    Checker {
+        declared: apiserver_functions(),
+    }
+    .walk(expr)
 }
 
-struct Checker<'a> {
-    env: &'a cel::Env,
-    functions: &'a HashSet<String>,
+struct Checker {
+    declared: &'static HashSet<&'static str>,
 }
 
-impl Checker<'_> {
-    /// Whether `name` is a declared function. A leading `.` makes a name
+impl Checker {
+    /// Whether the apiserver declares `name`. A leading `.` makes a name
     /// absolute (`.size(..)`, `.optional.of(..)`); `cel` drops it to resolve.
     fn known(&self, name: &str) -> bool {
-        let name = name.strip_prefix('.').unwrap_or(name);
-        self.env.function(name).is_some() || self.functions.contains(name)
+        self.declared.contains(name.strip_prefix('.').unwrap_or(name))
     }
 
     fn walk(&self, e: &IdedExpr) -> Result<(), UnsupportedCall> {
@@ -154,7 +176,153 @@ fn qualified_name(expr: &IdedExpr) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::validation::compile;
+    use std::{collections::BTreeSet, sync::Arc};
+
+    use super::apiserver_functions;
+    use crate::{
+        functions::{Profile, register_profile},
+        validation::{compile, validation_env},
+    };
+
+    /// Functions the apiserver declares that kube-cel does not implement even
+    /// with every feature on. A call to one compiles and fails closed with
+    /// `UnsupportedReference` if evaluation reaches it.
+    const DECLARED_ONLY: &[&str] = &[
+        // cel-go's optional library, version 1.
+        "optional.unwrap",
+        "unwrapOpt",
+        // The authorizer library (`authorizer` and `authorizer.requestResource`
+        // are policy variables kube-cel does not bind).
+        "allowed",
+        "check",
+        "error",
+        "errored",
+        "fieldSelector",
+        "group",
+        "labelSelector",
+        "name",
+        "namespace",
+        "path",
+        "reason",
+        "resource",
+        "serviceAccount",
+        "subresource",
+    ];
+
+    /// Whether kube-cel can call `name` in a rule: `cel` declares it on the
+    /// validation env, or kube-cel's validation profile registers it.
+    fn implemented(name: &str, registered: &BTreeSet<String>) -> bool {
+        validation_env().function(name).is_some() || registered.contains(name)
+    }
+
+    fn registered() -> BTreeSet<String> {
+        let mut ctx = cel::Context::with_env(Arc::clone(validation_env()));
+        register_profile(&mut ctx, Profile::Validation)
+            .expect("kube-cel's functions register onto its validation Env")
+            .into_iter()
+            .collect()
+    }
+
+    /// kube-cel registers no function for rules that the apiserver lacks: the
+    /// name check would refuse every call to it.
+    #[test]
+    fn registered_functions_are_declared_by_the_apiserver() {
+        let stray: Vec<String> = registered()
+            .into_iter()
+            .filter(|name| !apiserver_functions().contains(name.as_str()))
+            .collect();
+        assert!(
+            stray.is_empty(),
+            "registered for rules, not declared by the apiserver: {stray:?}"
+        );
+    }
+
+    /// Declared = implemented ∪ declared-only, with the two disjoint. Fails
+    /// when an updated `apiserver_functions.txt` adds a name kube-cel does not
+    /// implement, or when kube-cel starts implementing one listed in
+    /// [`DECLARED_ONLY`].
+    #[test]
+    #[cfg(all(
+        feature = "strings",
+        feature = "lists",
+        feature = "sets",
+        feature = "regex_funcs",
+        feature = "urls",
+        feature = "ip",
+        feature = "semver_funcs",
+        feature = "format",
+        feature = "quantity",
+        feature = "named_format"
+    ))]
+    fn declared_functions_are_implemented_or_declared_only() {
+        let registered = registered();
+        let missing: BTreeSet<&str> = apiserver_functions()
+            .iter()
+            .copied()
+            .filter(|name| !implemented(name, &registered))
+            .collect();
+        let listed: BTreeSet<&str> = DECLARED_ONLY.iter().copied().collect();
+        assert_eq!(
+            missing, listed,
+            "declared by the apiserver but not implemented, vs DECLARED_ONLY"
+        );
+    }
+
+    /// `tests/common/kube_cel_only_functions.txt`, which the parity suite
+    /// checks the apiserver refuses as undeclared, lists every function kube-cel
+    /// registers that `apiserver_functions.txt` lacks.
+    #[test]
+    #[cfg(all(
+        feature = "strings",
+        feature = "lists",
+        feature = "sets",
+        feature = "regex_funcs",
+        feature = "urls",
+        feature = "ip",
+        feature = "semver_funcs",
+        feature = "format",
+        feature = "quantity",
+        feature = "jsonpatch",
+        feature = "named_format",
+        feature = "math",
+        feature = "encoders"
+    ))]
+    fn kube_cel_only_functions_are_listed() {
+        let mut ctx = cel::Context::with_env(Arc::new(crate::new_env()));
+        let unlisted: BTreeSet<String> = register_profile(&mut ctx, Profile::General)
+            .expect("kube-cel's functions register onto new_env()")
+            .into_iter()
+            .filter(|name| !apiserver_functions().contains(name.as_str()))
+            .collect();
+        let listed: BTreeSet<String> = include_str!("../../tests/common/kube_cel_only_functions.txt")
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            unlisted, listed,
+            "kube-cel's functions the apiserver does not declare, vs tests/common/kube_cel_only_functions.txt"
+        );
+    }
+
+    /// Calls to functions the apiserver declares but kube-cel does not
+    /// implement compile. Each was compiled and evaluated with the Go oracle
+    /// (`k8s.io/apiserver` v0.36.1); the `authorizer` rows in the policy
+    /// compiler, the others in the CRD rule compiler.
+    #[test]
+    fn accepts_declared_functions_kube_cel_does_not_implement() {
+        assert_accepted(&[
+            "self == '' || optional.unwrap([optional.of(self), optional.none()]) == [self]",
+            "true || [optional.of(1), optional.none()].unwrapOpt() == [1]",
+            ".optional.unwrap([optional.of(1)]) == [1]",
+            "true || authorizer.group('').resource('pods').check('get').allowed()",
+            "authorizer.serviceAccount('default', 'sa').group('').resource('pods').subresource('log').namespace('default').name('p').check('get').allowed()",
+            "authorizer.group('').resource('pods').fieldSelector('metadata.name=p').labelSelector('a=b').check('list').allowed()",
+            "authorizer.path('/healthz').check('get').allowed() && authorizer.requestResource.check('get').allowed()",
+            "!authorizer.group('').resource('pods').check('get').errored() && authorizer.group('').resource('pods').check('get').error() == ''",
+            "authorizer.group('').resource('pods').check('get').reason() == ''",
+        ]);
+    }
 
     /// The check must refuse none of `exprs`, all of which the apiserver's base
     /// environment accepts: each was evaluated to `true` with the Go oracle

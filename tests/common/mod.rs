@@ -615,6 +615,68 @@ pub fn cases() -> Vec<ParityCase> {
             expect: Expect::RegistrationRejected,
             note: "isIPv4 in a messageExpression → rejected at registration",
         },
+        // Functions the apiserver declares but kube-cel does not implement pass
+        // the compile-time name check, so a call evaluation does not reach is
+        // accepted on both sides. (Reached, kube-cel rejects the object with
+        // UnsupportedReference while the apiserver evaluates it: fail-closed,
+        // pinned in tests/apiserver_divergence.rs.)
+        ParityCase {
+            kind: "PoptUnwrapShort",
+            plural: "poptunwrapshorts",
+            schema: json!({
+                "type": "object",
+                "properties": { "a": { "type": "string", "maxLength": 20 } },
+                "x-kubernetes-validations": [{
+                    "rule": "self.a == '' || optional.unwrap([optional.of(self.a), optional.none()]) == [self.a]",
+                    "message": "unwrap"
+                }]
+            }),
+            object: json!({ "a": "" }),
+            expect: Expect::Accept,
+            note: "optional.unwrap behind a short-circuit → declared, so both accept",
+        },
+        ParityCase {
+            kind: "PunwrapOptShort",
+            plural: "punwrapoptshorts",
+            schema: json!({
+                "type": "object",
+                "properties": { "a": { "type": "string", "maxLength": 20 } },
+                "x-kubernetes-validations": [{
+                    "rule": "self.a == '' || [optional.of(self.a), optional.none()].unwrapOpt() == [self.a]",
+                    "message": "unwrapOpt"
+                }]
+            }),
+            object: json!({ "a": "" }),
+            expect: Expect::Accept,
+            note: "<list>.unwrapOpt() behind a short-circuit → declared, so both accept",
+        },
+        ParityCase {
+            kind: "PmsgUnwrap",
+            plural: "pmsgunwraps",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "true",
+                    "messageExpression": "optional.unwrap([optional.of('x')])[0] + ' rejected'"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "optional.unwrap in the messageExpression of a rule that holds → both accept",
+        },
+        ParityCase {
+            kind: "PauthzCheckShort",
+            plural: "pauthzcheckshorts",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "true || dyn(self).check('get').allowed()", "message": "authz" }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "the authorizer library is in the base env, so a CRD rule may name it → both accept",
+        },
         // No type checker in `cel` (cel-rust#350): the one documented fail-open
         // class. The apiserver type-checks at registration; kube-cel accepts.
         ParityCase {
@@ -652,6 +714,21 @@ pub fn cases() -> Vec<ParityCase> {
             object: json!({}),
             expect: Expect::RegistrationRejectedFailOpen,
             note: "undeclared identifier in an unevaluated branch → rejected at registration; kube-cel accepts",
+        },
+        ParityCase {
+            kind: "PauthzVarShort",
+            plural: "pauthzvarshorts",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "true || authorizer.group('').resource('pods').check('get').allowed()",
+                    "message": "authz"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejectedFailOpen,
+            note: "`authorizer` is a policy variable, undeclared in a CRD rule → rejected at registration; kube-cel accepts",
         },
     ]
 }

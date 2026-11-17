@@ -364,9 +364,9 @@ pinned by `tests/apiserver_divergence.rs`.
 | `<IP>.string()`, `<CIDR>.string()` | rejects the CRD at registration (no matching overload; only `string(<IP>)`) | `UnsupportedReference` | fail-closed |
 | Schema nesting deeper than 64 levels | enforces (rejects over-limit schemas at registration) | `SchemaTooDeep` error | fail-closed |
 | Rule whose `messageExpression` does not compile (a syntax error, or a call refused above) | rejects the CRD at registration | `CompilationFailure` (the rule is rejected, not just its message) | fail-closed |
-| Authz library (`authorizer.*`) | evaluates against the cluster | not available | out of scope |
+| Functions the apiserver declares that kube-cel does not implement: `optional.unwrap(..)`, `<list>.unwrapOpt()`, the authz library (`authorizer.*` in a VAP), or a function whose kube-cel feature is disabled | evaluates (the authz library against the cluster) | compiles, and passes where evaluation does not reach the call; `UnsupportedReference` where it does | fail-closed (the authz library is out of scope) |
 | A schema node the object does not reach (an omitted property, the `items` of an empty list, nesting past 64 levels): a rule there that does not compile, or a `messageExpression` that does not | rejects the CRD at registration | not compiled or checked, so the object passes | **fail-open** (to be fixed before 0.9.0) |
-| No type checker: type errors (`[1, 2] == [1.0, 2.0]`, `[1, 2.0].isSorted()`), arity errors (`'a'.lowerAscii(42)`), call-shape errors (`family(ip(..))`, and the `reverse()` / `.string()` rows above), a non-string `messageExpression`, and an undeclared identifier, where evaluation does not reach the error | rejects the CRD at registration (type-checks every expression) | passes; `cel` has no type checker yet ([cel-rust#350](https://github.com/cel-rust/cel-rust/issues/350)) | **fail-open** (the one known exception) |
+| No type checker: type errors (`[1, 2] == [1.0, 2.0]`, `[1, 2.0].isSorted()`), arity errors (`'a'.lowerAscii(42)`), call-shape errors (`family(ip(..))`, and the `reverse()` / `.string()` rows above), a non-string `messageExpression`, and an undeclared identifier (such as `authorizer` in a CRD rule), where evaluation does not reach the error | rejects the CRD at registration (type-checks every expression) | passes; `cel` has no type checker yet ([cel-rust#350](https://github.com/cel-rust/cel-rust/issues/350)) | **fail-open** (the one known exception) |
 
 The validation pipeline compiles and runs rules in its own `cel` environment,
 modelled on the apiserver's base CEL environment (`k8s.io/apiserver`
@@ -380,11 +380,18 @@ helpers. (The kube-cel functions among them stay available through `new_env()` /
 `KubeCelExt` for general-purpose use; `cel.bind` needs `cel`'s `bindings`
 extension added to the `Env`.) `cel` only parses, so kube-cel walks the AST of
 every rule and `messageExpression` at compile time and refuses a call to a
-function outside that environment as `ErrorKind::CompilationFailure`, even in a
-branch evaluation never reaches (`self.s == '' || isIPv4(self.s)`), as the
-apiserver does at registration. A reference evaluation cannot resolve otherwise
-(an undeclared identifier, or a function called in a form none of its overloads
-takes) surfaces as `ErrorKind::UnsupportedReference`, distinct from
+function the apiserver does not declare as `ErrorKind::CompilationFailure`, even
+in a branch evaluation never reaches (`self.s == '' || isIPv4(self.s)`), as the
+apiserver does at registration. The declared names
+(`src/validation/apiserver_functions.txt`, from the `k8s.io/apiserver` v0.36.1
+base environment) are checked against a live apiserver by `just parity`. CRD
+rules, their `messageExpression`s and VAP expressions share them, since the
+apiserver declares the same functions for all three. A function the apiserver declares but
+kube-cel does not implement (`optional.unwrap`, `<list>.unwrapOpt()`, the authz
+library) therefore compiles, and fails only when evaluation reaches it. A
+reference evaluation cannot resolve (such a function, an undeclared identifier,
+or a function called in a form none of its overloads takes) surfaces as
+`ErrorKind::UnsupportedReference`, distinct from
 `EvaluationError` (reserved for genuine runtime errors in a supported rule), so a
 consumer can tell a coverage gap apart from an actual rule failure. Either way the
 object is rejected. The authz library requires a live API server and is out of

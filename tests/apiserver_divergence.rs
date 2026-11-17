@@ -21,10 +21,13 @@
 //! CEL environment (`k8s.io/apiserver` v0.36.1,
 //! `environment.MustBaseEnvSet(1.36).NewExpressionsEnv()`). `cel` has no type
 //! checker, so kube-cel walks each rule's AST at compile time and refuses a
-//! call to a function the apiserver's base environment lacks (`cel.bind`,
-//! `math.*`, `isIPv4`, `base64.*`, a global `min(..)`, ...) as
+//! call to a function the apiserver does not declare (`cel.bind`, `math.*`,
+//! `isIPv4`, `base64.*`, a global `min(..)`, ...) as
 //! [`ErrorKind::CompilationFailure`], even in a branch evaluation never
-//! reaches, as the apiserver does at registration.
+//! reaches, as the apiserver does at registration. A function the apiserver
+//! declares but kube-cel does not implement compiles, and fails closed only
+//! when evaluation reaches it, see
+//! [`declared_unimplemented_functions_fail_closed_when_reached`].
 #![cfg(feature = "validation")]
 
 use kube_cel::{ErrorKind, ValidationErrors, Validator, VapEvaluator, VapExpression, compile_schema};
@@ -168,14 +171,14 @@ fn unsupported_call_in_message_expression_fails_closed() {
 /// The apiserver has no string `reverse()` (its `reverse` is the list one):
 /// the CRD is rejected at registration ("found no matching overload"). kube-cel
 /// has no matching overload at evaluation either, so the object is rejected, as
-/// an `EvaluationError`; without the `lists` feature there is no `reverse` at
-/// all and the rule does not compile.
+/// an `EvaluationError`; without the `lists` feature kube-cel has no `reverse`
+/// at all, an `UnsupportedReference`.
 #[test]
 fn string_reverse_fails_closed() {
     let want = if cfg!(feature = "lists") {
         ErrorKind::EvaluationError
     } else {
-        ErrorKind::CompilationFailure
+        ErrorKind::UnsupportedReference
     };
     let errors = run_rule("'abc'.reverse() == 'cba'").unwrap_err();
     assert!(
@@ -200,6 +203,84 @@ fn ip_member_string_fails_closed() {
             "{rule}: expected fail-closed UnsupportedReference, got {errors:?}"
         );
     }
+}
+
+// ── Declared by the apiserver, not implemented by kube-cel — fails CLOSED ────
+// apiserver: declares `optional.unwrap`, `<list>.unwrapOpt()` and the
+//            `authorizer` library (all three envs: CRD rules, their
+//            messageExpressions, policies), and evaluates them.
+// kube-cel:  the compile-time name check accepts every name the apiserver
+//            declares (src/validation/apiserver_functions.txt), so the CRD or
+//            policy compiles and a call evaluation does not reach passes, as on
+//            the apiserver. Reaching the call rejects the object with
+//            UnsupportedReference (kube-cel binds no `authorizer`). The
+//            unreached cases are parity rows (PoptUnwrapShort, ..).
+
+#[test]
+fn declared_unimplemented_functions_fail_closed_when_reached() {
+    // Not reached: accepted, as by the apiserver.
+    assert_passes("true || optional.unwrap([optional.of(1)]) == [1]");
+    assert_passes("true || [optional.of(1)].unwrapOpt() == [1]");
+    let schema = json!({
+        "type": "object",
+        "x-kubernetes-validations": [{
+            "rule": "true",
+            "messageExpression": "optional.unwrap([optional.of('x')])[0] + ' rejected'"
+        }]
+    });
+    assert!(
+        Validator::new().validate(&schema, &json!({}), None).is_ok()
+            && Validator::new()
+                .validate_compiled(&compile_schema(&schema), &json!({}), None)
+                .is_ok(),
+        "optional.unwrap in the messageExpression of a rule that holds must compile"
+    );
+
+    // Reached: the apiserver evaluates both to true; kube-cel rejects.
+    for rule in [
+        "optional.unwrap([optional.of(1), optional.none()]) == [1]",
+        "[optional.of(1), optional.none()].unwrapOpt() == [1]",
+    ] {
+        let errors = run_rule(rule).unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.kind == ErrorKind::UnsupportedReference),
+            "{rule}: expected fail-closed UnsupportedReference, got {errors:?}"
+        );
+    }
+
+    // Policies: the `authorizer` chain compiles; reached, it fails closed.
+    let evaluator = VapEvaluator::builder().build();
+    let expr = |expression: &str, message_expression: Option<&str>| VapExpression {
+        expression: expression.into(),
+        message: None,
+        message_expression: message_expression.map(Into::into),
+    };
+    let exprs = [
+        expr(
+            "true || authorizer.group('').resource('pods').check('get').allowed()",
+            None,
+        ),
+        expr(
+            "true",
+            Some("string([optional.of(1), optional.none()].unwrapOpt()[0])"),
+        ),
+        expr("authorizer.path('/healthz').check('get').allowed()", None),
+    ];
+    let compiled = evaluator.compile_expressions(&exprs);
+    assert!(
+        compiled.iter().all(Result::is_ok),
+        "policy expressions calling declared functions must compile"
+    );
+    let passed: Vec<bool> = evaluator
+        .evaluate_compiled(&compiled)
+        .iter()
+        .map(|r| r.passed)
+        .collect();
+    assert_eq!(
+        passed,
+        [true, true, false],
+        "the reached authorizer call fails closed"
+    );
 }
 
 // ── No type checker — fails OPEN (the one documented exception) ──────────────
@@ -238,8 +319,11 @@ fn no_type_checker_fails_open() {
         assert_fails_open("family(ip('1.2.3.4')) == 4");
         assert_fails_open("true || ip('1.2.3.4').string() == ''");
     }
-    // An undeclared identifier in a branch that is never evaluated.
+    // An undeclared identifier in a branch that is never evaluated. A CRD rule
+    // has no `authorizer` (a policy variable); the functions called on it are
+    // declared for CRD rules too, so only the identifier is wrong.
     assert_fails_open("true || undeclared == 1");
+    assert_fails_open("true || authorizer.group('').resource('pods').check('get').allowed()");
 
     // A `messageExpression` must be a string; this one is only evaluated when
     // the rule fails, and the rule holds.
@@ -352,12 +436,19 @@ fn upstream_list_functions_evaluate() {
 }
 
 /// Without the `lists` feature the validation environment has no list
-/// functions, upstream ones included: a rule using one does not compile.
+/// functions, upstream ones included. `sortBy` is a macro, not a declared
+/// function, so without the feature it parses as a call to an undeclared
+/// function and does not compile. `lists.range` is declared, so it compiles
+/// and the object is rejected when evaluation reaches it.
 #[test]
 #[cfg(not(feature = "lists"))]
 fn list_functions_need_the_lists_feature() {
     assert_refused("self.items.sortBy(x, x) == [1, 2, 3]");
-    assert_refused("lists.range(3) == [0, 1, 2]");
+    let errors = run_rule("lists.range(3) == [0, 1, 2]").unwrap_err();
+    assert!(
+        errors.iter().any(|e| e.kind == ErrorKind::UnsupportedReference),
+        "lists.range without the lists feature: expected UnsupportedReference, got {errors:?}"
+    );
 }
 
 /// kube-cel's own Kubernetes list functions (feature `lists`) stay alongside
