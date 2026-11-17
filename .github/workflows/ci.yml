@@ -40,3 +40,23 @@ jobs:
 
       - name: feature-check
         run: just feature-check
+
+  # Live apiserver parity: drives the shared case table through a real
+  # kube-apiserver (kind, `--dry-run=server`) and asserts kube-cel's verdict
+  # matches. Self-catches apiserver-fidelity regressions a hand-written
+  # expectation would miss. Pinned to the k8s version the cases were measured on.
+  parity:
+    name: apiserver parity (kind)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v4
+      # Installs the kind + kubectl binaries only; `just parity` creates and
+      # tears down its own throwaway cluster (with the pinned node image).
+      - uses: helm/kind-action@v1
+        with:
+          install_only: true
+      - name: parity (kube-cel verdict vs real apiserver)
+        run: just parity

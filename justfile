@@ -2,6 +2,13 @@
 default:
     @just --list
 
+# Node image for the live-apiserver recipes (parity, probe): the Kubernetes
+# version the `tests/common` expectations were measured against (v1.36.1, cel-go
+# v0.26.0). Pinned by digest (the multi-arch index from the kind v0.32.0 release
+# notes) so a re-pushed tag cannot change the ground truth. Override with
+# KIND_NODE_IMAGE.
+kind_node_image := env("KIND_NODE_IMAGE", "kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5")
+
 # --- CI / pre-publish checks (single source of truth) ---
 
 # Run all checks — CI runs this, you should too before push
@@ -53,9 +60,28 @@ parity:
     set -euo pipefail
     cluster=kubecel-parity
     trap 'kind delete cluster --name "$cluster" >/dev/null 2>&1 || true' EXIT
-    kind create cluster --name "$cluster" --wait 90s
+    kind create cluster --name "$cluster" --image "{{kind_node_image}}" --wait 90s
     export KUBE_CEL_PARITY_CTX="kind-$cluster"
     cargo test --features validation --test apiserver_parity -- --ignored --nocapture --test-threads=1
+
+# Expression-level VALUE probe: harvest every CEL expression literal out of the
+# unit tests, evaluate it with kube-cel, and ask a real apiserver whether
+# `<expr> == <our value>` holds. Catches wrong *values* (not just wrong
+# verdicts), including in the standard library inherited from the `cel` crate —
+# the layer the hand-written unit-test expectations cannot vouch for.
+# Reuses an existing cluster via KUBE_CEL_PARITY_CTX; otherwise makes its own.
+probe:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "${KUBE_CEL_PARITY_CTX:-}" ]; then
+        cargo test --features validation --lib validation::probe -- --ignored --nocapture --test-threads=1
+        exit 0
+    fi
+    cluster=kubecel-probe
+    trap 'kind delete cluster --name "$cluster" >/dev/null 2>&1 || true' EXIT
+    kind create cluster --name "$cluster" --image "{{kind_node_image}}" --wait 90s
+    export KUBE_CEL_PARITY_CTX="kind-$cluster"
+    cargo test --features validation --lib validation::probe -- --ignored --nocapture --test-threads=1
 
 # Phase-2 fidelity SWEEP: spin a kind cluster, measure the ACTUAL apiserver
 # bucket for every candidate case under target/sweep/*.json (authored by the

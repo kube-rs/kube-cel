@@ -14,6 +14,10 @@ pub(crate) mod references;
 pub(crate) mod values;
 pub(crate) mod vap;
 
+// The live expression probe (`just probe`), a unit test so it can use the
+// private validation environment.
+#[cfg(test)] mod probe;
+
 use crate::validation::{
     compilation::{CompilationError, CompilationResult, CompiledSchema, compile_schema_validations},
     values::{json_to_cel_with_compiled, json_to_cel_with_schema},

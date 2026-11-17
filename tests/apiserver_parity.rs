@@ -79,7 +79,7 @@ fn apiserver_verdict(kind: &str, plural: &str, schema: &Value, object: &Value) -
     let crd = crd_for(kind, plural, schema);
     let (ok, out) = kubectl(&["apply", "-f", "-"], Some(&crd.to_string()));
     assert!(ok, "CRD apply failed for {kind}: {out}");
-    kubectl(
+    let (ok, out) = kubectl(
         &[
             "wait",
             "--for=condition=Established",
@@ -88,6 +88,7 @@ fn apiserver_verdict(kind: &str, plural: &str, schema: &Value, object: &Value) -
         ],
         None,
     );
+    assert!(ok, "CRD {plural}.x.test never became Established: {out}");
 
     let mut cr = object.clone();
     cr["apiVersion"] = json!("x.test/v1");
@@ -108,8 +109,25 @@ fn apiserver_verdict(kind: &str, plural: &str, schema: &Value, object: &Value) -
 /// types — or `None` if it registered.
 fn apiserver_registration_error(kind: &str, plural: &str, schema: &Value) -> Option<String> {
     let crd = crd_for(kind, plural, schema);
-    let (ok, out) = kubectl(&["apply", "-f", "-"], Some(&crd.to_string()));
-    (!ok).then_some(out)
+    let applied = kubectl(&["apply", "-f", "-"], Some(&crd.to_string()));
+    crd_rejection(kind, plural, applied)
+}
+
+/// Read a CRD apply's outcome: the apiserver's error if it REJECTED the CRD,
+/// `None` if it accepted it. Any other kubectl failure (no such context,
+/// connection refused, unauthorized) panics: it says nothing about the rules,
+/// and reading it as a rejection would pass every registration-rejected row.
+fn crd_rejection(kind: &str, plural: &str, (ok, out): (bool, String)) -> Option<String> {
+    if ok {
+        return None;
+    }
+    // The apiserver's 422 for an invalid CRD, as kubectl prints it.
+    let rejected = format!("CustomResourceDefinition \"{plural}.x.test\" is invalid");
+    assert!(
+        out.contains(&rejected),
+        "CRD apply for {kind} failed without the apiserver rejecting it: {out}"
+    );
+    Some(out)
 }
 
 /// kube-cel's verdict on every entry point (`validate`,
@@ -245,8 +263,10 @@ fn function_names_match_the_apiserver() {
         "pfunctions",
         &json!({ "type": "object", "x-kubernetes-validations": rules }),
     );
-    let (ok, out) = kubectl(&["apply", "--dry-run=server", "-f", "-"], Some(&crd.to_string()));
-    assert!(!ok, "a CRD of uncompilable probes registered: {out}");
+    let dry_run = kubectl(&["apply", "--dry-run=server", "-f", "-"], Some(&crd.to_string()));
+    let Some(out) = crd_rejection("Pfunctions", "pfunctions", dry_run) else {
+        panic!("a CRD of uncompilable probes registered");
+    };
 
     // The apiserver reports each rule's error after its field path.
     let error_of = |i: usize| -> &str {
