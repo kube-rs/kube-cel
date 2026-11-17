@@ -6,10 +6,12 @@
 //! - **fail-closed** — kube-cel reports an error where the apiserver would
 //!   accept the object (a false positive; safe, but not faithful).
 //! - **fail-open** — kube-cel accepts where the apiserver would reject (a false
-//!   negative; dangerous). There should be **none** of these, with one
-//!   documented exception: the errors only a type checker catches, which `cel`
-//!   does not have yet (cel-rust#350); see [`no_type_checker_fails_open`]. The
-//!   depth case used to be one and was fixed in S4 (P1-A).
+//!   negative; dangerous). There should be **none** of these, with two
+//!   documented exceptions: the errors only a type checker catches, which `cel`
+//!   does not have yet (cel-rust#350), see [`no_type_checker_fails_open`]; and,
+//!   until it is fixed before 0.9.0 (#14), rules on schema nodes the object does
+//!   not reach, see [`unreached_schema_node_fails_open`]. The depth case used to
+//!   be one and was fixed in S4 (P1-A), for objects that reach the depth.
 //!
 //! Each test locks the *current measured* behavior so a divergence cannot
 //! change silently. The human-readable summary lives in the README
@@ -248,6 +250,51 @@ fn no_type_checker_fails_open() {
     assert!(
         Validator::new().validate(&schema, &json!({}), None).is_ok(),
         "a non-string messageExpression is a known fail-open (no type checker)"
+    );
+}
+
+// ── Schema nodes the object does not reach — fails OPEN (fix before 0.9.0) ───
+// apiserver: compiles every rule (and `messageExpression`) in the schema, and
+//            enforces the depth limit, when the CRD is registered, whatever the
+//            objects later look like.
+// kube-cel:  walks the object, so a rule on a node it does not reach (an
+//            omitted property, the `items` of an empty list, a node past the
+//            depth limit of a shallow object) is never compiled, and the object
+//            passes. Pre-existing (not a cel 0.16 change); tracked in #14 as a
+//            0.9.0 release blocker. Pinned so this test fails once it is fixed.
+
+#[test]
+fn unreached_schema_node_fails_open() {
+    let absent = |validation: serde_json::Value| {
+        json!({
+            "type": "object",
+            "properties": {
+                "a": { "type": "string", "x-kubernetes-validations": [validation] },
+                "l": { "type": "array", "items": { "type": "string", "x-kubernetes-validations": [validation] } }
+            }
+        })
+    };
+    for validation in [
+        json!({"rule": "isIPv4(self)"}),
+        json!({"rule": "self >"}),
+        json!({"rule": "true", "messageExpression": "invalid >="}),
+    ] {
+        let schema = absent(validation.clone());
+        assert!(
+            Validator::new()
+                .validate(&schema, &json!({"l": []}), None)
+                .is_ok(),
+            "{validation}: expected the known fail-open (unreached node) to pass"
+        );
+    }
+
+    let mut deep = json!({"type": "integer", "x-kubernetes-validations": [{"rule": "self >= 0"}]});
+    for _ in 0..70 {
+        deep = json!({ "type": "object", "properties": { "c": deep } });
+    }
+    assert!(
+        Validator::new().validate(&deep, &json!({}), None).is_ok(),
+        "an over-deep schema with a shallow object is a known fail-open (unreached node)"
     );
 }
 

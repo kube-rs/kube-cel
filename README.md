@@ -344,11 +344,14 @@ Two stability tiers, by surface:
 The validation pipeline aims to return the same verdict the Kubernetes API
 server would, client-side. Where it cannot today, it diverges **fail-closed** —
 it reports an error rather than silently accepting — so a passing result is as
-strict as the API server, with one exception: `cel` has no type checker yet
+strict as the API server, with two exceptions (the last two rows below). `cel`
+has no type checker yet
 ([cel-rust#350](https://github.com/cel-rust/cel-rust/issues/350)), so a rule the
 apiserver rejects at registration for a type, arity or call-shape error can
-still pass client-side (the last row below). These divergences are pinned by
-`tests/apiserver_divergence.rs`.
+still pass client-side. And a rule on a schema node the object does not reach is
+not checked at all, a gap to be fixed before 0.9.0
+([#14](https://github.com/kube-rs/kube-cel/issues/14)). These divergences are
+pinned by `tests/apiserver_divergence.rs`.
 
 | Feature | API server | kube-cel | Direction |
 |---------|-----------|----------|-----------|
@@ -362,6 +365,7 @@ still pass client-side (the last row below). These divergences are pinned by
 | Schema nesting deeper than 64 levels | enforces (rejects over-limit schemas at registration) | `SchemaTooDeep` error | fail-closed |
 | Rule whose `messageExpression` does not compile (a syntax error, or a call refused above) | rejects the CRD at registration | `CompilationFailure` (the rule is rejected, not just its message) | fail-closed |
 | Authz library (`authorizer.*`) | evaluates against the cluster | not available | out of scope |
+| A schema node the object does not reach (an omitted property, the `items` of an empty list, nesting past 64 levels): a rule there that does not compile, or a `messageExpression` that does not | rejects the CRD at registration | not compiled or checked, so the object passes | **fail-open** (to be fixed before 0.9.0) |
 | No type checker: type errors (`[1, 2] == [1.0, 2.0]`, `[1, 2.0].isSorted()`), arity errors (`'a'.lowerAscii(42)`), call-shape errors (`family(ip(..))`, and the `reverse()` / `.string()` rows above), a non-string `messageExpression`, and an undeclared identifier, where evaluation does not reach the error | rejects the CRD at registration (type-checks every expression) | passes; `cel` has no type checker yet ([cel-rust#350](https://github.com/cel-rust/cel-rust/issues/350)) | **fail-open** (the one known exception) |
 
 The validation pipeline compiles and runs rules in its own `cel` environment,
