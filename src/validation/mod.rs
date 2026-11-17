@@ -19,7 +19,10 @@ pub(crate) mod vap;
 #[cfg(test)] mod probe;
 
 use crate::validation::{
-    compilation::{CompilationError, CompilationResult, CompiledSchema, compile_schema_validations},
+    compilation::{
+        ChildSchema, CompilationError, CompilationResult, CompiledSchema, child_schemas,
+        compile_schema_validations,
+    },
     values::{json_to_cel_with_compiled, json_to_cel_with_schema},
 };
 use cel::{Context, Env, Program};
@@ -304,6 +307,197 @@ fn binding_failure(message: String, path: &str) -> ValidationError {
     }
 }
 
+/// A rule (or its `messageExpression`) that did not compile, as a validation
+/// error at `path`.
+fn compilation_error(err: &CompilationError, path: &str) -> ValidationError {
+    match err {
+        CompilationError::Parse { rule, source } => ValidationError {
+            rule: rule.clone(),
+            message: format!("failed to compile rule \"{rule}\": {source}"),
+            field_path: path.to_string(),
+            reason: None,
+            kind: ErrorKind::CompilationFailure,
+            // `cel::ParseErrors` is `!Clone` and only borrowed here,
+            // so the typed cause cannot be owned; detail is in `message`.
+            source: None,
+        },
+        CompilationError::MessageExpressionParse {
+            rule,
+            message_expression,
+            source,
+        } => ValidationError {
+            rule: rule.clone(),
+            message: format!(
+                "failed to compile messageExpression \"{message_expression}\" for rule \"{rule}\": {source}"
+            ),
+            field_path: path.to_string(),
+            reason: None,
+            kind: ErrorKind::CompilationFailure,
+            source: None,
+        },
+        CompilationError::InvalidRule(e) => ValidationError {
+            rule: String::new(),
+            message: format!("invalid rule definition: {e}"),
+            field_path: path.to_string(),
+            reason: None,
+            kind: ErrorKind::InvalidRule,
+            // `serde_json::Error` is borrowed and `!Clone`; detail is in `message`.
+            source: None,
+        },
+        CompilationError::SchemaTooDeep { .. } => schema_too_deep_error(path),
+    }
+}
+
+/// The path of a child schema, for an error found without an object: a
+/// property by name, list items as `[*]`, map values as `*`.
+fn schema_child_path(path: &str, child: ChildSchema<'_>) -> String {
+    match child {
+        ChildSchema::Property(name) => join_path(path, name),
+        ChildSchema::Items => format!("{path}[*]"),
+        ChildSchema::AdditionalProperties => join_path(path, "*"),
+        ChildSchema::Branch => path.to_string(),
+    }
+}
+
+/// The rules the apiserver would refuse when it registers the CRD: every rule
+/// and `messageExpression` in the schema that does not compile, at any depth,
+/// whatever nodes an object reaches (an omitted property, the items of an empty
+/// list). The object walk only compiles the nodes it reaches, so these are
+/// checked first. Iterative: the apiserver has no nesting limit, and a deep
+/// schema must not overflow the stack.
+fn registration_errors(schema: &serde_json::Value) -> Vec<ValidationError> {
+    let mut errors = Vec::new();
+    registration_errors_from(schema, String::new(), None, &mut errors);
+    errors
+}
+
+/// [`registration_errors`] from `schema` at `path`, inside the uncorrelatable
+/// portion that starts at the list `uncorrelatable` names, if any.
+fn registration_errors_from(
+    schema: &serde_json::Value,
+    path: String,
+    uncorrelatable: Option<String>,
+    errors: &mut Vec<ValidationError>,
+) {
+    let mut stack: Vec<(&serde_json::Value, String, Option<String>)> = vec![(schema, path, uncorrelatable)];
+    while let Some((node, path, uncorrelatable)) = stack.pop() {
+        for result in compile_schema_validations(node) {
+            match result {
+                Ok(cr) => errors.extend(old_self_error(&cr, uncorrelatable.as_deref(), &path)),
+                Err(e) => errors.push(compilation_error(&e, &path)),
+            }
+        }
+        let map_list = node.get("x-kubernetes-list-type").and_then(|t| t.as_str()) == Some("map");
+        for (child, sub) in child_schemas(node).into_iter().rev() {
+            let uncorrelatable = match child {
+                ChildSchema::Items if !map_list => uncorrelatable.clone().or_else(|| Some(path.clone())),
+                _ => uncorrelatable.clone(),
+            };
+            stack.push((sub, schema_child_path(&path, child), uncorrelatable));
+        }
+    }
+}
+
+/// The `oldSelf` rules the apiserver refuses at registration
+/// (apiextensions validation.go): a rule reading `oldSelf` inside the items of a
+/// list that is not `x-kubernetes-list-type: map` (at any depth below it, since
+/// those items never correlate with old ones), and `optionalOldSelf` set on a
+/// rule that does not read `oldSelf`. `uncorrelatable` is the path of the
+/// outermost such list. (Every map type correlates, so properties never start
+/// an uncorrelatable portion.)
+fn old_self_error(
+    cr: &CompilationResult,
+    uncorrelatable: Option<&str>,
+    path: &str,
+) -> Option<ValidationError> {
+    let message = match uncorrelatable {
+        Some(list) if cr.is_transition_rule => {
+            format!("oldSelf cannot be used on the uncorrelatable portion of the schema within {list:?}")
+        }
+        _ if !cr.is_transition_rule && cr.rule.optional_old_self.is_some() => {
+            "optionalOldSelf may not be set if oldSelf is not used in rule".to_string()
+        }
+        _ => return None,
+    };
+    Some(ValidationError {
+        rule: cr.rule.rule.clone(),
+        message,
+        field_path: path.to_string(),
+        reason: None,
+        kind: ErrorKind::CompilationFailure,
+        source: None,
+    })
+}
+
+/// [`registration_errors`] over a pre-compiled tree. A `SchemaTooDeep` marker
+/// is not one: the apiserver has no nesting limit, so it only fails an object
+/// that reaches it (in the walk). The rules below it were compiled into the
+/// marker, and those that failed are reported here.
+/// `uncorrelatable` as in [`registration_errors`]; a compiled list correlates
+/// exactly when it kept `x-kubernetes-list-map-keys`, which only a map list
+/// does (and a map list must declare them).
+fn registration_errors_compiled(
+    compiled: &CompiledSchema,
+    path: &str,
+    uncorrelatable: Option<&str>,
+    errors: &mut Vec<ValidationError>,
+) {
+    // At the depth cap the subtree was not compiled; check it as a raw schema.
+    if let Some(subtree) = &compiled.below_cap {
+        registration_errors_from(
+            subtree,
+            path.to_string(),
+            uncorrelatable.map(str::to_string),
+            errors,
+        );
+        return;
+    }
+    for result in &compiled.validations {
+        match result {
+            Ok(cr) => errors.extend(old_self_error(cr, uncorrelatable, path)),
+            Err(CompilationError::SchemaTooDeep { .. }) => {}
+            Err(e) => errors.push(compilation_error(e, path)),
+        }
+    }
+    // `properties` is a HashMap; walk it in name order, as `registration_errors`
+    // walks the schema, so the errors come out in a stable order.
+    let mut properties: Vec<_> = compiled.properties.iter().collect();
+    properties.sort_by_key(|(name, _)| name.as_str());
+    for (name, child) in properties {
+        registration_errors_compiled(
+            child,
+            &schema_child_path(path, ChildSchema::Property(name)),
+            uncorrelatable,
+            errors,
+        );
+    }
+    if let Some(items) = &compiled.items {
+        let items_uncorrelatable = uncorrelatable.or(compiled.list_map_keys.is_empty().then_some(path));
+        registration_errors_compiled(
+            items,
+            &schema_child_path(path, ChildSchema::Items),
+            items_uncorrelatable,
+            errors,
+        );
+    }
+    if let Some(additional) = &compiled.additional_properties {
+        registration_errors_compiled(
+            additional,
+            &schema_child_path(path, ChildSchema::AdditionalProperties),
+            uncorrelatable,
+            errors,
+        );
+    }
+    for branch in compiled
+        .all_of
+        .iter()
+        .chain(&compiled.one_of)
+        .chain(&compiled.any_of)
+    {
+        registration_errors_compiled(branch, path, uncorrelatable, errors);
+    }
+}
+
 fn schema_too_deep_error(path: &str) -> ValidationError {
     ValidationError {
         rule: String::new(),
@@ -379,6 +573,10 @@ impl Validator {
         old_object: Option<&serde_json::Value>,
         root_ctx: Option<&RootContext>,
     ) -> Result<(), ValidationErrors> {
+        let registration = registration_errors(schema);
+        if !registration.is_empty() {
+            return into_result(registration);
+        }
         let defaulted = crate::validation::defaults::apply_defaults(schema, object);
         let defaulted_old = old_object.map(|o| crate::validation::defaults::apply_defaults(schema, o));
         let mut errors = Vec::new();
@@ -422,6 +620,11 @@ impl Validator {
         old_object: Option<&serde_json::Value>,
         root_ctx: Option<&RootContext>,
     ) -> Result<(), ValidationErrors> {
+        let mut registration = Vec::new();
+        registration_errors_compiled(compiled, "", None, &mut registration);
+        if !registration.is_empty() {
+            return into_result(registration);
+        }
         let defaulted = crate::validation::defaults::apply_defaults_compiled(compiled, object);
         let defaulted_old =
             old_object.map(|o| crate::validation::defaults::apply_defaults_compiled(compiled, o));
@@ -782,51 +985,7 @@ impl Validator {
                 Ok(cr) => {
                     self.evaluate_rule(cr, &node_ctx, cel_old, path, errors);
                 }
-                Err(CompilationError::Parse { rule, source }) => {
-                    errors.push(ValidationError {
-                        rule: rule.clone(),
-                        message: format!("failed to compile rule \"{rule}\": {source}"),
-                        field_path: path.to_string(),
-                        reason: None,
-                        kind: ErrorKind::CompilationFailure,
-                        // `cel::ParseErrors` is `!Clone` and only borrowed here,
-                        // so the typed cause cannot be owned; detail is in `message`.
-                        source: None,
-                    });
-                }
-                Err(CompilationError::MessageExpressionParse {
-                    rule,
-                    message_expression,
-                    source,
-                }) => {
-                    errors.push(ValidationError {
-                        rule: rule.clone(),
-                        message: format!(
-                            "failed to compile messageExpression \"{message_expression}\" for rule \"{rule}\": {source}"
-                        ),
-                        field_path: path.to_string(),
-                        reason: None,
-                        kind: ErrorKind::CompilationFailure,
-                        // `cel::ParseErrors` is `!Clone` and only borrowed here,
-                        // so the typed cause cannot be owned; detail is in `message`.
-                        source: None,
-                    });
-                }
-                Err(CompilationError::InvalidRule(e)) => {
-                    errors.push(ValidationError {
-                        rule: String::new(),
-                        message: format!("invalid rule definition: {e}"),
-                        field_path: path.to_string(),
-                        reason: None,
-                        kind: ErrorKind::InvalidRule,
-                        // `serde_json::Error` is borrowed from the shared
-                        // results slice and `!Clone`; detail is in `message`.
-                        source: None,
-                    });
-                }
-                Err(CompilationError::SchemaTooDeep { .. }) => {
-                    errors.push(schema_too_deep_error(path));
-                }
+                Err(e) => errors.push(compilation_error(e, path)),
             }
         }
     }
@@ -1306,22 +1465,83 @@ mod tests {
     }
 
     #[test]
-    fn atomic_list_never_correlates_items() {
-        // No list-type marker → atomic default. Index-correlation (the old bug)
-        // would pair 0↔0 and fail; the apiserver correlates only map lists, so
-        // the item transition rule is skipped even though value decreased.
-        let schema = list_item_transition_schema(None);
-        let old = json!({"items": [{"name":"a","value":5}]});
-        let new = json!({"items": [{"name":"a","value":1}]});
-        assert!(validate(&schema, &new, Some(&old)).is_ok());
+    fn old_self_in_uncorrelatable_list_items_is_refused() {
+        // Items of an atomic (no marker) or set list never correlate with old
+        // ones, so the apiserver refuses a rule reading `oldSelf` there when it
+        // registers the CRD ("oldSelf cannot be used on the uncorrelatable
+        // portion of the schema"), on create and update alike.
+        for list_type in [None, Some("set")] {
+            let schema = list_item_transition_schema(list_type);
+            let old = json!({"items": [{"name":"a","value":5}]});
+            let new = json!({"items": [{"name":"a","value":7}]});
+            for result in [
+                validate(&schema, &new, Some(&old)),
+                validate(&schema, &new, None),
+                validate_compiled(&compile_schema(&schema), &new, Some(&old)),
+            ] {
+                let errors = result.unwrap_err();
+                assert_eq!(errors.len(), 1, "{list_type:?}: {errors:?}");
+                assert_eq!(errors[0].kind, ErrorKind::CompilationFailure);
+                assert_eq!(errors[0].field_path, "items[*]");
+                assert!(
+                    errors[0].message.contains("uncorrelatable"),
+                    "{}",
+                    errors[0].message
+                );
+            }
+        }
     }
 
     #[test]
-    fn set_list_never_correlates_items() {
-        let schema = list_item_transition_schema(Some("set"));
-        let old = json!({"items": [{"name":"a","value":5}]});
-        let new = json!({"items": [{"name":"a","value":1}]});
-        assert!(validate(&schema, &new, Some(&old)).is_ok());
+    fn comprehension_variable_named_old_self_makes_a_transition_rule() {
+        // As the apiserver's UsesOldSelf: on create the rule is skipped, under
+        // optionalOldSelf it is legal, in non-map list items it is refused.
+        let root = |rule: serde_json::Value| json!({"type": "object", "x-kubernetes-validations": [rule]});
+        assert!(
+            validate(
+                &root(json!({"rule": "[1].all(oldSelf, oldSelf > 5)"})),
+                &json!({}),
+                None
+            )
+            .is_ok()
+        );
+        let optional = root(json!({"rule": "[1].all(oldSelf, oldSelf > 0)", "optionalOldSelf": true}));
+        assert!(validate(&optional, &json!({}), None).is_ok());
+        let items = json!({
+            "type": "object",
+            "properties": {"l": {"type": "array", "items": {
+                "type": "integer",
+                "x-kubernetes-validations": [{"rule": "[1].all(oldSelf, oldSelf > 0)"}]
+            }}}
+        });
+        assert!(validate(&items, &json!({"l": [1]}), None).is_err());
+    }
+
+    #[test]
+    fn empty_message_expression_is_unset() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"a": {"type": "string", "x-kubernetes-validations": [
+                {"rule": "self == 'x'", "message": "static", "messageExpression": ""}
+            ]}}
+        });
+        assert!(validate(&schema, &json!({}), None).is_ok());
+        let errors = validate(&schema, &json!({"a": "y"}), None).unwrap_err();
+        assert_eq!(errors[0].message, "static");
+    }
+
+    #[test]
+    fn optional_old_self_without_old_self_is_refused() {
+        for flag in [true, false] {
+            let schema = make_schema(json!([{"rule": "self.replicas >= 0", "optionalOldSelf": flag}]));
+            let errors = validate(&schema, &json!({"replicas": 1, "name": "app"}), None).unwrap_err();
+            assert_eq!(errors[0].kind, ErrorKind::CompilationFailure);
+            assert!(
+                errors[0].message.contains("optionalOldSelf"),
+                "{}",
+                errors[0].message
+            );
+        }
     }
 
     #[test]

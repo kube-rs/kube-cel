@@ -108,6 +108,25 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     `v` and refuse a fourth component (`1.2.3.4`).
   - Quantity comparison is exact for magnitudes beyond `i128` scaling
     (`compareTo` used to call quantities 3 apart equal there).
+- **Every rule in the schema is compiled before the object is walked**, as
+  the apiserver compiles them all when it registers the CRD. A rule or
+  `messageExpression` that does not compile on a node the object does not
+  reach (an omitted property, the items of an empty list, a node past the
+  64-level depth cap) used to pass unchecked: a **fail-open**, now closed. The
+  object is then rejected with those compilation errors alone; their
+  `field_path` names the schema node (`spec.items[*]`, a map value as `*`).
+  A valid rule past the depth cap still passes under a shallow object: the
+  apiserver has no nesting limit (v1.36.1 registers a 400-level CRD), so the
+  README no longer claims it rejects deep schemas.
+- **`oldSelf` rules the apiserver refuses at registration are refused**: a
+  rule reading `oldSelf` in the items of a list that is not
+  `x-kubernetes-list-type: map` (at any depth below it), and `optionalOldSelf`
+  set on a rule that does not read `oldSelf`, are `CompilationFailure`s for
+  every object. Both used to pass (the first skipped its rule): a
+  **fail-open**, now closed. As in the apiserver, a rule uses `oldSelf` when
+  any identifier in it is named `oldSelf`, a comprehension variable included
+  (`[1].all(oldSelf, oldSelf > 0)`), so such a rule is also skipped on create.
+  An empty `messageExpression` (`""`) counts as unset.
 - **Strings and `format()` follow cel-go v0.26**, the version kube-apiserver
   v1.36.1 uses (each checked live):
   - `indexOf` / `lastIndexOf`: a negative offset is an error; with an offset an

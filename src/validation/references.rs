@@ -174,6 +174,37 @@ fn qualified_name(expr: &IdedExpr) -> Option<String> {
     }
 }
 
+/// Whether `expr` references an identifier `name` anywhere, a comprehension
+/// variable of that name included: the apiserver's `UsesOldSelf` scans the
+/// checker's reference map, which records every resolved identifier, so
+/// `[1].all(oldSelf, oldSelf > 0)` "uses oldSelf" there.
+pub(crate) fn references_ident(expr: &IdedExpr, name: &str) -> bool {
+    match &expr.expr {
+        Expr::Ident(ident) => ident.strip_prefix('.').unwrap_or(ident) == name,
+        Expr::Unspecified | Expr::Literal(_) => false,
+        Expr::Select(select) => references_ident(&select.operand, name),
+        Expr::List(list) => list.elements.iter().any(|e| references_ident(e, name)),
+        Expr::Map(map) => map.entries.iter().any(|e| entry_references_ident(&e.expr, name)),
+        Expr::Struct(s) => s.entries.iter().any(|e| entry_references_ident(&e.expr, name)),
+        Expr::Comprehension(c) => [&c.iter_range, &c.accu_init, &c.loop_cond, &c.loop_step, &c.result]
+            .into_iter()
+            .any(|e| references_ident(e, name)),
+        Expr::Call(call) => {
+            call.target.as_deref().is_some_and(|t| references_ident(t, name))
+                || call.args.iter().any(|e| references_ident(e, name))
+        }
+    }
+}
+
+fn entry_references_ident(entry: &EntryExpr, name: &str) -> bool {
+    match entry {
+        EntryExpr::StructField(field) => references_ident(&field.value, name),
+        EntryExpr::MapEntry(entry) => {
+            references_ident(&entry.key, name) || references_ident(&entry.value, name)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeSet, sync::Arc};

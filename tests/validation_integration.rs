@@ -483,9 +483,9 @@ fn mixed_transition_and_non_transition_rules() {
 #[test]
 fn atomic_scalar_list_never_correlates() {
     // A scalar-item list can never be x-kubernetes-list-type=map (map keys need
-    // object items), so its elements never correlate to old ones (apiserver
-    // MakeMapList → emptyMapList). The item transition rule is therefore skipped
-    // for every element — index-position pairing was the old, non-faithful bug.
+    // object items), so its elements never correlate to old ones. The apiserver
+    // therefore refuses an item rule reading `oldSelf` when it registers the
+    // CRD, and kube-cel rejects every object against such a schema.
     let schema = json!({
         "type": "object",
         "properties": {
@@ -503,9 +503,10 @@ fn atomic_scalar_list_never_correlates() {
 
     let obj = json!({"items": [5, 3, 10]});
     let old = json!({"items": [3, 4]});
-    // No correlation → all item transition rules skipped → no errors, even though
-    // items[1] (3) is below the old index-1 value (4).
-    assert!(validate(&schema, &obj, Some(&old)).is_ok());
+    let errors = validate(&schema, &obj, Some(&old)).unwrap_err();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].kind, ErrorKind::CompilationFailure);
+    assert_eq!(errors[0].field_path, "items[*]");
 }
 
 #[test]
@@ -1428,4 +1429,114 @@ fn invalid_date_value_is_refused() {
         assert_eq!(errors[0].field_path, "d");
     }
     assert!(validate(&schema, &json!({"d": "2024-02-29"}), None).is_ok());
+}
+
+/// Every rule in the schema compiles before the object is walked, as the
+/// apiserver compiles them all when it registers the CRD: a bad rule on a node
+/// the object does not reach (an omitted property, the items of an empty list,
+/// a node past the depth cap) is refused on both entry points.
+#[test]
+fn rules_on_unreached_schema_nodes_are_compiled() {
+    use kube_cel::compile_schema;
+    let absent = |validation: serde_json::Value| {
+        json!({
+            "type": "object",
+            "properties": {
+                "a": { "type": "string", "x-kubernetes-validations": [validation] },
+                "l": { "type": "array", "items": { "type": "string", "x-kubernetes-validations": [validation] } }
+            }
+        })
+    };
+    for validation in [
+        json!({"rule": "isIPv4(self)"}),
+        json!({"rule": "self >"}),
+        json!({"rule": "true", "messageExpression": "invalid >="}),
+    ] {
+        let schema = absent(validation.clone());
+        for errors in [
+            Validator::new().validate(&schema, &json!({"l": []}), None),
+            Validator::new().validate_compiled(&compile_schema(&schema), &json!({"l": []}), None),
+        ] {
+            let errors = errors.unwrap_err();
+            // One per node: the omitted property and the list items.
+            assert_eq!(errors.len(), 2, "{validation}: {errors:?}");
+            assert!(errors.iter().all(|e| e.kind == ErrorKind::CompilationFailure));
+            let paths: Vec<&str> = errors.iter().map(|e| e.field_path.as_str()).collect();
+            assert_eq!(paths, ["a", "l[*]"], "{validation}");
+        }
+    }
+
+    // Past the depth cap: a valid rule below a shallow object passes (the
+    // apiserver has no nesting limit), one that does not compile is refused.
+    let deep = |rule: &str| {
+        let mut deep = json!({"type": "integer", "x-kubernetes-validations": [{"rule": rule}]});
+        for _ in 0..70 {
+            deep = json!({ "type": "object", "properties": { "c": deep } });
+        }
+        deep
+    };
+    assert!(
+        Validator::new()
+            .validate(&deep("self >= 0"), &json!({}), None)
+            .is_ok()
+    );
+    assert!(
+        Validator::new()
+            .validate_compiled(&compile_schema(&deep("self >= 0")), &json!({}), None)
+            .is_ok()
+    );
+    for result in [
+        Validator::new().validate(&deep("self >"), &json!({}), None),
+        Validator::new().validate_compiled(&compile_schema(&deep("self >")), &json!({}), None),
+    ] {
+        let errors = result.unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.kind == ErrorKind::CompilationFailure),
+            "{errors:?}"
+        );
+    }
+}
+
+/// The pre-compiled path checks the rules below the depth cap exactly as
+/// `validate` does: the same errors, at the same paths, `oldSelf` rules too.
+#[test]
+fn registration_checks_below_the_depth_cap_match_on_both_paths() {
+    use kube_cel::compile_schema;
+    let nest = |leaf: serde_json::Value, levels: usize| {
+        let mut s = leaf;
+        for _ in 0..levels {
+            s = json!({ "type": "object", "properties": { "c": s } });
+        }
+        s
+    };
+    let schemas = [
+        nest(
+            json!({"type": "object", "x-kubernetes-validations": [{"rule": "true", "optionalOldSelf": true}]}),
+            66,
+        ),
+        nest(
+            json!({"type": "integer", "x-kubernetes-validations": [{"rule": "self >"}]}),
+            70,
+        ),
+        nest(
+            json!({"type": "array", "items": {"type": "integer", "x-kubernetes-validations": [{"rule": "self >= oldSelf"}]}}),
+            66,
+        ),
+    ];
+    for schema in schemas {
+        let plain = validate(&schema, &json!({}), None).unwrap_err();
+        let compiled = Validator::new()
+            .validate_compiled(&compile_schema(&schema), &json!({}), None)
+            .unwrap_err();
+        let view = |e: &kube_cel::ValidationErrors| {
+            e.iter()
+                .map(|e| (e.kind.clone(), e.field_path.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(view(&plain), view(&compiled));
+        assert!(
+            plain.iter().all(|e| e.kind == ErrorKind::CompilationFailure),
+            "{plain:?}"
+        );
+    }
 }

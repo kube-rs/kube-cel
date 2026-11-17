@@ -6,14 +6,13 @@
 //! - **fail-closed** — kube-cel reports an error where the apiserver would
 //!   accept the object (a false positive; safe, but not faithful).
 //! - **fail-open** — kube-cel accepts where the apiserver would reject (a false
-//!   negative; dangerous). There should be **none** of these, with three
+//!   negative; dangerous). There should be **none** of these, with two
 //!   documented exceptions: the errors only a type checker catches, which `cel`
 //!   does not have yet (cel-rust#350), see [`no_type_checker_fails_open`]; and,
-//!   until they are fixed before 0.9.0 (#14), rules on schema nodes the object
-//!   does not reach, see [`unreached_schema_node_fails_open`], and `format()`'s
-//!   output, see [`format_numeric_verbs_fail_open`] and [`format_s_fail_open`].
-//!   The depth case used to be one and was fixed in S4 (P1-A), for objects that
-//!   reach the depth.
+//!   until it is fixed before 0.9.0 (#14), `format()`'s output, see
+//!   [`format_numeric_verbs_fail_open`] and [`format_s_fail_open`]. Rules on
+//!   schema nodes the object does not reach used to be another; since 0.9
+//!   every rule in the schema is compiled before the object is walked.
 //!
 //! Each test locks the *current measured* behavior so a divergence cannot
 //! change silently. The human-readable summary lives in the README
@@ -339,51 +338,6 @@ fn no_type_checker_fails_open() {
     );
 }
 
-// ── Schema nodes the object does not reach — fails OPEN (fix before 0.9.0) ───
-// apiserver: compiles every rule (and `messageExpression`) in the schema, and
-//            enforces the depth limit, when the CRD is registered, whatever the
-//            objects later look like.
-// kube-cel:  walks the object, so a rule on a node it does not reach (an
-//            omitted property, the `items` of an empty list, a node past the
-//            depth limit of a shallow object) is never compiled, and the object
-//            passes. Pre-existing (not a cel 0.16 change); tracked in #14 as a
-//            0.9.0 release blocker. Pinned so this test fails once it is fixed.
-
-#[test]
-fn unreached_schema_node_fails_open() {
-    let absent = |validation: serde_json::Value| {
-        json!({
-            "type": "object",
-            "properties": {
-                "a": { "type": "string", "x-kubernetes-validations": [validation] },
-                "l": { "type": "array", "items": { "type": "string", "x-kubernetes-validations": [validation] } }
-            }
-        })
-    };
-    for validation in [
-        json!({"rule": "isIPv4(self)"}),
-        json!({"rule": "self >"}),
-        json!({"rule": "true", "messageExpression": "invalid >="}),
-    ] {
-        let schema = absent(validation.clone());
-        assert!(
-            Validator::new()
-                .validate(&schema, &json!({"l": []}), None)
-                .is_ok(),
-            "{validation}: expected the known fail-open (unreached node) to pass"
-        );
-    }
-
-    let mut deep = json!({"type": "integer", "x-kubernetes-validations": [{"rule": "self >= 0"}]});
-    for _ in 0..70 {
-        deep = json!({ "type": "object", "properties": { "c": deep } });
-    }
-    assert!(
-        Validator::new().validate(&deep, &json!({}), None).is_ok(),
-        "an over-deep schema with a shallow object is a known fail-open (unreached node)"
-    );
-}
-
 // ── `format()` output — fail OPEN (fix before 0.9.0) ─────────────────────────
 // apiserver: cel-go v0.26's formatter (`ext.Strings` version 2). It prints `%f`
 //            and `%e` through golang.org/x/text's locale printer, a negative
@@ -606,27 +560,69 @@ fn quantity_arithmetic_past_i128_fails_closed() {
     }
 }
 
+// ── `oldSelf` registration rules — fail CLOSED since 0.9; used to fail OPEN ──
+// apiserver: rejects the CRD at registration for a rule reading `oldSelf` in
+//            the items of a non-map list ("oldSelf cannot be used on the
+//            uncorrelatable portion of the schema"), and for `optionalOldSelf`
+//            on a rule that does not read `oldSelf`.
+// kube-cel:  CompilationFailure for every object, checked over the whole schema.
+
+#[test]
+fn old_self_registration_rules_fail_closed() {
+    let atomic_items = json!({
+        "type": "object",
+        "properties": {
+            "e": { "type": "array", "items": { "type": "integer", "x-kubernetes-validations": [{"rule": "self >= oldSelf"}] } }
+        }
+    });
+    let unused_optional = json!({
+        "type": "object",
+        "x-kubernetes-validations": [{"rule": "true", "optionalOldSelf": true}]
+    });
+    for schema in [atomic_items, unused_optional] {
+        for errors in [
+            Validator::new().validate(&schema, &json!({}), None),
+            Validator::new().validate_compiled(&compile_schema(&schema), &json!({}), None),
+        ] {
+            let errors = errors.unwrap_err();
+            assert!(
+                errors.iter().all(|e| e.kind == ErrorKind::CompilationFailure),
+                "{schema}: {errors:?}"
+            );
+        }
+    }
+}
+
 // ── Schema depth cap — fails CLOSED since S4 (P1-A); used to fail OPEN ───────
-// apiserver: enforces deep rules (and rejects over-limit schemas at registration).
-// kube-cel:  SchemaTooDeep error past MAX_SCHEMA_DEPTH (64).
+// apiserver: has no nesting limit: v1.36.1 registers a 400-level CRD and
+//            evaluates a rule 70 levels down (accepts `self >= 0` on 1, rejects
+//            it on -1).
+// kube-cel:  an object that reaches past MAX_SCHEMA_DEPTH (64) gets a
+//            SchemaTooDeep error, whether the rule there holds or not. A shallow
+//            object passes, as in the apiserver, and every rule below the cap is
+//            still compiled, so one that does not compile is refused.
 
 #[test]
 fn depth_cap_fails_closed() {
-    // Nest one integer field with a violated `self >= 0` rule past the cap.
+    // Nest one integer field with a `self >= 0` rule past the cap.
     let mut schema = json!({
         "type": "integer",
         "x-kubernetes-validations": [{"rule": "self >= 0", "message": "leaf"}]
     });
-    let mut object = json!(-1);
+    let (mut violated, mut holds) = (json!(-1), json!(1));
     for _ in 0..70 {
         schema = json!({ "type": "object", "properties": { "c": schema } });
-        object = json!({ "c": object });
+        violated = json!({ "c": violated });
+        holds = json!({ "c": holds });
     }
-    let errors = Validator::new().validate(&schema, &object, None).unwrap_err();
-    assert!(
-        errors.iter().any(|e| e.kind == ErrorKind::SchemaTooDeep),
-        "depth past the cap must fail closed with SchemaTooDeep, got {errors:?}"
-    );
+    for object in [violated, holds] {
+        let errors = Validator::new().validate(&schema, &object, None).unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.kind == ErrorKind::SchemaTooDeep),
+            "depth past the cap must fail closed with SchemaTooDeep, got {errors:?}"
+        );
+    }
+    assert!(Validator::new().validate(&schema, &json!({}), None).is_ok());
 }
 
 // ── messageExpression compile failure — fails CLOSED since S11; used to fail OPEN

@@ -289,6 +289,16 @@ pub fn transition_cases() -> Vec<TransitionCase> {
     ]
 }
 
+/// An integer field holding `rule`, nested `levels` objects deep under `c`.
+fn deep_schema(levels: usize, rule: &str) -> Value {
+    let mut deep =
+        json!({ "type": "integer", "x-kubernetes-validations": [{ "rule": rule, "message": "deep" }] });
+    for _ in 0..levels {
+        deep = json!({ "type": "object", "properties": { "c": deep } });
+    }
+    deep
+}
+
 /// The shared parity table. Phase 2 of the fidelity sweep appends rows here; the
 /// runners do not change.
 pub fn cases() -> Vec<ParityCase> {
@@ -1300,6 +1310,170 @@ pub fn cases() -> Vec<ParityCase> {
             object: json!({}),
             expect: Expect::RegistrationRejectedFailOpen,
             note: "`authorizer` is a policy variable, undeclared in a CRD rule → rejected at registration; kube-cel accepts",
+        },
+        // ── Schema nodes the object does not reach (kube-rs/kube-cel#14) ─────
+        // The apiserver compiles every rule, and checks the nesting depth, when
+        // it registers the CRD, whatever objects later look like. Each row's
+        // object leaves the bad node unreached: an omitted property, the items
+        // of an empty list, a rule nested deeper than 64 levels.
+        ParityCase {
+            kind: "PunreachedCall",
+            plural: "punreachedcalls",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "a": { "type": "string", "x-kubernetes-validations": [{ "rule": "isIPv4(self)", "message": "ipv4" }] }
+                }
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "unsupported call on an omitted property → rejected at registration",
+        },
+        ParityCase {
+            kind: "PunreachedSyntax",
+            plural: "punreachedsyntaxes",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "l": {
+                        "type": "array",
+                        "items": { "type": "string", "x-kubernetes-validations": [{ "rule": "self >", "message": "syntax" }] }
+                    }
+                }
+            }),
+            object: json!({"l": []}),
+            expect: Expect::RegistrationRejected,
+            note: "syntax error in the items of an empty list → rejected at registration",
+        },
+        ParityCase {
+            kind: "PunreachedMsgExpr",
+            plural: "punreachedmsgexprs",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "a": {
+                        "type": "string",
+                        "x-kubernetes-validations": [{ "rule": "true", "messageExpression": "invalid >=" }]
+                    }
+                }
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "messageExpression syntax error on an omitted property → rejected at registration",
+        },
+        // The apiserver has no nesting limit (v1.36.1 registered a 400-level
+        // CRD), so a valid rule past 64 levels below a shallow object passes on
+        // both sides; kube-cel still compiles it, and refuses one that does not
+        // compile. (An object that reaches past 64 levels is kube-cel's
+        // fail-closed `SchemaTooDeep`, in tests/apiserver_divergence.rs.)
+        ParityCase {
+            kind: "PunreachedDeep",
+            plural: "punreacheddeeps",
+            schema: deep_schema(70, "self >= 0"),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "valid rule 70 levels down, shallow object → ACCEPT (no apiserver nesting limit)",
+        },
+        ParityCase {
+            kind: "PunreachedDeepSyntax",
+            plural: "punreacheddeepsyntaxes",
+            schema: deep_schema(70, "self >"),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "syntax error 70 levels down, shallow object → rejected at registration",
+        },
+        // ── `oldSelf` registration rules (apiextensions validation.go) ────────
+        // A rule reading `oldSelf` in the items of a list that is not
+        // `x-kubernetes-list-type: map` (whose items never correlate), and
+        // `optionalOldSelf` on a rule that does not read `oldSelf`, are refused
+        // when the CRD registers.
+        ParityCase {
+            kind: "PoldSelfAtomicItems",
+            plural: "poldselfatomicitemses",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "e": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": { "v": { "type": "integer" } },
+                            "x-kubernetes-validations": [{ "rule": "self.v >= oldSelf.v", "message": "v" }]
+                        }
+                    }
+                }
+            }),
+            object: json!({"e": [{"v": 1}]}),
+            expect: Expect::RegistrationRejected,
+            note: "oldSelf in the items of an atomic list → rejected at registration",
+        },
+        ParityCase {
+            kind: "PoptOldSelfUnused",
+            plural: "poptoldselfunuseds",
+            schema: json!({
+                "type": "object",
+                "properties": { "n": { "type": "integer" } },
+                "x-kubernetes-validations": [{ "rule": "self.n >= 0", "message": "n", "optionalOldSelf": false }]
+            }),
+            object: json!({"n": 1}),
+            expect: Expect::RegistrationRejected,
+            note: "optionalOldSelf on a rule without oldSelf → rejected at registration",
+        },
+        // An empty `messageExpression` is no messageExpression: the apiserver
+        // registers it and falls back to `message` (kube-cel compiled it).
+        ParityCase {
+            kind: "PemptyMsgExpr",
+            plural: "pemptymsgexprs",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "a": { "type": "string", "x-kubernetes-validations": [{ "rule": "true", "messageExpression": "" }] }
+                }
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "empty messageExpression is unset → ACCEPT",
+        },
+        // The apiserver counts any reference to `oldSelf` as a transition rule,
+        // a comprehension variable of that name included.
+        ParityCase {
+            kind: "PlocalOldSelfItems",
+            plural: "plocaloldselfitemses",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "l": {
+                        "type": "array",
+                        "maxItems": 1,
+                        "items": { "type": "integer", "x-kubernetes-validations": [{ "rule": "[1].all(oldSelf, oldSelf > 0)", "message": "l" }] }
+                    }
+                }
+            }),
+            object: json!({"l": [1]}),
+            expect: Expect::RegistrationRejected,
+            note: "comprehension variable named oldSelf in non-map list items → rejected at registration",
+        },
+        ParityCase {
+            kind: "PlocalOldSelfOptional",
+            plural: "plocaloldselfoptionals",
+            schema: json!({
+                "type": "object",
+                "x-kubernetes-validations": [{ "rule": "[1].all(oldSelf, oldSelf > 0)", "message": "o", "optionalOldSelf": true }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "comprehension variable named oldSelf makes optionalOldSelf legal → ACCEPT",
+        },
+        ParityCase {
+            kind: "PlocalOldSelfCreate",
+            plural: "plocaloldselfcreates",
+            schema: json!({
+                "type": "object",
+                "x-kubernetes-validations": [{ "rule": "[1].all(oldSelf, oldSelf > 5)", "message": "o" }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "a rule naming oldSelf is a transition rule, skipped on create → ACCEPT",
         },
     ]
 }

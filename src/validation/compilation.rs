@@ -144,12 +144,14 @@ pub(crate) fn compile_rule(rule: &Rule) -> Result<CompilationResult, Compilation
         rule: rule.rule.clone(),
         source,
     })?;
-    let is_transition_rule = program.references().has_variable("oldSelf");
+    // Any `oldSelf` identifier, as the apiserver counts it (`UsesOldSelf`).
+    let is_transition_rule = crate::validation::references::references_ident(program.expression(), "oldSelf");
 
     // Compile messageExpression if present. A failure fails closed (the apiserver
     // rejects such a CRD at registration), mirroring the `rule` path above rather
     // than silently dropping the dynamic message.
-    let message_program = match rule.message_expression.as_deref() {
+    // An empty one is unset: the apiserver compiles it only when non-empty.
+    let message_program = match rule.message_expression.as_deref().filter(|e| !e.is_empty()) {
         Some(expr) => Some(crate::validation::compile(expr).map_err(|source| {
             CompilationError::MessageExpressionParse {
                 rule: rule.rule.clone(),
@@ -253,6 +255,10 @@ pub struct CompiledSchema {
     /// a `default` into a present-but-`null` field only when the field is **not**
     /// nullable (apiserver `isNonNullableNull`, defaulting/algorithm.go).
     pub nullable: bool,
+    /// At the depth cap, the uncompiled subtree below it. The registration
+    /// check walks it like a raw schema (the apiserver has no nesting limit),
+    /// so the rules there are checked exactly as `validate` checks them.
+    pub(crate) below_cap: Option<serde_json::Value>,
 }
 
 impl CompiledSchema {
@@ -283,6 +289,43 @@ fn compile_schema_array(schema: &serde_json::Value, key: &str, depth: usize) -> 
         .unwrap_or_default()
 }
 
+/// Where a child schema sits under its parent, for naming its path.
+#[derive(Clone, Copy)]
+pub(crate) enum ChildSchema<'a> {
+    /// `properties.<name>`
+    Property(&'a str),
+    /// `items`
+    Items,
+    /// `additionalProperties`, when it is a schema
+    AdditionalProperties,
+    /// an `allOf` / `oneOf` / `anyOf` branch, which applies to the same value
+    Branch,
+}
+
+/// The subschemas the validators descend into, in schema order.
+pub(crate) fn child_schemas(schema: &serde_json::Value) -> Vec<(ChildSchema<'_>, &serde_json::Value)> {
+    let mut children = Vec::new();
+    if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
+        children.extend(
+            props
+                .iter()
+                .map(|(name, s)| (ChildSchema::Property(name.as_str()), s)),
+        );
+    }
+    if let Some(items) = schema.get("items") {
+        children.push((ChildSchema::Items, items));
+    }
+    if let Some(additional) = schema.get("additionalProperties").filter(|a| a.is_object()) {
+        children.push((ChildSchema::AdditionalProperties, additional));
+    }
+    for keyword in ["allOf", "oneOf", "anyOf"] {
+        if let Some(branches) = schema.get(keyword).and_then(|b| b.as_array()) {
+            children.extend(branches.iter().map(|b| (ChildSchema::Branch, b)));
+        }
+    }
+    children
+}
+
 /// Recursively compile all `x-kubernetes-validations` rules in a schema tree.
 ///
 /// Returns a [`CompiledSchema`] that can be reused across multiple validation
@@ -296,9 +339,12 @@ fn compile_schema_inner(schema: &serde_json::Value, depth: usize) -> CompiledSch
     if depth > MAX_SCHEMA_DEPTH {
         // Fail-closed: carry a SchemaTooDeep marker rather than returning a
         // silently-empty node, so `compilation_errors()` and the validators
-        // surface the truncation instead of dropping the deep rules.
+        // surface the truncation instead of dropping the deep rules. The
+        // subtree is kept, so the registration check still sees every rule
+        // below the cap (the apiserver has no nesting limit of its own).
         return CompiledSchema {
             validations: vec![Err(CompilationError::SchemaTooDeep { depth })],
+            below_cap: Some(schema.clone()),
             properties: HashMap::new(),
             items: None,
             additional_properties: None,
@@ -393,6 +439,7 @@ fn compile_schema_inner(schema: &serde_json::Value, depth: usize) -> CompiledSch
         default,
         list_map_keys,
         nullable,
+        below_cap: None,
     }
 }
 
