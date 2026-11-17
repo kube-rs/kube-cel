@@ -17,7 +17,26 @@ use crate::validation::{
     compilation::{CompilationError, CompilationResult, CompiledSchema, compile_schema_validations},
     values::{json_to_cel_with_compiled, json_to_cel_with_schema},
 };
-use cel::Context;
+use cel::{Context, Env};
+use std::sync::{Arc, LazyLock};
+
+/// The `cel` environment that CRD rules and VAP expressions compile and run
+/// against, shared by every [`Validator`], [`compile_schema`](crate::compile_schema)
+/// call and [`VapEvaluator`](crate::VapEvaluator).
+///
+/// Rules must compile with [`Env::compile`] on this environment (not
+/// [`cel::Program::compile`], which only knows the standard macros) and run
+/// on a context from [`base_context`].
+pub(crate) fn validation_env() -> &'static Arc<Env> {
+    static ENV: LazyLock<Arc<Env>> = LazyLock::new(|| Arc::new(crate::new_env()));
+    &ENV
+}
+
+/// A root context on [`validation_env`] with every kube-cel function registered.
+pub(crate) fn base_context() -> Context<'static, 'static> {
+    crate::new_context(Arc::clone(validation_env()))
+        .expect("kube-cel's functions register onto its validation Env")
+}
 
 /// CRD-level context variables available at the root schema node.
 ///
@@ -259,7 +278,7 @@ fn schema_too_deep_error(path: &str) -> ValidationError {
 ///
 /// `Validator` is `Send` and can be moved across threads.
 pub struct Validator {
-    base_ctx: Context<'static>,
+    base_ctx: Context<'static, 'static>,
 }
 
 impl std::fmt::Debug for Validator {
@@ -271,9 +290,9 @@ impl std::fmt::Debug for Validator {
 impl Validator {
     /// Create a new `Validator` with all K8s CEL functions pre-registered.
     pub fn new() -> Self {
-        let mut ctx = Context::default();
-        crate::register_all(&mut ctx);
-        Self { base_ctx: ctx }
+        Self {
+            base_ctx: base_context(),
+        }
     }
 
     /// Validate an object against a CRD schema's CEL validation rules.
@@ -407,7 +426,7 @@ impl Validator {
         old_value: Option<&serde_json::Value>,
         path: String,
         errors: &mut Vec<ValidationError>,
-        base_ctx: &Context<'_>,
+        base_ctx: &Context<'_, '_>,
         root_ctx: Option<&RootContext>,
         depth: usize,
     ) {
@@ -530,7 +549,7 @@ impl Validator {
         cel_old: Option<&cel::Value>,
         path: &str,
         errors: &mut Vec<ValidationError>,
-        base_ctx: &Context<'_>,
+        base_ctx: &Context<'_, '_>,
         root_ctx: Option<&RootContext>,
     ) {
         let compiled = compile_schema_validations(schema);
@@ -547,7 +566,7 @@ impl Validator {
         old_value: Option<&serde_json::Value>,
         path: String,
         errors: &mut Vec<ValidationError>,
-        base_ctx: &Context<'_>,
+        base_ctx: &Context<'_, '_>,
         root_ctx: Option<&RootContext>,
         depth: usize,
     ) {
@@ -656,7 +675,7 @@ impl Validator {
         cel_old: Option<&cel::Value>,
         path: &str,
         errors: &mut Vec<ValidationError>,
-        base_ctx: &Context<'_>,
+        base_ctx: &Context<'_, '_>,
         root_ctx: Option<&RootContext>,
     ) {
         // Create a node-level scope once with self/oldSelf bound
@@ -738,7 +757,7 @@ impl Validator {
     fn evaluate_rule(
         &self,
         cr: &CompilationResult,
-        node_ctx: &Context<'_>,
+        node_ctx: &Context<'_, '_>,
         cel_old: Option<&cel::Value>,
         path: &str,
         errors: &mut Vec<ValidationError>,
@@ -751,7 +770,7 @@ impl Validator {
         // optionalOldSelf: true + no old object → child scope with oldSelf = null
         let use_null_old_self = cel_old.is_none() && cr.rule.optional_old_self == Some(true);
         let null_scope;
-        let effective_ctx: &Context<'_> = if use_null_old_self {
+        let effective_ctx: &Context<'_, '_> = if use_null_old_self {
             null_scope = {
                 let mut s = node_ctx.new_inner_scope();
                 s.add_variable_from_value("oldSelf", cel::Value::Null);
@@ -823,7 +842,7 @@ impl Validator {
 
     /// Resolve the error message: try messageExpression first, fall back to
     /// static message, then default.
-    fn resolve_message(&self, cr: &CompilationResult, ctx: &Context<'_>) -> String {
+    fn resolve_message(&self, cr: &CompilationResult, ctx: &Context<'_, '_>) -> String {
         if let Some(ref msg_prog) = cr.message_program
             && let Ok(cel::Value::String(s)) = msg_prog.execute(ctx)
         {

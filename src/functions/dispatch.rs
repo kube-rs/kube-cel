@@ -5,44 +5,42 @@
 //! both strings and lists), this module provides unified dispatch functions
 //! that route to the correct implementation based on the runtime type of `this`.
 
-#[cfg(any(feature = "ip", feature = "lists"))] use std::sync::Arc;
+#[cfg(feature = "lists")] use std::sync::Arc;
 
 use cel::{
-    Context, ExecutionError, ResolveResult,
+    ExecutionError, ResolveResult,
     extractors::{Arguments, This},
     objects::Value,
 };
 
-/// Register dispatch functions for names shared across multiple types or
-/// that override cel built-in functions. Registration order is independent
+use crate::functions::Registrar;
+
+/// Register dispatch functions for names shared across multiple types.
+/// Registration order is independent
 /// of individual module registrations since modules no longer register
 /// these conflicting names.
-pub(crate) fn register(ctx: &mut Context<'_>) {
-    ctx.add_function("indexOf", index_of);
-    ctx.add_function("lastIndexOf", last_index_of);
+pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
+    r.add("indexOf", index_of);
+    r.add("lastIndexOf", last_index_of);
 
     // Comparison/arithmetic: shared between semver_funcs and quantity
-    ctx.add_function("isGreaterThan", is_greater_than);
-    ctx.add_function("isLessThan", is_less_than);
-    ctx.add_function("compareTo", compare_to);
+    r.add("isGreaterThan", is_greater_than);
+    r.add("isLessThan", is_less_than);
+    r.add("compareTo", compare_to);
 
     // ip: string → parse IP, CIDR → extract network address
     #[cfg(feature = "ip")]
-    ctx.add_function("ip", ip_dispatch);
-
-    // string: IP/CIDR → string representation
-    #[cfg(feature = "ip")]
-    ctx.add_function("string", string_dispatch);
+    r.add("ip", ip_dispatch);
 
     // reverse: string → reversed string, list → reversed list
     #[cfg(any(feature = "strings", feature = "lists"))]
-    ctx.add_function("reverse", reverse);
+    r.add("reverse", reverse);
 
     // min/max: list method vs cel built-in variadic
     #[cfg(feature = "lists")]
     {
-        ctx.add_function("min", min_dispatch);
-        ctx.add_function("max", max_dispatch);
+        r.add("min", min_dispatch);
+        r.add("max", max_dispatch);
     }
 }
 
@@ -172,114 +170,6 @@ fn ip_dispatch(This(this): This<Value>, Arguments(args): Arguments) -> ResolveRe
 }
 
 // ---------------------------------------------------------------------------
-// string (IP/CIDR → string, plus cel built-in fallback)
-// ---------------------------------------------------------------------------
-//
-// Overriding cel's built-in `string()` is unavoidable: K8s CEL spec requires
-// `ip("1.2.3.4").string()` to work, but cel's built-in rejects Opaque types.
-// Since the function registry has no overload support, we must replace it and
-// reimplement the standard type conversions.
-//
-// The standard conversions below mirror `cel::functions::string` (cel 0.12).
-// cel::functions::string is pub but requires &FunctionContext which is not
-// available in the extractor-based API, so direct delegation is not possible.
-
-#[cfg(feature = "ip")]
-fn string_dispatch(This(this): This<Value>) -> ResolveResult {
-    match &this {
-        // Opaque types: K8s CEL extensions
-        Value::Opaque(o) if o.downcast_ref::<crate::functions::ip::KubeIP>().is_some() => {
-            crate::functions::ip::ip_string(This(this))
-        }
-        Value::Opaque(o) if o.downcast_ref::<crate::functions::ip::KubeCIDR>().is_some() => {
-            crate::functions::ip::cidr_string(This(this))
-        }
-        // Standard types: mirrors cel::functions::string (cel 0.12)
-        _ => builtin_string_fallback(this),
-    }
-}
-
-/// Reimplements cel's built-in `string()` for standard types.
-/// Must stay in sync with `cel::functions::string` (cel 0.12).
-#[cfg(feature = "ip")]
-fn builtin_string_fallback(this: Value) -> ResolveResult {
-    match this {
-        Value::String(_) => Ok(this),
-        Value::Int(n) => Ok(Value::String(Arc::new(n.to_string()))),
-        Value::UInt(n) => Ok(Value::String(Arc::new(n.to_string()))),
-        Value::Float(f) => Ok(Value::String(Arc::new(f.to_string()))),
-        Value::Bytes(ref b) => Ok(Value::String(Arc::new(
-            String::from_utf8_lossy(b.as_slice()).into(),
-        ))),
-        Value::Timestamp(ref t) => Ok(Value::String(Arc::new(t.to_rfc3339()))),
-        Value::Duration(ref d) => Ok(Value::String(Arc::new(format_cel_duration(
-            d.num_nanoseconds().unwrap_or(d.num_seconds() * 1_000_000_000),
-        )))),
-        _ => Err(ExecutionError::function_error(
-            "string",
-            format!("cannot convert {:?} to string", this.type_of()),
-        )),
-    }
-}
-
-/// Format nanoseconds matching Go's `time.Duration.String()`.
-/// Mirrors `cel::duration::format_duration` which is not pub.
-#[cfg(feature = "ip")]
-fn format_cel_duration(total_nanos: i64) -> String {
-    if total_nanos == 0 {
-        return "0s".into();
-    }
-
-    let neg = total_nanos < 0;
-    let u = total_nanos.unsigned_abs();
-    let mut result = String::new();
-    if neg {
-        result.push('-');
-    }
-
-    const NS_SECOND: u64 = 1_000_000_000;
-    const NS_MINUTE: u64 = 60 * NS_SECOND;
-    const NS_HOUR: u64 = 60 * NS_MINUTE;
-
-    if u >= NS_SECOND {
-        let hours = u / NS_HOUR;
-        let mins = (u % NS_HOUR) / NS_MINUTE;
-        let secs = (u % NS_MINUTE) / NS_SECOND;
-        let frac = u % NS_SECOND;
-        if hours > 0 {
-            result.push_str(&format!("{hours}h"));
-        }
-        if hours > 0 || mins > 0 {
-            result.push_str(&format!("{mins}m"));
-        }
-        if frac > 0 {
-            let frac_s = format!("{frac:09}");
-            let frac_s = frac_s.trim_end_matches('0');
-            result.push_str(&format!("{secs}.{frac_s}s"));
-        } else {
-            result.push_str(&format!("{secs}s"));
-        }
-    } else {
-        const NS_MILLISECOND: u64 = 1_000_000;
-        const NS_MICROSECOND: u64 = 1_000;
-        if u >= NS_MILLISECOND {
-            let ms = u as f64 / NS_MILLISECOND as f64;
-            let s = format!("{ms:.3}");
-            result.push_str(s.trim_end_matches('0').trim_end_matches('.'));
-            result.push_str("ms");
-        } else if u >= NS_MICROSECOND {
-            let us = u as f64 / NS_MICROSECOND as f64;
-            let s = format!("{us:.3}");
-            result.push_str(s.trim_end_matches('0').trim_end_matches('.'));
-            result.push_str("µs");
-        } else {
-            result.push_str(&format!("{u}ns"));
-        }
-    }
-    result
-}
-
-// ---------------------------------------------------------------------------
 // reverse (string → reversed string, list → reversed list)
 // ---------------------------------------------------------------------------
 
@@ -335,13 +225,13 @@ mod tests {
 
     fn eval(expr: &str) -> Value {
         let mut ctx = Context::default();
-        crate::register_all(&mut ctx);
+        crate::register_all(&mut ctx).unwrap();
         Program::compile(expr).unwrap().execute(&ctx).unwrap()
     }
 
     fn eval_err(expr: &str) -> cel::ExecutionError {
         let mut ctx = Context::default();
-        crate::register_all(&mut ctx);
+        crate::register_all(&mut ctx).unwrap();
         Program::compile(expr).unwrap().execute(&ctx).unwrap_err()
     }
 
@@ -375,48 +265,6 @@ mod tests {
     #[cfg(feature = "semver_funcs")]
     fn test_compare_to_unsupported_type() {
         eval_err("'hello'.compareTo('world')");
-    }
-
-    // --- string() conformance: verify our reimplementation matches cel built-in ---
-
-    #[test]
-    #[cfg(feature = "ip")]
-    fn test_string_int() {
-        assert_eq!(eval("42.string()"), Value::String("42".to_string().into()));
-    }
-
-    #[test]
-    #[cfg(feature = "ip")]
-    fn test_string_uint() {
-        assert_eq!(eval("42u.string()"), Value::String("42".to_string().into()));
-    }
-
-    #[test]
-    #[cfg(feature = "ip")]
-    fn test_string_float() {
-        assert_eq!(eval("3.14.string()"), Value::String("3.14".to_string().into()));
-    }
-
-    #[test]
-    #[cfg(feature = "ip")]
-    fn test_string_string() {
-        assert_eq!(
-            eval("'hello'.string()"),
-            Value::String("hello".to_string().into())
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "ip")]
-    fn test_string_bytes() {
-        assert_eq!(eval("b'abc'.string()"), Value::String("abc".to_string().into()));
-    }
-
-    #[test]
-    #[cfg(feature = "ip")]
-    fn test_string_unsupported_type() {
-        // Bool is not supported by cel's built-in string(), neither by ours
-        eval_err("true.string()");
     }
 
     // --- min/max dispatch: list method and global variadic coexistence ---

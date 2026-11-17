@@ -247,9 +247,8 @@ impl VapEvaluator {
     }
 
     /// Build a CEL [`Context`] with all VAP variables bound.
-    fn build_context(&self) -> Context<'static> {
-        let mut ctx = Context::default();
-        crate::register_all(&mut ctx);
+    fn build_context(&self) -> Context<'static, 'static> {
+        let mut ctx = crate::validation::base_context();
 
         // Bind `object`
         let _ = ctx.add_variable("object", json_to_cel(&self.object));
@@ -288,10 +287,11 @@ impl VapEvaluator {
         &self,
         expressions: &[VapExpression],
     ) -> Vec<Result<CompiledVapExpression, VapError>> {
+        let env = crate::validation::validation_env();
         expressions
             .iter()
             .map(|expr| {
-                let program = Program::compile(&expr.expression).map_err(|e| VapError {
+                let program = env.compile(&expr.expression).map_err(|e| VapError {
                     expression: expr.expression.clone(),
                     source: Box::new(e),
                 })?;
@@ -299,7 +299,7 @@ impl VapEvaluator {
                 // apiserver rejects such a policy at registration), mirroring the
                 // expression path above rather than silently dropping it.
                 let message_program = match expr.message_expression.as_deref() {
-                    Some(me) => Some(Program::compile(me).map_err(|e| VapError {
+                    Some(me) => Some(env.compile(me).map_err(|e| VapError {
                         expression: me.to_string(),
                         source: Box::new(e),
                     })?),

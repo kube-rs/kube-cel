@@ -3,7 +3,7 @@
 //! Provides compile-time checks beyond syntax validation:
 //! variable scope validation and cost estimation.
 
-use cel::{Program, common::ast::Expr};
+use cel::common::ast::Expr;
 
 use crate::validation::compilation::CompiledSchema;
 
@@ -64,7 +64,7 @@ fn valid_variables(scope: ScopeContext) -> &'static [&'static str] {
 /// Check a CEL expression for variable scope violations.
 #[must_use]
 pub fn check_rule_scope(rule: &str, scope: ScopeContext) -> Vec<AnalysisWarning> {
-    let program = match Program::compile(rule) {
+    let program = match crate::validation::validation_env().compile(rule) {
         Ok(p) => p,
         Err(_) => return vec![],
     };
@@ -99,7 +99,7 @@ const STRING_TRAVERSAL_FACTOR: f64 = 0.1;
 /// common issue: unbounded list comprehensions without maxItems.
 #[must_use]
 pub fn estimate_rule_cost(rule: &str, schema: &CompiledSchema) -> Vec<AnalysisWarning> {
-    let program = match Program::compile(rule) {
+    let program = match crate::validation::validation_env().compile(rule) {
         Ok(p) => p,
         Err(_) => return vec![],
     };
@@ -129,7 +129,7 @@ pub fn estimate_rule_cost(rule: &str, schema: &CompiledSchema) -> Vec<AnalysisWa
 /// More efficient than calling [`check_rule_scope`] and [`estimate_rule_cost`] separately.
 #[must_use]
 pub fn analyze_rule(rule: &str, schema: &CompiledSchema, scope: ScopeContext) -> Vec<AnalysisWarning> {
-    let program = match Program::compile(rule) {
+    let program = match crate::validation::validation_env().compile(rule) {
         Ok(p) => p,
         Err(_) => return vec![],
     };

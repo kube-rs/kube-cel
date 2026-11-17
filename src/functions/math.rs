@@ -3,39 +3,41 @@
 //! Provides math functions matching `cel-go/ext/math.go` and
 //! `k8s.io/apiserver/pkg/cel/library/cost.go` math extensions.
 
-use cel::{Context, ExecutionError, ResolveResult, extractors::Arguments, objects::Value};
+use cel::{ExecutionError, ResolveResult, extractors::Arguments, objects::Value};
+
+use crate::functions::Registrar;
 
 /// Register all math extension functions.
-pub(crate) fn register(ctx: &mut Context<'_>) {
+pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
     // Rounding
-    ctx.add_function("math.ceil", math_ceil);
-    ctx.add_function("math.floor", math_floor);
-    ctx.add_function("math.round", math_round);
-    ctx.add_function("math.trunc", math_trunc);
+    r.add("math.ceil", math_ceil);
+    r.add("math.floor", math_floor);
+    r.add("math.round", math_round);
+    r.add("math.trunc", math_trunc);
 
     // Numeric
-    ctx.add_function("math.abs", math_abs);
-    ctx.add_function("math.sign", math_sign);
+    r.add("math.abs", math_abs);
+    r.add("math.sign", math_sign);
 
     // Inspection
-    ctx.add_function("math.isInf", math_is_inf);
-    ctx.add_function("math.isNaN", math_is_nan);
-    ctx.add_function("math.isFinite", math_is_finite);
+    r.add("math.isInf", math_is_inf);
+    r.add("math.isNaN", math_is_nan);
+    r.add("math.isFinite", math_is_finite);
 
     // Bitwise
-    ctx.add_function("math.bitAnd", math_bit_and);
-    ctx.add_function("math.bitOr", math_bit_or);
-    ctx.add_function("math.bitXor", math_bit_xor);
-    ctx.add_function("math.bitNot", math_bit_not);
-    ctx.add_function("math.bitShiftLeft", math_bit_shift_left);
-    ctx.add_function("math.bitShiftRight", math_bit_shift_right);
+    r.add("math.bitAnd", math_bit_and);
+    r.add("math.bitOr", math_bit_or);
+    r.add("math.bitXor", math_bit_xor);
+    r.add("math.bitNot", math_bit_not);
+    r.add("math.bitShiftLeft", math_bit_shift_left);
+    r.add("math.bitShiftRight", math_bit_shift_right);
 
     // Square root
-    ctx.add_function("math.sqrt", math_sqrt);
+    r.add("math.sqrt", math_sqrt);
 
     // Variadic min/max
-    ctx.add_function("math.greatest", math_greatest);
-    ctx.add_function("math.least", math_least);
+    r.add("math.greatest", math_greatest);
+    r.add("math.least", math_least);
 }
 
 // ---------------------------------------------------------------------------
@@ -263,17 +265,17 @@ fn math_extremum(args: &[Value], name: &str, target_ord: std::cmp::Ordering) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel::Program;
+    use cel::{Context, Program};
 
     fn eval(expr: &str) -> Value {
         let mut ctx = Context::default();
-        register(&mut ctx);
+        crate::functions::register_parts(&mut ctx, &[register]);
         Program::compile(expr).unwrap().execute(&ctx).unwrap()
     }
 
     fn eval_err(expr: &str) -> ExecutionError {
         let mut ctx = Context::default();
-        register(&mut ctx);
+        crate::functions::register_parts(&mut ctx, &[register]);
         Program::compile(expr).unwrap().execute(&ctx).unwrap_err()
     }
 

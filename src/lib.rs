@@ -5,8 +5,21 @@
 //!
 //! # Usage
 //!
-//! Register the compiled-in functions onto a [`cel::Context`] via the
-//! [`KubeCelExt`] extension trait:
+//! Build kube-cel's [`cel::Env`] with [`new_env`] and a context on it with
+//! [`new_context`], then compile with [`cel::Env::compile`] on the same
+//! environment:
+//!
+//! ```rust
+//! use std::sync::Arc;
+//!
+//! let env = Arc::new(kube_cel::new_env());
+//! let ctx = kube_cel::new_context(Arc::clone(&env)).unwrap();
+//! let program = env.compile("quantity('1Gi').isGreaterThan(quantity('500Mi'))").unwrap();
+//! # let _ = program.execute(&ctx);
+//! ```
+//!
+//! To add the functions to a context you already have, use the [`KubeCelExt`]
+//! extension trait:
 //!
 //! ```rust
 //! use kube_cel::{cel, KubeCelExt};
@@ -15,15 +28,18 @@
 //! # let _ = ctx;
 //! ```
 //!
-//! See [`KubeCelExt`] for the borrowed-context form and the
-//! function-group → upstream-source table.
+//! That registers every compiled-in function, but not the few overloads
+//! kube-cel declares on the [`cel::Env`] itself (`string(<IP>)` and
+//! `string(<CIDR>)`), which need an environment from [`new_env`]. See
+//! [`KubeCelExt`] for the fallible `try_` forms and the function-group →
+//! upstream-source table.
 //!
 //! # Version coherence
 //!
-//! This crate's public signatures use [`cel::Context`] and [`cel::Value`], so a
-//! `cel` version mismatch between your crate and `kube-cel` surfaces as a cryptic
-//! `Context` type mismatch. To avoid it, import `cel` **through** this crate
-//! rather than declaring a separate `cel` dependency:
+//! This crate's public signatures use [`cel::Env`], [`cel::Context`] and
+//! [`cel::Value`], so a `cel` version mismatch between your crate and `kube-cel`
+//! surfaces as a cryptic `Context` type mismatch. To avoid it, import `cel`
+//! **through** this crate rather than declaring a separate `cel` dependency:
 //!
 //! ```rust
 //! use kube_cel::cel; // re-export guaranteed to match kube-cel's `cel`
@@ -62,9 +78,10 @@
 //! stable while its public dependencies are not (Rust API Guidelines C-STABLE).
 //! After `cel` 1.0, kube-cel 1.x tracks `cel` 1.y; a `cel` major forces a
 //! kube-cel major. Two stability tiers: **Tier 1** (committed) is the
-//! registration surface — [`KubeCelExt`] and the `cel` re-export; **Tier 2**
-//! (evolving, `validation` feature) is the validation engine, whose surface may
-//! still change across pre-1.0 minors. See the README for details.
+//! registration surface — [`KubeCelExt`], [`new_env`]/[`new_context`] and the
+//! `cel` re-export; **Tier 2** (evolving, `validation` feature) is the
+//! validation engine, whose surface may still change across pre-1.0 minors. See
+//! the README for details.
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![deny(missing_docs)]
 // The validation-pipeline section links to feature-gated items, so it is only
@@ -123,7 +140,7 @@ mod functions;
 // feature). Its public items are re-exported flatly below.
 #[cfg(feature = "validation")] mod validation;
 
-pub use ext::KubeCelExt;
+pub use ext::{KubeCelExt, RegisterError, new_context, new_env};
 
 #[cfg(feature = "validation")]
 pub use crate::validation::{

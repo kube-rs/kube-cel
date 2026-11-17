@@ -4,12 +4,14 @@
 //! matching `k8s.io/apiserver/pkg/cel/library/urls.go`.
 
 use cel::{
-    Context, ResolveResult,
+    ResolveResult,
     extractors::This,
     objects::{Key, Map, Opaque, Value},
 };
 use std::{collections::HashMap, sync::Arc};
 use url::Url;
+
+use crate::functions::Registrar;
 
 /// A Kubernetes CEL URL value wrapping `url::Url`.
 #[derive(Debug, Clone)]
@@ -30,15 +32,15 @@ impl Opaque for KubeUrl {
 }
 
 /// Register all URL extension functions.
-pub(crate) fn register(ctx: &mut Context<'_>) {
-    ctx.add_function("url", parse_url);
-    ctx.add_function("isURL", is_url);
-    ctx.add_function("getScheme", get_scheme);
-    ctx.add_function("getHost", get_host);
-    ctx.add_function("getHostname", get_hostname);
-    ctx.add_function("getPort", get_port);
-    ctx.add_function("getEscapedPath", get_escaped_path);
-    ctx.add_function("getQuery", get_query);
+pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
+    r.add("url", parse_url);
+    r.add("isURL", is_url);
+    r.add("getScheme", get_scheme);
+    r.add("getHost", get_host);
+    r.add("getHostname", get_hostname);
+    r.add("getPort", get_port);
+    r.add("getEscapedPath", get_escaped_path);
+    r.add("getQuery", get_query);
 }
 
 /// Validates and parses a URL string.
@@ -158,11 +160,11 @@ fn get_query(This(this): This<Value>) -> ResolveResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel::Program;
+    use cel::{Context, Program};
 
     fn eval(expr: &str) -> Value {
         let mut ctx = Context::default();
-        register(&mut ctx);
+        crate::functions::register_parts(&mut ctx, &[register]);
         Program::compile(expr).unwrap().execute(&ctx).unwrap()
     }
 
@@ -221,7 +223,7 @@ mod tests {
 
     fn eval_err(expr: &str) -> cel::ExecutionError {
         let mut ctx = Context::default();
-        register(&mut ctx);
+        crate::functions::register_parts(&mut ctx, &[register]);
         Program::compile(expr).unwrap().execute(&ctx).unwrap_err()
     }
 

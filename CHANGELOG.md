@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.9.0] - Unreleased
+
+Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
+
+### Breaking
+- **`cel` 0.14 → 0.16.** `cel` is a public dependency (`pub use cel`), so this
+  is breaking on its own. `cel::Context` gained a second lifetime
+  (`Context<'p, 'v>`); `KubeCelExt` is implemented for `Context<'_, '_>`.
+- **`string(<IP>)` / `string(<CIDR>)` need kube-cel's `Env`.** `cel` 0.16
+  refuses a context function whose name the `Env` already declares, and the
+  standard library declares `string`, so kube-cel can no longer override
+  `string` on a context (in 0.8 it reimplemented the standard conversions to do
+  so). The IP and CIDR conversions are now `string` overloads on the `Env`
+  built by the new `new_env()`. On a plain `Context::default().with_all()`,
+  `string(ip(...))` fails with "no such overload".
+  - Migration: build the env and context with
+    `let env = Arc::new(kube_cel::new_env()); let ctx = kube_cel::new_context(Arc::clone(&env))?;`
+    and compile with `env.compile(..)`.
+- **The member form `<IP>.string()` / `<CIDR>.string()` (and `42.string()`,
+  `'a'.string()`, …) is now an error**, matching the apiserver, which rejects
+  it at compile time. Use the global form `string(x)`.
+- **`register_all` / `with_all` panic instead of silently registering
+  nothing.** On a child scope (`Context::new_inner_scope`) `cel` reports success
+  and registers nothing; on a context whose `Env` already declares one of
+  kube-cel's names, `cel` 0.16 refuses the name. Both used to pass silently.
+  Neither happens on `Context::default()` or on `new_env()`.
+
+### Added
+- `new_env() -> cel::Env`: the `cel` standard library plus the overloads
+  kube-cel declares on the environment (`string(<IP>)`, `string(<CIDR>)`).
+- `new_context(env) -> Result<cel::Context, RegisterError>`: a root context on
+  `env` with every compiled-in function registered.
+- `KubeCelExt::try_register_all` / `try_with_all` and `RegisterError`
+  (`ChildScope`, `Rejected { function, source }`): the fallible forms of
+  `register_all` / `with_all`.
+
+### Changed
+- The validation engine (`Validator`, `compile_schema`, `VapEvaluator`, static
+  analysis) compiles with `Env::compile` on a shared, private `Env` instead of
+  `Program::compile`, so it sees the environment's macros and overloads.
+
 ## [0.8.0] - 2026-06-19
 
 Apiserver fidelity for schema `default`s

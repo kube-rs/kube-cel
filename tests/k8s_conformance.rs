@@ -37,6 +37,18 @@ fn assert_string(expr: &str, expected: &str) {
     );
 }
 
+/// `string(<IP>)` / `string(<CIDR>)` are overloads on kube-cel's `Env`, so they
+/// need a context from `kube_cel::new_env()` rather than `Context::default()`.
+fn assert_string_on_kube_env(expr: &str, expected: &str) {
+    let env = Arc::new(kube_cel::new_env());
+    let ctx = kube_cel::new_context(Arc::clone(&env)).unwrap();
+    assert_eq!(
+        env.compile(expr).unwrap().execute(&ctx).unwrap(),
+        Value::String(Arc::new(expected.into())),
+        "expected \"{expected}\": {expr}"
+    );
+}
+
 fn assert_runtime_err(expr: &str) {
     let ctx = Context::default().with_all();
     let result = Program::compile(expr).unwrap().execute(&ctx);
@@ -235,7 +247,7 @@ mod ip {
 
     #[test]
     fn string_ip_v4() {
-        assert_string("string(ip(\"192.168.0.1\"))", "192.168.0.1");
+        assert_string_on_kube_env("string(ip(\"192.168.0.1\"))", "192.168.0.1");
     }
 }
 
@@ -296,7 +308,7 @@ mod cidr {
 
     #[test]
     fn string_cidr() {
-        assert_string("string(cidr(\"192.168.0.0/24\"))", "192.168.0.0/24");
+        assert_string_on_kube_env("string(cidr(\"192.168.0.0/24\"))", "192.168.0.0/24");
     }
 
     // --- IPv6 ---

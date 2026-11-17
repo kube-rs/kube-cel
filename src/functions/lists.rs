@@ -4,31 +4,34 @@
 //! matching the behavior of `k8s.io/apiserver/pkg/cel/library/lists.go`.
 
 use cel::{
-    Context, ExecutionError, ResolveResult,
+    ExecutionError, ResolveResult,
     extractors::{Arguments, This},
     objects::{OptionalValue, Value},
 };
 use std::{cmp::Ordering, sync::Arc};
 
-use crate::functions::value_ops::{compare_values, val_add, val_eq, val_le, val_lt};
+use crate::functions::{
+    Registrar,
+    value_ops::{compare_values, val_add, val_eq, val_le, val_lt},
+};
 
 /// Register all list extension functions.
-pub(crate) fn register(ctx: &mut Context<'_>) {
-    ctx.add_function("isSorted", is_sorted);
-    ctx.add_function("sum", sum);
+pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
+    r.add("isSorted", is_sorted);
+    r.add("sum", sum);
     // min/max are registered via dispatch module to handle
     // name collision with cel built-in variadic min/max.
     // indexOf/lastIndexOf are registered via dispatch module to handle
     // name collision between string and list versions.
-    ctx.add_function("slice", slice);
-    ctx.add_function("sort", sort);
-    ctx.add_function("flatten", flatten);
+    r.add("slice", slice);
+    r.add("sort", sort);
+    r.add("flatten", flatten);
     // reverse is registered via dispatch module to handle
     // name collision between string and list versions.
-    ctx.add_function("distinct", distinct);
-    ctx.add_function("first", list_first);
-    ctx.add_function("last", list_last);
-    ctx.add_function("lists.range", lists_range);
+    r.add("distinct", distinct);
+    r.add("first", list_first);
+    r.add("last", list_last);
+    r.add("lists.range", lists_range);
 }
 
 /// `<list>.isSorted() -> bool`
@@ -266,12 +269,11 @@ fn distinct(This(this): This<Arc<Vec<Value>>>) -> ResolveResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel::Program;
+    use cel::{Context, Program};
 
     fn eval(expr: &str) -> Value {
         let mut ctx = Context::default();
-        register(&mut ctx);
-        crate::functions::dispatch::register(&mut ctx);
+        crate::functions::register_parts(&mut ctx, &[register, crate::functions::dispatch::register]);
         Program::compile(expr).unwrap().execute(&ctx).unwrap()
     }
 
@@ -372,8 +374,7 @@ mod tests {
 
     fn eval_err(expr: &str) -> cel::ExecutionError {
         let mut ctx = Context::default();
-        register(&mut ctx);
-        crate::functions::dispatch::register(&mut ctx);
+        crate::functions::register_parts(&mut ctx, &[register, crate::functions::dispatch::register]);
         Program::compile(expr).unwrap().execute(&ctx).unwrap_err()
     }
 

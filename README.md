@@ -21,23 +21,31 @@ kube-cel = "0.8"
 ## Usage
 
 ```rust
-use kube_cel::KubeCelExt;
-use kube_cel::cel::{Context, Program};
+use std::sync::Arc;
 
-let ctx = Context::default().with_all();
+// kube-cel's Env (the cel stdlib plus the overloads kube-cel declares on it)
+// and a context on it with every compiled-in function registered.
+let env = Arc::new(kube_cel::new_env());
+let ctx = kube_cel::new_context(Arc::clone(&env)).unwrap();
 
 // String functions
-let result = Program::compile("'hello'.upperAscii()")
+let result = env.compile("'hello'.upperAscii()")
     .unwrap().execute(&ctx).unwrap();
 
 // Quantity comparison
-let result = Program::compile("quantity('1Gi').isGreaterThan(quantity('500Mi'))")
+let result = env.compile("quantity('1Gi').isGreaterThan(quantity('500Mi'))")
     .unwrap().execute(&ctx).unwrap();
 
-// Semver
-let result = Program::compile("semver('1.2.3').isLessThan(semver('2.0.0'))")
+// IP to string (an overload on kube-cel's Env)
+let result = env.compile("string(ip('192.168.0.1'))")
     .unwrap().execute(&ctx).unwrap();
 ```
+
+To add the functions to a context you already have, use the `KubeCelExt`
+extension trait: `Context::default().with_all()` (or `try_with_all()` /
+`try_register_all()` to get a `RegisterError` instead of a panic, e.g. on a child
+scope). That registers every function, but not the overloads that live on the
+`Env` (`string(<IP>)`, `string(<CIDR>)`), which need `new_env()`.
 
 ## CRD Validation Pipeline
 
@@ -230,7 +238,7 @@ let warnings = analyze_rule(
 `url`, `isURL`, `getScheme`, `getHost`, `getHostname`, `getPort`, `getEscapedPath`, `getQuery`
 
 ### IP / CIDR
-`ip`, `isIP`, `isIPv4`, `isIPv6`, `ip.isCanonical`, `family`, `isLoopback`, `isUnspecified`, `isLinkLocalMulticast`, `isLinkLocalUnicast`, `isGlobalUnicast`, `<IP>.string()`, `cidr`, `isCIDR`, `isCIDRv4`, `isCIDRv6`, `containsIP`, `containsCIDR`, `prefixLength`, `masked`, `<CIDR>.ip()`, `<CIDR>.string()`
+`ip`, `isIP`, `isIPv4`, `isIPv6`, `ip.isCanonical`, `family`, `isLoopback`, `isUnspecified`, `isLinkLocalMulticast`, `isLinkLocalUnicast`, `isGlobalUnicast`, `string(<IP>)`, `cidr`, `isCIDR`, `isCIDRv4`, `isCIDRv6`, `containsIP`, `containsCIDR`, `prefixLength`, `masked`, `<CIDR>.ip()`, `string(<CIDR>)` (the `string` overloads need `new_env()`; the member form `<IP>.string()` is an error, as in the apiserver)
 
 ### Semver
 `semver`, `isSemver`, `major`, `minor`, `patch`, `isGreaterThan`, `isLessThan`, `compareTo`
@@ -322,7 +330,8 @@ breaking changes (the Cargo convention for `0.x`).
 Two stability tiers, by surface:
 
 - **Tier 1 — registration (committed).** The `KubeCelExt` trait
-  (`with_all`/`register_all`), the `pub use cel` re-export, and the set of
+  (`with_all`/`register_all` and their `try_` forms), the `new_env`/`new_context`
+  constructors, the `pub use cel` re-export, and the set of
   registered Kubernetes CEL functions. This is the crate's core identity and
   changes only deliberately.
 - **Tier 2 — validation engine (evolving, `validation` feature).** `Validator`,

@@ -4,15 +4,17 @@
 //! matching `cel-go/ext/strings.go` format implementation.
 
 use cel::{
-    Context, ExecutionError, ResolveResult,
+    ExecutionError, ResolveResult,
     extractors::This,
     objects::{Key, Value},
 };
 use std::sync::Arc;
 
+use crate::functions::Registrar;
+
 /// Register the format function.
-pub(crate) fn register(ctx: &mut Context<'_>) {
-    ctx.add_function("format", format_string);
+pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
+    r.add("format", format_string);
 }
 
 /// `<string>.format(<list>) -> string`
@@ -320,11 +322,11 @@ fn extract_float(val: &Value, verb: char) -> Result<f64, ExecutionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel::Program;
+    use cel::{Context, Program};
 
     fn eval(expr: &str) -> Value {
         let mut ctx = Context::default();
-        register(&mut ctx);
+        crate::functions::register_parts(&mut ctx, &[register]);
         Program::compile(expr).unwrap().execute(&ctx).unwrap()
     }
 
@@ -419,7 +421,7 @@ mod tests {
     #[test]
     fn test_format_too_few_args() {
         let mut ctx = Context::default();
-        register(&mut ctx);
+        crate::functions::register_parts(&mut ctx, &[register]);
         let result = Program::compile("'%s %s'.format(['only_one'])")
             .unwrap()
             .execute(&ctx);
@@ -429,7 +431,7 @@ mod tests {
     #[test]
     fn test_format_unknown_verb() {
         let mut ctx = Context::default();
-        register(&mut ctx);
+        crate::functions::register_parts(&mut ctx, &[register]);
         let result = Program::compile("'%z'.format([1])").unwrap().execute(&ctx);
         assert!(result.is_err());
     }
@@ -438,7 +440,7 @@ mod tests {
 
     fn eval_err(expr: &str) -> cel::ExecutionError {
         let mut ctx = Context::default();
-        register(&mut ctx);
+        crate::functions::register_parts(&mut ctx, &[register]);
         Program::compile(expr).unwrap().execute(&ctx).unwrap_err()
     }
 
@@ -521,7 +523,7 @@ mod tests {
     fn test_format_hex_bytes() {
         // Bytes hex encoding with leading zeros preserved
         let mut ctx = Context::default();
-        register(&mut ctx);
+        crate::functions::register_parts(&mut ctx, &[register]);
         let result = Program::compile("'%x'.format([b'\\x00\\x00AB'])")
             .unwrap()
             .execute(&ctx)
