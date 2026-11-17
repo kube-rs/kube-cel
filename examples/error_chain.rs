@@ -25,16 +25,16 @@ fn main() {
             // (2) the rule references a field that isn't there -> EvaluationError
             //     (compiles fine, errors at runtime; the cel error is the cause)
             {"rule": "self.maxSurge > 0", "message": "maxSurge must be positive"},
-            // (3) the rule uses a CEL macro cel 0.13 can't evaluate -> UnsupportedReference
-            {"rule": "self.zones.sortBy(z, z) == self.zones", "message": "zones must be sorted"}
+            // (3) the rule calls a function outside the apiserver's CEL environment
+            //     (the `math` library) -> UnsupportedReference
+            {"rule": "math.abs(self.replicas) <= 10", "message": "replicas out of range"}
         ],
         "properties": {
-            "replicas": {"type": "integer"},
-            "zones": {"type": "array", "items": {"type": "string"}}
+            "replicas": {"type": "integer"}
         }
     });
 
-    let object = json!({"replicas": 0, "zones": ["b", "a"]});
+    let object = json!({"replicas": 0});
 
     let errors = Validator::new()
         .validate(&schema, &object, None)
@@ -56,7 +56,7 @@ fn main() {
                 println!("  -> the rule failed at runtime; likely a malformed object");
             }
             ErrorKind::UnsupportedReference => {
-                println!("  -> coverage gap: this kube-cel build can't evaluate the rule");
+                println!("  -> the rule references something kube-cel can't evaluate");
             }
             _ => println!("  -> other ({:?})", err.kind),
         }

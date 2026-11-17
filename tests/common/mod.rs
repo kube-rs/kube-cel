@@ -376,5 +376,153 @@ pub fn cases() -> Vec<ParityCase> {
             expect: Expect::Accept,
             note: "format:byte binds as bytes → size()==5 → ACCEPT (F3)",
         },
+        // ── cel 0.16 validation environment (kube-rs/kube-cel#14) ─────────────
+        // The validation env enables `cel`'s upstream `lists` extension and the
+        // two-variable comprehensions, which the apiserver's base environment
+        // has; before 0.9 these were UnsupportedReference (fail-closed). Bounded
+        // lists keep the apiserver's cost estimate under the per-rule budget.
+        ParityCase {
+            kind: "PsortBy",
+            plural: "psortbys",
+            schema: json!({
+                "type": "object",
+                "properties": { "l": { "type": "array", "maxItems": 10, "items": {"type": "integer"} } },
+                "x-kubernetes-validations": [{ "rule": "self.l.sortBy(x, -x) == [3, 2, 1]", "message": "sortBy" }]
+            }),
+            object: json!({ "l": [1, 3, 2] }),
+            expect: Expect::Accept,
+            note: "sortBy (upstream lists macro) evaluates → ACCEPT",
+        },
+        ParityCase {
+            kind: "PsortByNo",
+            plural: "psortbynos",
+            schema: json!({
+                "type": "object",
+                "properties": { "l": { "type": "array", "maxItems": 10, "items": {"type": "integer"} } },
+                "x-kubernetes-validations": [{ "rule": "self.l.sortBy(x, x) == self.l", "message": "sorted" }]
+            }),
+            object: json!({ "l": [1, 3, 2] }),
+            expect: Expect::Reject,
+            note: "sortBy on an unsorted list differs from the list → REJECT",
+        },
+        ParityCase {
+            kind: "PtwoVar",
+            plural: "ptwovars",
+            schema: json!({
+                "type": "object",
+                "properties": { "l": { "type": "array", "maxItems": 10, "items": {"type": "integer"} } },
+                "x-kubernetes-validations": [{
+                    "rule": "self.l.all(i, v, v >= i) && self.l.transformList(i, v, v * 2) == [2, 6, 4]",
+                    "message": "two-var"
+                }]
+            }),
+            object: json!({ "l": [1, 3, 2] }),
+            expect: Expect::Accept,
+            note: "two-variable all/transformList evaluate → ACCEPT",
+        },
+        ParityCase {
+            kind: "PtwoVarNo",
+            plural: "ptwovarnos",
+            schema: json!({
+                "type": "object",
+                "properties": { "l": { "type": "array", "maxItems": 10, "items": {"type": "integer"} } },
+                "x-kubernetes-validations": [{ "rule": "self.l.all(i, v, i < 2)", "message": "two-var" }]
+            }),
+            object: json!({ "l": [1, 3, 2] }),
+            expect: Expect::Reject,
+            note: "two-variable all with a failing index predicate → REJECT",
+        },
+        ParityCase {
+            kind: "PlistsExt",
+            plural: "plistsexts",
+            schema: json!({
+                "type": "object",
+                "properties": { "l": { "type": "array", "maxItems": 10, "items": {"type": "integer"} } },
+                "x-kubernetes-validations": [{
+                    "rule": "self.l.sort() == [1, 2, 3] && self.l.reverse() == [2, 3, 1] && self.l.slice(0, 2) == [1, 3] && lists.range(3) == [0, 1, 2]",
+                    "message": "lists"
+                }]
+            }),
+            object: json!({ "l": [1, 3, 2] }),
+            expect: Expect::Accept,
+            note: "upstream lists sort/reverse/slice/range evaluate → ACCEPT",
+        },
+        // `string(<IP>)` is an Env overload in 0.9 (the member form is gone).
+        ParityCase {
+            kind: "PstrIp",
+            plural: "pstrips",
+            schema: json!({
+                "type": "object",
+                "properties": { "a": { "type": "string", "maxLength": 64 } },
+                "x-kubernetes-validations": [{ "rule": "string(ip(self.a)) == '10.0.0.1'", "message": "ip" }]
+            }),
+            object: json!({ "a": "10.0.0.1" }),
+            expect: Expect::Accept,
+            note: "global string(ip(..)) → ACCEPT",
+        },
+        // Outside the apiserver's base environment: rejected at registration.
+        // kube-cel's validation env leaves these out too (fail-closed, see
+        // tests/apiserver_divergence.rs); `math.*` and `isIPv4` used to pass
+        // client-side (fail-open).
+        ParityCase {
+            kind: "PcelBind",
+            plural: "pcelbinds",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "cel.bind(x, 2, x > 0)", "message": "bind" }]
+            }),
+            object: Value::Null,
+            expect: Expect::RegistrationRejected,
+            note: "cel.bind is not in the base env → rejected at registration",
+        },
+        ParityCase {
+            kind: "Pmath",
+            plural: "pmaths",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "math.ceil(1.2) > 0.0", "message": "math" }]
+            }),
+            object: Value::Null,
+            expect: Expect::RegistrationRejected,
+            note: "math.* is not in the base env → rejected at registration",
+        },
+        ParityCase {
+            kind: "PisIPv4",
+            plural: "pisipv4s",
+            schema: json!({
+                "type": "object",
+                "properties": { "a": { "type": "string", "maxLength": 64 } },
+                "x-kubernetes-validations": [{ "rule": "isIPv4(self.a)", "message": "ipv4" }]
+            }),
+            object: Value::Null,
+            expect: Expect::RegistrationRejected,
+            note: "isIPv4 is a kube-cel extra, not in the base env → rejected at registration",
+        },
+        ParityCase {
+            kind: "PipMember",
+            plural: "pipmembers",
+            schema: json!({
+                "type": "object",
+                "properties": { "a": { "type": "string", "maxLength": 64 } },
+                "x-kubernetes-validations": [{ "rule": "ip(self.a).string() == '10.0.0.1'", "message": "ip" }]
+            }),
+            object: Value::Null,
+            expect: Expect::RegistrationRejected,
+            note: "member <IP>.string() has no overload → rejected at registration",
+        },
+        ParityCase {
+            kind: "PstrRev",
+            plural: "pstrrevs",
+            schema: json!({
+                "type": "object",
+                "properties": { "s": { "type": "string", "maxLength": 64 } },
+                "x-kubernetes-validations": [{ "rule": "self.s.reverse() == 'cba'", "message": "reverse" }]
+            }),
+            object: Value::Null,
+            expect: Expect::RegistrationRejected,
+            note: "string reverse() has no overload → rejected at registration",
+        },
     ]
 }

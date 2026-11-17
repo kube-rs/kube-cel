@@ -349,21 +349,29 @@ pinned by `tests/apiserver_divergence.rs`.
 
 | Feature | API server | kube-cel | Direction |
 |---------|-----------|----------|-----------|
-| `<list>.sortBy(var, expr)` | evaluates | `UnsupportedReference` | fail-closed |
-| `cel.bind(var, init, expr)` | evaluates | `UnsupportedReference` | fail-closed |
-| Two-arg comprehensions (`all(i, v, …)`, `transformList`, `transformMap`; K8s 1.33+) | evaluates | `UnsupportedReference` | fail-closed |
+| `cel.bind(var, init, expr)` | rejects the CRD at registration (no `ext.Bindings` in the base environment) | `UnsupportedReference` | fail-closed |
+| `math.*` (cel-go `ext.Math`) | rejects the CRD at registration (not in the base environment) | `UnsupportedReference` | fail-closed |
+| `isIPv4`, `isIPv6`, `isCIDRv4`, `isCIDRv6` (kube-cel conveniences) | rejects the CRD at registration (not in the base environment) | `UnsupportedReference` | fail-closed |
+| String `reverse()` (`'abc'.reverse()`) | rejects the CRD at registration (no matching overload) | `EvaluationError` | fail-closed |
 | Schema nesting deeper than 64 levels | enforces (rejects over-limit schemas at registration) | `SchemaTooDeep` error | fail-closed |
 | Rule whose `messageExpression` does not compile | rejects the CRD at registration | `CompilationFailure` (the rule is rejected, not just its message) | fail-closed |
 | Authz library (`authorizer.*`) | evaluates against the cluster | not available | out of scope |
 
-The unsupported CEL macros above **parse** successfully but error at evaluation
-(`cel` 0.13 has no such reference), so they surface as the dedicated
-`ErrorKind::UnsupportedReference` — distinct from `EvaluationError` (reserved for
-genuine runtime errors in a supported rule), so a consumer can tell a kube-cel
-coverage gap apart from an actual rule failure. Single-argument comprehensions
-(`list.all(x, …)`, `map(x, …)`, etc.) are fully supported and do not diverge.
-The macro gaps lift once the `cel` crate gains compiler-macro support; the authz
-library requires a live API server and is out of scope for a client library.
+The validation pipeline compiles and runs rules in its own `cel` environment,
+modelled on the apiserver's base CEL environment (`k8s.io/apiserver`
+`environment.MustBaseEnvSet(..).NewExpressionsEnv()`): it enables `cel`'s
+`lists` extension (`sortBy`, `slice`, `flatten`, `distinct`, `reverse`, `sort`,
+`lists.range`) and the two-variable comprehensions (`all(i, v, …)`,
+`transformList`, `transformMap`, …), which evaluate as in the apiserver, and it
+leaves out what the base environment lacks: `cel.bind`, the `math` library and
+kube-cel's `isIPv4`-style helpers. (These stay available through `new_env()` /
+`KubeCelExt` for general-purpose use.) `cel` has no type checker, so a rule using
+one of them still **parses** and errors only at evaluation; it surfaces as the
+dedicated `ErrorKind::UnsupportedReference`, distinct from `EvaluationError`
+(reserved for genuine runtime errors in a supported rule), so a consumer can tell
+a reference kube-cel cannot evaluate apart from an actual rule failure. Either
+way the object is rejected. The authz library requires a live API server and is
+out of scope for a client library.
 
 ## Related
 

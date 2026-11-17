@@ -46,21 +46,68 @@ mod value_ops;
 /// [`finish`](Registrar::finish).
 pub(crate) struct Registrar<'c, 'p, 'v> {
     ctx: &'c mut cel::Context<'p, 'v>,
+    profile: Profile,
     error: Option<crate::RegisterError>,
 }
 
+/// Which function set a [`Registrar`] registers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Profile {
+    /// Every compiled-in function: the public [`KubeCelExt`](crate::KubeCelExt)
+    /// and [`new_context`](crate::new_context) surface.
+    General,
+    /// The validation engine's set, mirroring the apiserver's base CEL
+    /// environment: see [`VALIDATION_EXCLUDED`] and [`register_profile`].
+    #[cfg_attr(not(feature = "validation"), allow(dead_code))]
+    Validation,
+}
+
+/// Names the [`Profile::Validation`] set leaves out, on top of the whole
+/// `math` library.
+///
+/// - `slice`, `flatten`, `distinct`, `reverse`, `sort`, `lists.range`: the
+///   validation `Env` enables `cel`'s upstream `lists` extension, which declares
+///   these as overloads (so `cel` would refuse kube-cel's versions anyway). Its
+///   implementations are used instead; string `reverse` goes away with
+///   kube-cel's `reverse`, as in the apiserver.
+/// - `isIPv4`, `isIPv6`, `isCIDRv4`, `isCIDRv6`: kube-cel conveniences the
+///   apiserver does not have. A rule using one must not pass client-side when
+///   the apiserver rejects it.
+const VALIDATION_EXCLUDED: &[&str] = &[
+    "slice",
+    "flatten",
+    "distinct",
+    "reverse",
+    "sort",
+    "lists.range",
+    "isIPv4",
+    "isIPv6",
+    "isCIDRv4",
+    "isCIDRv6",
+];
+
+impl Profile {
+    fn excludes(self, name: &str) -> bool {
+        match self {
+            Profile::General => false,
+            Profile::Validation => VALIDATION_EXCLUDED.contains(&name),
+        }
+    }
+}
+
 impl<'c, 'p, 'v> Registrar<'c, 'p, 'v> {
-    pub(crate) fn new(ctx: &'c mut cel::Context<'p, 'v>) -> Self {
+    pub(crate) fn new(ctx: &'c mut cel::Context<'p, 'v>, profile: Profile) -> Self {
         let error = (!matches!(ctx, cel::Context::Root { .. })).then_some(crate::RegisterError::ChildScope);
-        Self { ctx, error }
+        Self { ctx, profile, error }
     }
 
-    /// Adds `f` as `name`, unless an earlier step already failed.
+    /// Adds `f` as `name`, unless an earlier step already failed or the
+    /// profile leaves `name` out.
     pub(crate) fn add<T: 'static, F>(&mut self, name: &str, f: F)
     where
         F: cel::extractors::IntoFunction<T> + 'static + Send + Sync,
     {
-        if self.error.is_some() {
+        if self.error.is_some() || self.profile.excludes(name) {
             return;
         }
         if let Err(source) = self.ctx.add_function(name, f) {
@@ -93,7 +140,18 @@ pub(crate) fn declare_overloads(env: &mut cel::Env) -> Result<(), cel::Declarati
 /// kept as a free function so the in-crate callers (vap, validation, …) can
 /// invoke it without importing the trait.
 pub(crate) fn register_all(ctx: &mut cel::Context<'_, '_>) -> Result<(), crate::RegisterError> {
-    let mut r = Registrar::new(ctx);
+    register_profile(ctx, Profile::General)
+}
+
+/// Registers the `profile`'s function set into `ctx`.
+///
+/// [`Profile::Validation`] leaves out the `math` library and the names in
+/// [`VALIDATION_EXCLUDED`], none of which the apiserver's base environment has.
+pub(crate) fn register_profile(
+    ctx: &mut cel::Context<'_, '_>,
+    profile: Profile,
+) -> Result<(), crate::RegisterError> {
+    let mut r = Registrar::new(ctx, profile);
 
     #[cfg(feature = "strings")]
     strings::register(&mut r);
@@ -129,7 +187,9 @@ pub(crate) fn register_all(ctx: &mut cel::Context<'_, '_>) -> Result<(), crate::
     named_format::register(&mut r);
 
     #[cfg(feature = "math")]
-    math::register(&mut r);
+    if profile == Profile::General {
+        math::register(&mut r);
+    }
 
     #[cfg(feature = "encoders")]
     encoders::register(&mut r);
@@ -147,7 +207,7 @@ pub(crate) fn register_all(ctx: &mut cel::Context<'_, '_>) -> Result<(), crate::
 #[cfg(test)]
 #[allow(dead_code)] // unused when no function feature is enabled
 pub(crate) fn register_parts(ctx: &mut cel::Context<'_, '_>, parts: &[fn(&mut Registrar<'_, '_, '_>)]) {
-    let mut r = Registrar::new(ctx);
+    let mut r = Registrar::new(ctx, Profile::General);
     for part in parts {
         part(&mut r);
     }

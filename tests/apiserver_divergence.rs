@@ -13,12 +13,16 @@
 //! change silently. The human-readable summary lives in the README
 //! "apiserver divergence" table — keep the two in sync.
 //!
-//! Measured against `cel` 0.13: the unsupported CEL macros below **parse**
-//! successfully but fail at evaluation with an "Undeclared reference" error, so
-//! through the Validator they surface as [`ErrorKind::UnsupportedReference`]
-//! (a coverage gap), *not* `CompilationFailure` and not a generic
-//! `EvaluationError` — the latter is reserved for genuine runtime errors in a
-//! supported rule.
+//! Measured against `cel` 0.16, with ground truth from the apiserver's base
+//! CEL environment (`k8s.io/apiserver` v0.36.1,
+//! `environment.MustBaseEnvSet(1.36).NewExpressionsEnv()`). `cel` has no type
+//! checker, so a rule the apiserver rejects at CRD registration because it
+//! references something its environment lacks (`cel.bind`, `math.*`,
+//! `isIPv4`, ...) still **parses** in kube-cel and fails at evaluation with an
+//! "Undeclared reference" error. Through the Validator that surfaces as
+//! [`ErrorKind::UnsupportedReference`], *not* `CompilationFailure` and not a
+//! generic `EvaluationError`, which is reserved for genuine runtime errors in a
+//! supported rule. Either way the object is rejected: fail-closed.
 #![cfg(feature = "validation")]
 
 use kube_cel::{ErrorKind, ValidationErrors, Validator};
@@ -38,44 +42,119 @@ fn run_rule(rule: &str) -> Result<(), ValidationErrors> {
     Validator::new().validate(&schema, &object, None)
 }
 
-/// Asserts a rule fails closed: the apiserver would accept it, but kube-cel
-/// rejects it with an `UnsupportedReference` because `cel` 0.13 lacks the macro.
-fn assert_unsupported_macro(feature: &str, rule: &str) {
+/// Asserts a rule fails closed with an `UnsupportedReference`: the apiserver
+/// rejects the CRD at registration because its environment lacks what the rule
+/// references; kube-cel parses it and rejects the object at evaluation.
+fn assert_unsupported_reference(feature: &str, rule: &str) {
     let errors = run_rule(rule).unwrap_err();
     assert!(
         errors.iter().any(|e| e.kind == ErrorKind::UnsupportedReference),
-        "{feature}: expected fail-closed UnsupportedReference (unsupported macro), got {errors:?}"
+        "{feature}: expected fail-closed UnsupportedReference, got {errors:?}"
     );
 }
 
-// ── Unsupported CEL macros (cel-crate gated) — all fail CLOSED ──────────────
-// apiserver: supported, rule evaluates normally.
+// ── Outside the apiserver's base CEL environment — all fail CLOSED ──────────
+// apiserver: rejects the CRD at registration ("undeclared reference"); its
+//            base environment has no `ext.Bindings`, no `ext.Math`, and none of
+//            kube-cel's `isIPv4`/`isIPv6`/`isCIDRv4`/`isCIDRv6` conveniences.
 // kube-cel:  UnsupportedReference ("Undeclared reference"), object rejected.
-
-#[test]
-fn sort_by_fails_closed() {
-    assert_unsupported_macro("sortBy", "self.items.sortBy(x, x) == [1, 2, 3]");
-}
+//            The validation environment leaves these out, so a rule using one
+//            can never pass client-side (it used to, for `math.*` and
+//            `isIPv4`-style functions: a fail-OPEN divergence).
 
 #[test]
 fn cel_bind_fails_closed() {
-    assert_unsupported_macro("cel.bind", "cel.bind(s, self.items.size(), s > 0)");
+    assert_unsupported_reference("cel.bind", "cel.bind(s, self.items.size(), s > 0)");
 }
 
 #[test]
-fn two_var_comprehension_fails_closed() {
-    // K8s 1.33+ two-argument comprehensions. The one-arg form works (see
-    // `one_arg_comprehension_is_supported` below); only the two-arg form diverges.
-    assert_unsupported_macro("all(i, v, …)", "self.items.all(i, v, v > 0)");
-    assert_unsupported_macro(
-        "transformList",
-        "self.items.transformList(i, v, v * 2).size() == 3",
+fn math_library_fails_closed() {
+    assert_unsupported_reference("math.ceil", "math.ceil(1.2) > 0.0");
+    assert_unsupported_reference("math.greatest", "math.greatest(self.items) == 3");
+    assert_unsupported_reference("math.abs", "math.abs(self.items[0]) == 3");
+}
+
+#[test]
+fn ip_version_helpers_fail_closed() {
+    assert_unsupported_reference("isIPv4", "isIPv4('192.168.0.1')");
+    assert_unsupported_reference("isIPv6", "isIPv6('::1')");
+    assert_unsupported_reference("isCIDRv4", "isCIDRv4('10.0.0.0/8')");
+    assert_unsupported_reference("isCIDRv6", "isCIDRv6('fd00::/8')");
+}
+
+/// The apiserver has no string `reverse()` (its `reverse` is the list one):
+/// the CRD is rejected at registration ("found no matching overload"). kube-cel
+/// has no matching overload at evaluation either, so the object is rejected,
+/// as an `EvaluationError` rather than an `UnsupportedReference`.
+#[test]
+fn string_reverse_fails_closed() {
+    let errors = run_rule("'abc'.reverse() == 'cba'").unwrap_err();
+    assert!(
+        errors.iter().any(|e| e.kind == ErrorKind::EvaluationError),
+        "string reverse(): expected fail-closed EvaluationError, got {errors:?}"
     );
 }
 
-/// Control: the single-argument comprehension IS supported, so it does not
-/// diverge — proving the two-arg failures above are about the two-var form,
-/// not comprehensions in general.
+// ── `lists` extension and two-variable comprehensions — faithful since 0.9 ──
+// apiserver: evaluates (`ext.Lists` and `ext.TwoVarComprehensions` are in the
+//            base environment).
+// kube-cel:  evaluates too, through `cel`'s upstream extensions. Before 0.9
+//            these surfaced as UnsupportedReference (fail-closed).
+
+/// Asserts the rule evaluates to `true` against `{"items": [3, 1, 2]}`.
+fn assert_passes(rule: &str) {
+    let result = run_rule(rule);
+    assert!(
+        result.is_ok(),
+        "{rule}: expected the rule to pass, got {result:?}"
+    );
+}
+
+/// Asserts the rule evaluates to `false`: proof the passing case above is a
+/// real evaluation, not a blanket accept.
+fn assert_fails_validation(rule: &str) {
+    let errors = run_rule(rule).unwrap_err();
+    assert!(
+        errors.iter().any(|e| e.kind == ErrorKind::ValidationFailure),
+        "{rule}: expected ValidationFailure, got {errors:?}"
+    );
+}
+
+#[test]
+fn sort_by_evaluates() {
+    assert_passes("self.items.sortBy(x, x) == [1, 2, 3]");
+    assert_passes("self.items.sortBy(x, -x) == [3, 2, 1]");
+    assert_fails_validation("self.items.sortBy(x, x) == self.items");
+}
+
+#[test]
+fn two_var_comprehension_evaluates() {
+    assert_passes("self.items.all(i, v, v > 0)");
+    assert_passes("self.items.exists(i, v, i == 1 && v == 1)");
+    assert_passes("self.items.transformList(i, v, v * 2) == [6, 2, 4]");
+    assert_fails_validation("self.items.all(i, v, i < 2)");
+}
+
+#[test]
+fn upstream_list_functions_evaluate() {
+    assert_passes("self.items.sort() == [1, 2, 3]");
+    assert_passes("self.items.reverse() == [2, 1, 3]");
+    assert_passes("self.items.slice(0, 2) == [3, 1]");
+    assert_passes("[self.items, [4]].flatten() == [3, 1, 2, 4]");
+    assert_passes("(self.items + self.items).distinct() == [3, 1, 2]");
+    assert_passes("lists.range(3) == [0, 1, 2]");
+}
+
+/// kube-cel's own Kubernetes list functions (feature `lists`) stay alongside
+/// the upstream ones.
+#[test]
+#[cfg(feature = "lists")]
+fn kubernetes_list_functions_coexist() {
+    assert_passes("!self.items.isSorted() && self.items.sum() == 6 && self.items.min() == 1");
+}
+
+/// Control: the single-argument comprehension is supported alongside the
+/// two-variable form above; enabling the two-variable macros must not shadow it.
 #[test]
 fn one_arg_comprehension_is_supported() {
     let result = run_rule("self.items.all(x, x > 0)");

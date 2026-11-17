@@ -26,6 +26,24 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   and registers nothing; on a context whose `Env` already declares one of
   kube-cel's names, `cel` 0.16 refuses the name. Both used to pass silently.
   Neither happens on `Context::default()` or on `new_env()`.
+- **The validation engine's CEL environment now mirrors the apiserver's base
+  environment** (`k8s.io/apiserver` `environment.MustBaseEnvSet(..)`), separate
+  from the general-purpose `new_env()`. Runtime verdicts change:
+  - Rules using the `math` library or kube-cel's `isIPv4` / `isIPv6` /
+    `isCIDRv4` / `isCIDRv6` are now rejected (`ErrorKind::UnsupportedReference`).
+    The apiserver rejects such a CRD at registration, so these used to pass
+    client-side for rules the apiserver never accepts: a **fail-open**
+    divergence, now closed.
+  - String `reverse()` (`'abc'.reverse()`) is rejected (`EvaluationError`), as
+    the apiserver rejects it at registration.
+  - `sortBy`, the two-variable comprehensions (`all(i, v, …)`, `exists`,
+    `transformList`, `transformMap`, …) and the list functions `slice`,
+    `flatten`, `distinct`, `reverse`, `sort` and `lists.range` now evaluate
+    (through `cel`'s upstream `lists` and two-variable comprehension
+    extensions) instead of failing closed with `UnsupportedReference`.
+  - Migration: none for rules the apiserver accepts. `math` and the
+    `isIPv4`-style helpers remain available through `new_env()` /
+    `KubeCelExt` for general-purpose evaluation.
 
 ### Added
 - `new_env() -> cel::Env`: the `cel` standard library plus the overloads
@@ -40,6 +58,16 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
 - The validation engine (`Validator`, `compile_schema`, `VapEvaluator`, static
   analysis) compiles with `Env::compile` on a shared, private `Env` instead of
   `Program::compile`, so it sees the environment's macros and overloads.
+- The `UnsupportedReference` message no longer blames an unsupported CEL macro;
+  the remaining cases are references outside the Kubernetes CEL environment or
+  a feature disabled at compile time.
+
+### Fixed
+- README "apiserver divergence" table: the apiserver does **not** evaluate
+  `cel.bind` (its base environment has no `ext.Bindings`); it rejects the CRD at
+  registration. The `sortBy` and two-variable comprehension rows are gone (both
+  now evaluate), and rows for `math.*`, the `isIPv4`-style helpers and string
+  `reverse()` are added (all fail closed).
 
 ## [0.8.0] - 2026-06-19
 

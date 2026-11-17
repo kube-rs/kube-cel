@@ -24,18 +24,37 @@ use std::sync::{Arc, LazyLock};
 /// against, shared by every [`Validator`], [`compile_schema`](crate::compile_schema)
 /// call and [`VapEvaluator`](crate::VapEvaluator).
 ///
+/// It mirrors the apiserver's base CEL environment
+/// (`k8s.io/apiserver/pkg/cel/environment`, `MustBaseEnvSet(..).NewExpressionsEnv()`),
+/// as far as `cel` provides it: on top of [`new_env`](crate::new_env) it enables
+/// `cel`'s upstream `lists` extension (`sortBy`, `slice`, `flatten`, `distinct`,
+/// `reverse`, `sort`, `lists.range`) and the two-variable comprehensions
+/// (`all(i, v, ..)`, `transformList`, `transformMap`, ..). It leaves out
+/// `bindings` (`cel.bind`), `network` and `math`, which the apiserver's base
+/// environment does not have; [`base_context`] likewise leaves out kube-cel's
+/// own functions the apiserver lacks.
+///
 /// Rules must compile with [`Env::compile`] on this environment (not
 /// [`cel::Program::compile`], which only knows the standard macros) and run
 /// on a context from [`base_context`].
 pub(crate) fn validation_env() -> &'static Arc<Env> {
-    static ENV: LazyLock<Arc<Env>> = LazyLock::new(|| Arc::new(crate::new_env()));
+    static ENV: LazyLock<Arc<Env>> = LazyLock::new(|| {
+        let mut env = crate::new_env();
+        cel::extensions::lists(&mut env).expect("cel's lists extension fits kube-cel's Env");
+        cel::extensions::two_var_comprehensions(&mut env)
+            .expect("cel's two-variable comprehensions fit kube-cel's Env");
+        Arc::new(env)
+    });
     &ENV
 }
 
-/// A root context on [`validation_env`] with every kube-cel function registered.
+/// A root context on [`validation_env`] with the validation function set
+/// registered (see `Profile::Validation`).
 pub(crate) fn base_context() -> Context<'static, 'static> {
-    crate::new_context(Arc::clone(validation_env()))
-        .expect("kube-cel's functions register onto its validation Env")
+    let mut ctx = Context::with_env(Arc::clone(validation_env()));
+    crate::functions::register_profile(&mut ctx, crate::functions::Profile::Validation)
+        .expect("kube-cel's functions register onto its validation Env");
+    ctx
 }
 
 /// CRD-level context variables available at the root schema node.
@@ -67,12 +86,13 @@ pub enum ErrorKind {
     /// Runtime evaluation error.
     EvaluationError,
     /// The rule referenced a CEL function or identifier this build does not
-    /// provide — typically a CEL macro not yet supported by the `cel` crate
-    /// (`sortBy`, `cel.bind`, the two-argument comprehensions), or an
-    /// extension-function feature disabled at compile time. The rule is
-    /// well-formed but cannot be evaluated client-side, so the object is
-    /// rejected (fail-closed). Distinct from [`Self::EvaluationError`] so
-    /// callers can tell a coverage gap apart from a genuine runtime error.
+    /// provide: one outside the apiserver's base CEL environment, which the
+    /// apiserver rejects at CRD registration too (`cel.bind`, the `math`
+    /// library, kube-cel's `isIPv4`/`isIPv6`/`isCIDRv4`/`isCIDRv6`), or an
+    /// extension-function feature disabled at compile time. The rule parses
+    /// but cannot be evaluated client-side, so the object is rejected
+    /// (fail-closed). Distinct from [`Self::EvaluationError`] so callers can
+    /// tell a coverage gap apart from a genuine runtime error.
     UnsupportedReference,
     /// Schema nesting exceeded the maximum supported depth.
     /// The over-deep subtree was refused rather than skipped, so validation
@@ -812,18 +832,18 @@ impl Validator {
             Err(e) => {
                 // The rule compiled but evaluation failed. An
                 // `UndeclaredReference` means the rule references something this
-                // build does not provide — a cel-gated macro (sortBy/cel.bind/
-                // two-arg comprehensions) or a disabled feature — classified
-                // distinctly so callers can tell a coverage gap from a real
-                // runtime error. Either way the owned `ExecutionError` is the
-                // cause and is preserved via `source()`.
+                // build does not provide (outside the apiserver's base
+                // environment, e.g. `cel.bind` or `math.*`, or a disabled
+                // feature), classified distinctly so callers can tell a coverage
+                // gap from a real runtime error. Either way the owned
+                // `ExecutionError` is the cause and is preserved via `source()`.
                 let (kind, message) = match &e {
                     cel::ExecutionError::UndeclaredReference(name) => (
                         ErrorKind::UnsupportedReference,
                         format!(
                             "rule references '{name}', which this kube-cel build does not support \
-                             (an unsupported CEL macro, or a feature disabled at compile time); \
-                             it cannot be evaluated client-side"
+                             (not in the Kubernetes CEL environment, or a feature disabled at \
+                             compile time); it cannot be evaluated client-side"
                         ),
                     ),
                     _ => (ErrorKind::EvaluationError, format!("rule evaluation error: {e}")),
@@ -936,6 +956,33 @@ mod tests {
             },
             "x-kubernetes-validations": validations
         })
+    }
+
+    /// The validation profile drops kube-cel's `slice`/`flatten`/`distinct`/
+    /// `reverse`/`sort`/`lists.range` because the upstream `lists` extension
+    /// declares them. If upstream stopped declaring one, the validation env
+    /// would silently lose it: pin that each is still declared.
+    #[test]
+    fn upstream_lists_declares_the_dropped_names() {
+        let env = validation_env();
+        for name in ["slice", "flatten", "distinct", "reverse", "sort", "lists.range"] {
+            assert!(
+                env.function(name).is_some(),
+                "upstream lists no longer declares {name}"
+            );
+        }
+    }
+
+    /// Registering the general set onto the validation env must fail: the
+    /// exclusions are what make the validation profile register at all.
+    #[test]
+    #[cfg(any(feature = "lists", feature = "strings"))]
+    fn general_set_collides_with_the_validation_env() {
+        let mut ctx = Context::with_env(Arc::clone(validation_env()));
+        assert!(matches!(
+            crate::register_all(&mut ctx),
+            Err(crate::RegisterError::Rejected { .. })
+        ));
     }
 
     #[test]
