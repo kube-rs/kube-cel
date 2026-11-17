@@ -8,13 +8,19 @@
 
 #![allow(dead_code, unused_imports)]
 
-use cel::{Context, Program, Value};
-use kube_cel::KubeCelExt;
+use kube_cel::cel::{ExecutionError, Value};
 use std::sync::Arc;
 
+/// Evaluates `expr` on `kube_cel::new_env()` and a context from
+/// `kube_cel::new_context`, compiled with `Env::compile`.
+fn try_eval(expr: &str) -> Result<Value, ExecutionError> {
+    let env = Arc::new(kube_cel::new_env());
+    let ctx = kube_cel::new_context(Arc::clone(&env)).unwrap();
+    env.compile(expr).unwrap().execute(&ctx)
+}
+
 fn eval(expr: &str) -> Value {
-    let ctx = Context::default().with_all();
-    Program::compile(expr).unwrap().execute(&ctx).unwrap()
+    try_eval(expr).unwrap()
 }
 
 fn assert_true(expr: &str) {
@@ -37,21 +43,8 @@ fn assert_string(expr: &str, expected: &str) {
     );
 }
 
-/// `string(<IP>)` / `string(<CIDR>)` are overloads on kube-cel's `Env`, so they
-/// need a context from `kube_cel::new_env()` rather than `Context::default()`.
-fn assert_string_on_kube_env(expr: &str, expected: &str) {
-    let env = Arc::new(kube_cel::new_env());
-    let ctx = kube_cel::new_context(Arc::clone(&env)).unwrap();
-    assert_eq!(
-        env.compile(expr).unwrap().execute(&ctx).unwrap(),
-        Value::String(Arc::new(expected.into())),
-        "expected \"{expected}\": {expr}"
-    );
-}
-
 fn assert_runtime_err(expr: &str) {
-    let ctx = Context::default().with_all();
-    let result = Program::compile(expr).unwrap().execute(&ctx);
+    let result = try_eval(expr);
     assert!(result.is_err(), "expected runtime error: {expr}");
 }
 
@@ -247,7 +240,7 @@ mod ip {
 
     #[test]
     fn string_ip_v4() {
-        assert_string_on_kube_env("string(ip(\"192.168.0.1\"))", "192.168.0.1");
+        assert_string("string(ip(\"192.168.0.1\"))", "192.168.0.1");
     }
 }
 
@@ -308,7 +301,7 @@ mod cidr {
 
     #[test]
     fn string_cidr() {
-        assert_string_on_kube_env("string(cidr(\"192.168.0.0/24\"))", "192.168.0.0/24");
+        assert_string("string(cidr(\"192.168.0.0/24\"))", "192.168.0.0/24");
     }
 
     // --- IPv6 ---
@@ -670,14 +663,10 @@ mod lists {
         assert_int("[1, 2, 3].lastIndexOf(4)", -1);
     }
 
-    // min/max global variadic must still work (cel built-in)
+    // The apiserver has no global variadic min/max, only the list members.
     #[test]
-    fn min_global_variadic() {
-        assert_int("min(5, 3)", 3);
-    }
-
-    #[test]
-    fn max_global_variadic() {
-        assert_int("max(5, 3)", 5);
+    fn min_max_global_variadic_is_an_error() {
+        assert_runtime_err("min(5, 3)");
+        assert_runtime_err("max(5, 3)");
     }
 }

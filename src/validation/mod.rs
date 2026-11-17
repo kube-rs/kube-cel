@@ -30,38 +30,25 @@ use std::sync::{Arc, LazyLock};
 
 /// The `cel` environment that CRD rules and VAP expressions compile and run
 /// against, shared by every [`Validator`], [`compile_schema`](crate::compile_schema)
-/// call and [`VapEvaluator`](crate::VapEvaluator).
+/// call and [`VapEvaluator`](crate::VapEvaluator): [`new_env`](crate::new_env),
+/// the same environment general use gets.
 ///
 /// It mirrors the apiserver's base CEL environment
 /// (`k8s.io/apiserver/pkg/cel/environment`, `MustBaseEnvSet(..).NewExpressionsEnv()`),
-/// as far as `cel` provides it: on top of [`new_env`](crate::new_env) it enables
-/// the two-variable comprehensions (`all(i, v, ..)`, `transformList`,
-/// `transformMap`, ..) and, with the `lists` feature, `cel`'s upstream `lists`
-/// extension (`sortBy`, `slice`, `flatten`, `distinct`, `reverse`, `sort`,
-/// `lists.range`). It leaves out `bindings` (`cel.bind`), `network` and `math`,
-/// which the apiserver's base environment does not have.
+/// as far as `cel` provides it. What validation adds is the name check of
+/// [`compile`].
 ///
 /// Rules must compile with [`compile`] (not [`cel::Program::compile`], which
 /// only knows the standard macros) and run on a context from [`base_context`].
 pub(crate) fn validation_env() -> &'static Arc<Env> {
-    static ENV: LazyLock<Arc<Env>> = LazyLock::new(|| {
-        let mut env = crate::new_env();
-        #[cfg(feature = "lists")]
-        cel::extensions::lists(&mut env).expect("cel's lists extension fits kube-cel's Env");
-        cel::extensions::two_var_comprehensions(&mut env)
-            .expect("cel's two-variable comprehensions fit kube-cel's Env");
-        Arc::new(env)
-    });
+    static ENV: LazyLock<Arc<Env>> = LazyLock::new(|| Arc::new(crate::new_env()));
     &ENV
 }
 
-/// A root context on [`validation_env`] with the validation function set
-/// registered (see `Profile::Validation`).
+/// A root context on [`validation_env`] with kube-cel's functions registered:
+/// [`new_context`](crate::new_context).
 pub(crate) fn base_context() -> Context<'static, 'static> {
-    let mut ctx = Context::with_env(Arc::clone(validation_env()));
-    crate::functions::register_profile(&mut ctx, crate::functions::Profile::Validation)
-        .expect("kube-cel's functions register onto its validation Env");
-    ctx
+    crate::new_context(Arc::clone(validation_env())).expect("kube-cel's functions register onto its Env")
 }
 
 /// Compiles a CRD rule, a VAP expression or either's `messageExpression` on
@@ -1301,33 +1288,6 @@ mod tests {
         })
     }
 
-    /// The validation profile drops kube-cel's `slice`/`flatten`/`distinct`/
-    /// `reverse`/`sort`/`lists.range` because the upstream `lists` extension
-    /// declares them. If upstream stopped declaring one, the validation env
-    /// would silently lose it: pin that each is still declared.
-    #[test]
-    #[cfg(feature = "lists")]
-    fn upstream_lists_declares_the_dropped_names() {
-        let env = validation_env();
-        for name in ["slice", "flatten", "distinct", "reverse", "sort", "lists.range"] {
-            assert!(
-                env.function(name).is_some(),
-                "upstream lists no longer declares {name}"
-            );
-        }
-    }
-
-    /// Registering the general set onto the validation env must fail: the
-    /// exclusions are what make the validation profile register at all.
-    #[test]
-    #[cfg(feature = "lists")]
-    fn general_set_collides_with_the_validation_env() {
-        let mut ctx = Context::with_env(Arc::clone(validation_env()));
-        assert!(matches!(
-            crate::register_all(&mut ctx),
-            Err(crate::RegisterError::Rejected { .. })
-        ));
-    }
 
     #[test]
     fn validation_passes() {

@@ -226,9 +226,9 @@ fn literal(v: &Value) -> Option<String> {
 fn kube_cel_eval(expr: &str) -> Result<Value, String> {
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
-    // The validation engine's environment and function set (the apiserver's
-    // base environment as far as kube-cel models it), not the general-purpose
-    // `with_all()` context: the probe measures what `Validator` evaluates.
+    // The validation engine's compile path (with the name check) on its
+    // environment, the apiserver's base environment as far as kube-cel models
+    // it: the probe measures what `Validator` evaluates.
     let caught = std::panic::catch_unwind(|| {
         let program = super::compile(expr).map_err(|e| format!("compile: {e}"))?;
         program

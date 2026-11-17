@@ -317,14 +317,6 @@ fn join(This(this): This<Arc<Vec<Value>>>, Arguments(args): Arguments) -> Resolv
     Ok(Value::String(Arc::new(parts.join(&separator))))
 }
 
-/// `<string>.reverse() -> <string>`
-///
-/// Returns a new string with the characters in reverse order.
-pub(crate) fn string_reverse(This(this): This<Arc<String>>) -> ResolveResult {
-    let reversed: String = this.chars().rev().collect();
-    Ok(Value::String(Arc::new(reversed)))
-}
-
 /// `strings.quote(<string>) -> <string>`
 fn strings_quote(s: Arc<String>) -> ResolveResult {
     let mut escaped = String::with_capacity(s.len() + 2);
@@ -350,12 +342,9 @@ fn strings_quote(s: Arc<String>) -> ResolveResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel::{Context, Program};
 
     fn eval(expr: &str) -> Value {
-        let mut ctx = Context::default();
-        crate::functions::register_parts(&mut ctx, &[register, crate::functions::dispatch::register]);
-        Program::compile(expr).unwrap().execute(&ctx).unwrap()
+        crate::functions::eval(expr).unwrap()
     }
 
     #[test]
@@ -444,9 +433,7 @@ mod tests {
     // --- Error & edge case tests ---
 
     fn eval_err(expr: &str) -> cel::ExecutionError {
-        let mut ctx = Context::default();
-        crate::functions::register_parts(&mut ctx, &[register, crate::functions::dispatch::register]);
-        Program::compile(expr).unwrap().execute(&ctx).unwrap_err()
+        crate::functions::eval(expr).unwrap_err()
     }
 
     #[test]
@@ -591,13 +578,6 @@ mod tests {
             eval("['a', 'b', 'c'].join()"),
             Value::String(Arc::new("abc".into()))
         );
-    }
-
-    #[test]
-    fn test_string_reverse() {
-        assert_eq!(eval("'hello'.reverse()"), Value::String(Arc::new("olleh".into())));
-        assert_eq!(eval("''.reverse()"), Value::String(Arc::new("".into())));
-        assert_eq!(eval("'a'.reverse()"), Value::String(Arc::new("a".into())));
     }
 
     #[test]

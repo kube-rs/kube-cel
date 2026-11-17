@@ -501,12 +501,9 @@ fn extract_float(val: &Value, verb: char) -> Result<f64, ExecutionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel::{Context, Program};
 
     fn eval(expr: &str) -> Value {
-        let mut ctx = Context::default();
-        crate::functions::register_parts(&mut ctx, &[register]);
-        Program::compile(expr).unwrap().execute(&ctx).unwrap()
+        crate::functions::eval(expr).unwrap()
     }
 
     fn eval_str(expr: &str) -> String {
@@ -591,28 +588,20 @@ mod tests {
 
     #[test]
     fn test_format_too_few_args() {
-        let mut ctx = Context::default();
-        crate::functions::register_parts(&mut ctx, &[register]);
-        let result = Program::compile("'%s %s'.format(['only_one'])")
-            .unwrap()
-            .execute(&ctx);
+        let result = crate::functions::eval("'%s %s'.format(['only_one'])");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_format_unknown_verb() {
-        let mut ctx = Context::default();
-        crate::functions::register_parts(&mut ctx, &[register]);
-        let result = Program::compile("'%z'.format([1])").unwrap().execute(&ctx);
+        let result = crate::functions::eval("'%z'.format([1])");
         assert!(result.is_err());
     }
 
     // --- Error & edge case tests ---
 
     fn eval_err(expr: &str) -> cel::ExecutionError {
-        let mut ctx = Context::default();
-        crate::functions::register_parts(&mut ctx, &[register]);
-        Program::compile(expr).unwrap().execute(&ctx).unwrap_err()
+        crate::functions::eval(expr).unwrap_err()
     }
 
     #[test]
@@ -781,12 +770,7 @@ mod tests {
     #[test]
     fn test_format_hex_bytes() {
         // Bytes hex encoding with leading zeros preserved
-        let mut ctx = Context::default();
-        crate::functions::register_parts(&mut ctx, &[register]);
-        let result = Program::compile("'%x'.format([b'\\x00\\x00AB'])")
-            .unwrap()
-            .execute(&ctx)
-            .unwrap();
+        let result = crate::functions::eval("'%x'.format([b'\\x00\\x00AB'])").unwrap();
         assert_eq!(result, Value::String(Arc::new("00004142".into())));
     }
 

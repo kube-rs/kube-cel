@@ -1,10 +1,11 @@
-//! Registration surface for the Kubernetes CEL extension functions.
+//! Entry points for the Kubernetes CEL extension functions.
 //!
-//! [`KubeCelExt`] is the single entry point for journey A ("add the Kubernetes
-//! CEL functions to my [`cel::Context`]"). Granularity is controlled at
-//! compile time through cargo features, not at runtime — there is intentionally
-//! no per-library `with_strings()`/`with_lists()` method. Enable only the
-//! features you need (see the crate-level docs for the feature model).
+//! [`new_env`] builds kube-cel's [`cel::Env`] and [`new_context`] a context on
+//! it with kube-cel's functions registered: the path for evaluating Kubernetes
+//! CEL outside the validation engine, which uses the same two. Granularity is
+//! controlled at compile time through cargo features, not at runtime — there is
+//! intentionally no per-library `with_strings()`/`with_lists()` method. Enable
+//! only the features you need (see the crate-level docs for the feature model).
 
 use std::sync::Arc;
 
@@ -15,151 +16,106 @@ mod sealed {
     impl Sealed for cel::Context<'_, '_> {}
 }
 
-/// Registers the compiled-in Kubernetes CEL extension functions onto a
-/// [`cel::Context`].
+/// Registers kube-cel's context functions onto a [`cel::Context`] you already
+/// have.
+///
+/// Deprecated: this registers only the functions that live on a context. It
+/// does not install the part of kube-cel's environment that lives on the
+/// [`cel::Env`] (`cel`'s upstream `lists` extension, the `sortBy` and
+/// two-variable comprehension macros, `string(<IP>)` / `string(<CIDR>)`), so on
+/// [`Context::default`] those are missing. Build the environment with
+/// [`new_env`] and the context with [`new_context`] instead. The trait will be
+/// removed once kube-cel's functions move to `Env` overloads, see
+/// [kube-rs/kube-cel#17](https://github.com/kube-rs/kube-cel/issues/17).
 ///
 /// Which functions are registered is determined by the enabled cargo features
-/// (see the [crate-level documentation](crate) for the feature model). This
-/// registers the **whole** compiled-in set in one call, following the
-/// bundle-the-whole-set philosophy of the Kubernetes apiserver's
-/// `KnownLibraries()` (which enumerates the standard CEL libraries as one
-/// group; kube-cel likewise exposes its functions as a single batch rather
-/// than piecemeal).
-///
-/// `all` means "all **compiled-in**", not "all Kubernetes functions". In a
-/// narrowed build (`default-features = false, features = ["strings"]`),
-/// `with_all()` registers only the `strings` group — the call site still reads
-/// `with_all()`, but the set it registers shrinks with the feature flags. This
-/// is intentional (the name tracks the compiled surface, mirroring
-/// `KnownLibraries()`); enable the `full` feature to compile in the whole set
-/// (see the crate-level feature model).
-///
-/// # Examples
-///
-/// Builder style (journey A one-liner):
+/// (see the [crate-level documentation](crate) for the feature model).
 ///
 /// ```rust
+/// # #![allow(deprecated)]
 /// use kube_cel::{cel, KubeCelExt};
 ///
 /// let ctx = cel::Context::default().with_all();
 /// # let _ = ctx;
 /// ```
 ///
-/// Borrowed style, for an existing context:
-///
-/// ```rust
-/// use kube_cel::{cel, KubeCelExt};
-///
-/// let mut ctx = cel::Context::default();
-/// ctx.register_all();
-/// # let _ = ctx;
-/// ```
-///
-/// # Upstream sources
-///
-/// The registered functions track two upstream Kubernetes CEL libraries:
-///
-/// | Feature | Functions | Upstream |
-/// |---|---|---|
-/// | `strings` | string helpers (`charAt`, `indexOf`, `lowerAscii`, …) | [cel-go `ext.Strings`] |
-/// | `lists` | list helpers (`isSorted`, `sum`, `min`, `max`, …) | [cel-go `ext.Lists`] |
-/// | `sets` | `sets.contains`, `sets.intersects`, `sets.equivalent` | [cel-go `ext.Sets`] |
-/// | `regex_funcs` | `find`, `findAll` | [k8s apiserver library] |
-/// | `urls` | `url`, `isURL`, `getScheme`, … | [k8s apiserver library] |
-/// | `ip` | `ip`, `cidr`, `isIP`, `isCIDR`, … | [k8s apiserver library] |
-/// | `semver_funcs` | `semver`, `isSemver`, `major`, … | [k8s apiserver library] |
-/// | `format` | `format` | [k8s apiserver library] |
-/// | `named_format` | named-format validation | [k8s apiserver library] |
-/// | `quantity` | `quantity`, `isQuantity`, … | [k8s apiserver library] |
-///
-/// [cel-go `ext.Strings`]: https://github.com/google/cel-go/blob/master/ext/README.md#strings
-/// [cel-go `ext.Lists`]: https://github.com/google/cel-go/blob/master/ext/README.md#lists
-/// [cel-go `ext.Sets`]: https://github.com/google/cel-go/blob/master/ext/README.md#sets
-/// [k8s apiserver library]: https://pkg.go.dev/k8s.io/apiserver/pkg/cel/library
-///
 /// This trait is [sealed]: it is implemented only for [`cel::Context`] and
-/// cannot be implemented for downstream types, which lets kube-cel add methods
-/// in a non-breaking way.
+/// cannot be implemented for downstream types.
 ///
 /// [sealed]: https://rust-lang.github.io/api-guidelines/future-proofing.html#c-sealed
+#[deprecated(
+    since = "0.9.0",
+    note = "registers only the Context functions, not the Env part (upstream lists, the sortBy and \
+            two-variable comprehension macros, string(<IP>)); use new_env() and new_context(). Will \
+            be removed once functions move to Env overloads, see kube-rs/kube-cel#17"
+)]
 pub trait KubeCelExt: sealed::Sealed + Sized {
-    /// Registers all compiled-in Kubernetes CEL functions into this borrowed
-    /// context, returning `&mut Self` for chaining.
-    ///
-    /// # Errors
-    ///
-    /// Fails with [`RegisterError::ChildScope`] on a child scope (made by
-    /// [`Context::new_inner_scope`]), where `cel` would register nothing, and
-    /// with [`RegisterError::Rejected`] when `cel` refuses one of the names,
-    /// typically because the context's [`cel::Env`] already declares an
-    /// overload of that name. Registration stops at the first failure, so the
-    /// context may hold some of the functions.
-    ///
-    /// A root context on [`Context::default`] or on [`new_env`](crate::new_env)
-    /// never fails.
-    fn try_register_all(&mut self) -> Result<&mut Self, RegisterError>;
-
-    /// Builder form of [`try_register_all`](KubeCelExt::try_register_all).
-    ///
-    /// # Errors
-    ///
-    /// Fails as [`try_register_all`](KubeCelExt::try_register_all) does.
-    fn try_with_all(mut self) -> Result<Self, RegisterError> {
-        self.try_register_all()?;
-        Ok(self)
-    }
-
-    /// Registers all compiled-in Kubernetes CEL functions into this borrowed
-    /// context, returning `&mut Self` for chaining.
+    /// Registers kube-cel's context functions into this borrowed context,
+    /// returning `&mut Self` for chaining. Deprecated: see [`KubeCelExt`].
     ///
     /// # Panics
     ///
-    /// Panics where [`try_register_all`](KubeCelExt::try_register_all) fails:
-    /// on a child scope, or on a context whose [`cel::Env`] already declares
-    /// one of the names. Neither happens on a root [`Context::default`] or on
-    /// [`new_env`](crate::new_env).
-    fn register_all(&mut self) -> &mut Self {
-        if let Err(err) = self.try_register_all() {
-            panic!("kube-cel: {err}");
-        }
-        self
-    }
+    /// Panics on a child scope (made by [`Context::new_inner_scope`]), where
+    /// `cel` would register nothing, and when `cel` refuses one of the names,
+    /// typically because the context's [`cel::Env`] already declares an
+    /// overload of that name. Neither happens on a root [`Context::default`]
+    /// or on [`new_env`].
+    #[deprecated(
+        since = "0.9.0",
+        note = "registers only the Context functions, not the Env part (upstream lists, the sortBy \
+                and two-variable comprehension macros, string(<IP>)); use new_env() and \
+                new_context(). Will be removed once functions move to Env overloads, see \
+                kube-rs/kube-cel#17"
+    )]
+    fn register_all(&mut self) -> &mut Self;
 
     /// Builder sugar over [`register_all`](KubeCelExt::register_all):
-    /// `cel::Context::default().with_all()`.
+    /// `cel::Context::default().with_all()`. Deprecated: see [`KubeCelExt`].
     ///
     /// # Panics
     ///
     /// Panics as [`register_all`](KubeCelExt::register_all) does.
+    #[deprecated(
+        since = "0.9.0",
+        note = "registers only the Context functions, not the Env part (upstream lists, the sortBy \
+                and two-variable comprehension macros, string(<IP>)); use new_env() and \
+                new_context(). Will be removed once functions move to Env overloads, see \
+                kube-rs/kube-cel#17"
+    )]
     fn with_all(mut self) -> Self {
+        #[allow(deprecated)]
         self.register_all();
         self
     }
 }
 
+#[allow(deprecated)]
 impl KubeCelExt for Context<'_, '_> {
-    fn try_register_all(&mut self) -> Result<&mut Self, RegisterError> {
-        crate::register_all(self)?;
-        Ok(self)
+    fn register_all(&mut self) -> &mut Self {
+        assert!(
+            matches!(self, Context::Root { .. }),
+            "kube-cel: cannot register functions on a child scope; register them on the root context"
+        );
+        if let Err(err) = crate::register_all(self) {
+            panic!("kube-cel: {err}");
+        }
+        self
     }
 }
 
-/// Why the Kubernetes CEL functions could not be registered onto a
-/// [`cel::Context`].
-///
-/// Returned by [`KubeCelExt::try_register_all`], [`KubeCelExt::try_with_all`]
-/// and [`new_context`](crate::new_context).
+/// Why [`new_context`] could not build a context on an environment.
 ///
 /// `#[non_exhaustive]`: new failure modes may be added without a breaking
 /// change.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum RegisterError {
-    /// The context is a child scope, made by [`Context::new_inner_scope`].
-    /// `cel` only registers functions on a root context: on a child scope it
-    /// reports success and registers nothing. Register on the root context
-    /// before creating inner scopes.
-    ChildScope,
+    /// The environment was not built by [`new_env`], so it lacks the part of
+    /// kube-cel's environment that lives on the [`cel::Env`] (`cel`'s upstream
+    /// `lists` extension, the `sortBy` and two-variable comprehension macros,
+    /// `string(<IP>)` / `string(<CIDR>)`, as the enabled features have them).
+    /// Start from [`new_env`] and add to it.
+    IncompleteEnv,
     /// `cel` refused to add `function`, typically because the context's
     /// [`cel::Env`] already declares an overload of that name.
     Rejected {
@@ -176,9 +132,9 @@ pub enum RegisterError {
 impl std::fmt::Display for RegisterError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RegisterError::ChildScope => {
-                f.write_str("cannot register functions on a child scope; register them on the root context")
-            }
+            RegisterError::IncompleteEnv => f.write_str(
+                "the environment was not built by kube_cel::new_env(), so it lacks kube-cel's Env part",
+            ),
             RegisterError::Rejected { function, source } => {
                 write!(f, "cannot register function \"{function}\": {source}")
             }
@@ -189,24 +145,55 @@ impl std::fmt::Display for RegisterError {
 impl std::error::Error for RegisterError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            RegisterError::ChildScope => None,
+            RegisterError::IncompleteEnv => None,
             RegisterError::Rejected { source, .. } => Some(source.as_ref()),
         }
     }
 }
 
-/// Builds kube-cel's [`cel::Env`]: [`Env::stdlib`] plus the overloads kube-cel
-/// has to declare on the environment instead of registering on a context.
+/// The name kube-cel's [`Env`] part is added to an environment under (see
+/// [`Env::has_library`]).
+const ENV_LIBRARY: &str = "kube-cel.env";
+
+/// The part of kube-cel's environment that lives on the [`Env`]: `cel`'s
+/// upstream `lists` extension, the two-variable comprehension macros and the
+/// `string(<IP>)` / `string(<CIDR>)` overloads, as the enabled features have
+/// them (see `functions::declare_env`).
 ///
-/// Today these are `string(<IP>)` and `string(<CIDR>)` (feature `ip`).
-/// `string` is a standard-library overload, so `cel` refuses it as a context
-/// function: on a plain [`Context::default`], `string(ip('10.0.0.1'))` fails
-/// with "no such overload". As in the apiserver, only the global form exists;
-/// `ip('10.0.0.1').string()` is an error.
+/// A named [`cel::Library`], so an environment records that it has the whole
+/// of it: `cel` adds the name only once the library registered without error.
+struct EnvLibrary;
+
+impl cel::Library for EnvLibrary {
+    fn name(&self) -> Option<&str> {
+        Some(ENV_LIBRARY)
+    }
+
+    fn register(&self, env: &mut Env) -> Result<(), cel::DeclarationError> {
+        crate::functions::declare_env(env)
+    }
+}
+
+/// Builds kube-cel's [`cel::Env`]: the environment the Kubernetes apiserver
+/// compiles CEL in, as far as kube-cel models it, and the one kube-cel's
+/// validation engine uses.
 ///
-/// The result is an owned [`Env`], so further libraries, macros or overloads
-/// can be added before it is shared. Compile with [`Env::compile`] on the same
-/// environment, and evaluate on a context from [`new_context`]:
+/// On top of [`Env::stdlib`] it has, as the enabled features allow:
+///
+/// - `cel`'s upstream `lists` extension (feature `lists`): `slice`, `flatten`,
+///   `distinct`, `reverse`, `sort`, `lists.range` and the `sortBy` macro, as
+///   cel-go's `ext.Lists`;
+/// - the two-variable comprehension macros: `all(i, v, ..)`, `exists(i, v, ..)`,
+///   `existsOne(i, v, ..)`, `transformList`, `transformMap`, `transformMapEntry`;
+/// - `string(<IP>)` and `string(<CIDR>)` (feature `ip`). As in the apiserver,
+///   only the global form exists: `ip('10.0.0.1').string()` is an error.
+///
+/// The functions that live on a context are registered by [`new_context`],
+/// which needs an environment from this function. The result is an owned
+/// [`Env`], so `cel`'s extensions or overloads of your own can be added before
+/// it is shared. Compile with [`Env::compile`] on the same environment, which
+/// expands its macros ([`cel::Program::compile`] knows only the standard
+/// ones), and evaluate on a context from [`new_context`]:
 ///
 /// ```rust
 /// use std::sync::Arc;
@@ -217,12 +204,15 @@ impl std::error::Error for RegisterError {
 /// let program = env.compile("string(cidr('10.0.0.0/8').ip())").unwrap();
 /// # #[cfg(feature = "ip")]
 /// assert_eq!(program.execute(&ctx), Ok(Value::String(Arc::new("10.0.0.0".into()))));
+/// let program = env.compile("[3, 1, 2].sortBy(x, -x) == [3, 2, 1]").unwrap();
+/// # #[cfg(feature = "lists")]
+/// assert_eq!(program.execute(&ctx), Ok(Value::Bool(true)));
 /// ```
 ///
 /// kube-cel ships only functions the Kubernetes apiserver declares. `cel`'s
 /// own extensions, such as `math` and `encoders` (cel-go's `ext.Math` and
 /// `ext.Encoders`, which the apiserver does not have), go on the same way.
-/// `math.greatest` / `math.least` are macros, so compile with [`Env::compile`]:
+/// `math.greatest` / `math.least` are macros too:
 ///
 /// ```rust
 /// use std::sync::Arc;
@@ -241,24 +231,62 @@ impl std::error::Error for RegisterError {
 #[must_use]
 pub fn new_env() -> Env {
     let mut env = Env::stdlib();
-    crate::functions::declare_overloads(&mut env)
-        .expect("kube-cel's Env overloads do not collide with the cel standard library");
+    env.add_library(EnvLibrary)
+        .expect("kube-cel's Env part does not collide with the cel standard library");
     env
 }
 
-/// Builds a root [`cel::Context`] on `env` with all compiled-in Kubernetes CEL
-/// functions registered: `Context::with_env(env)` followed by
-/// [`try_register_all`](KubeCelExt::try_register_all).
+/// Builds a root [`cel::Context`] on `env` with kube-cel's context functions
+/// registered: with [`new_env`], the whole of kube-cel's environment.
 ///
-/// Pass an environment from [`new_env`] (or one built on it) for the full
-/// function set, including the overloads that live on the [`Env`].
+/// `env` must start from [`new_env`]: the part of kube-cel's environment that
+/// lives on the [`Env`] is there, and this adds the part that lives on a
+/// context. An `env` from [`new_env`] with `cel`'s extensions or overloads of
+/// your own added is fine, as long as they do not take kube-cel's names.
+///
+/// Which functions are registered is determined by the enabled cargo features
+/// (see the [crate-level documentation](crate) for the feature model). They
+/// track these upstream libraries:
+///
+/// | Feature | Functions | Upstream |
+/// |---|---|---|
+/// | `strings` | string helpers (`charAt`, `indexOf`, `lowerAscii`, …) | [cel-go `ext.Strings`] |
+/// | `lists` | list helpers (`isSorted`, `sum`, `min`, `max`, …); [`new_env`] adds cel-go's `ext.Lists` | [k8s apiserver library], [cel-go `ext.Lists`] |
+/// | `sets` | `sets.contains`, `sets.intersects`, `sets.equivalent` | [cel-go `ext.Sets`] |
+/// | `regex_funcs` | `find`, `findAll` | [k8s apiserver library] |
+/// | `urls` | `url`, `isURL`, `getScheme`, … | [k8s apiserver library] |
+/// | `ip` | `ip`, `cidr`, `isIP`, `isCIDR`, … | [k8s apiserver library] |
+/// | `semver_funcs` | `semver`, `isSemver`, `major`, … | [k8s apiserver library] |
+/// | `format` | `format` | [k8s apiserver library] |
+/// | `named_format` | named-format validation | [k8s apiserver library] |
+/// | `quantity` | `quantity`, `isQuantity`, … | [k8s apiserver library] |
+///
+/// [cel-go `ext.Strings`]: https://github.com/google/cel-go/blob/master/ext/README.md#strings
+/// [cel-go `ext.Lists`]: https://github.com/google/cel-go/blob/master/ext/README.md#lists
+/// [cel-go `ext.Sets`]: https://github.com/google/cel-go/blob/master/ext/README.md#sets
+/// [k8s apiserver library]: https://pkg.go.dev/k8s.io/apiserver/pkg/cel/library
+///
+/// Whether `env` starts from [`new_env`] is told by the name kube-cel's `Env`
+/// part is added under (`"kube-cel.env"`, see [`Env::has_library`]), which
+/// `cel` records only once all of that part registered. The check catches an
+/// environment that does not start from [`new_env`]; it does not stop a
+/// [`cel::Library`] of your own added under that name to get past it, which
+/// leaves the context without kube-cel's `Env` part. (`cel` exposes overloads
+/// by name, id and type name, all of which a caller can repeat, so a check
+/// that resists that would need a hidden marker overload compared by function
+/// address, which Rust does not guarantee to be unique.)
 ///
 /// # Errors
 ///
-/// Fails with [`RegisterError::Rejected`] when `env` already declares an
-/// overload under one of kube-cel's function names. An environment from
-/// [`new_env`] never does.
+/// Fails with [`RegisterError::IncompleteEnv`] when `env` was not built by
+/// [`new_env`] (such as [`Env::stdlib`]), and with [`RegisterError::Rejected`]
+/// when `env` declares an overload under one of kube-cel's function names, as
+/// `cel`'s `strings` extension does. An environment from [`new_env`] as it is
+/// never fails.
 pub fn new_context<'p, 'v>(env: Arc<Env>) -> Result<Context<'p, 'v>, RegisterError> {
+    if !env.has_library(ENV_LIBRARY) {
+        return Err(RegisterError::IncompleteEnv);
+    }
     let mut ctx = Context::with_env(env);
     crate::register_all(&mut ctx)?;
     Ok(ctx)
@@ -269,11 +297,7 @@ mod tests {
     use super::*;
     use cel::Value;
 
-    fn eval(expr: &str) -> Result<Value, cel::ExecutionError> {
-        let env = Arc::new(new_env());
-        let ctx = new_context(Arc::clone(&env)).unwrap();
-        env.compile(expr).unwrap().execute(&ctx)
-    }
+    use crate::functions::eval;
 
     /// The standard `string` overloads are global-only, as in the apiserver:
     /// `string(x)` works, `x.string()` is an error. kube-cel no longer shadows
@@ -318,49 +342,154 @@ mod tests {
     #[test]
     #[cfg(feature = "ip")]
     fn string_of_ip_needs_the_kube_env() {
-        let expr = "string(ip('10.0.0.1'))";
-        assert_eq!(eval(expr), Ok(Value::String(Arc::new("10.0.0.1".into()))));
-        // On a plain stdlib context the IP overload is not declared.
+        assert_eq!(
+            eval("string(ip('10.0.0.1'))"),
+            Ok(Value::String(Arc::new("10.0.0.1".into())))
+        );
+    }
+
+    fn holds(expr: &str) {
+        assert_eq!(eval(expr), Ok(Value::Bool(true)), "{expr}");
+    }
+
+    /// `new_env` has what the apiserver's base environment has on its `Env`:
+    /// `cel`'s upstream `lists` extension, with the `sortBy` macro, and the
+    /// two-variable comprehension macros.
+    #[test]
+    #[cfg(feature = "lists")]
+    fn new_env_has_the_upstream_lists_extension() {
+        holds("[1, 2, 3, 4].slice(1, 3) == [2, 3]");
+        holds("[[1, [2]], [3]].flatten(2) == [1, 2, 3]");
+        holds("[1, 2, 2, 1].distinct() == [1, 2]");
+        holds("[1, 2, 3].reverse() == [3, 2, 1]");
+        holds("[3, 1, 2].sort() == [1, 2, 3]");
+        holds("lists.range(3) == [0, 1, 2]");
+        holds("[3, 1, 2].sortBy(x, -x) == [3, 2, 1]");
+        // Kubernetes' own list functions sit alongside.
+        holds("[3, 1, 2].isSorted() == false && [3, 1, 2].sum() == 6 && [3, 1, 2].min() == 1");
+    }
+
+    #[test]
+    fn new_env_has_the_two_variable_comprehensions() {
+        holds("{'a': 1, 'b': 2}.all(k, v, v > 0)");
+        holds("[10, 20].exists(i, v, i == 1 && v == 20)");
+        holds("[1, 2].transformList(i, v, v * 2) == [2, 4]");
+        holds("{'a': 1}.transformMap(k, v, v + 1) == {'a': 2}");
+    }
+
+    /// The upstream `lists` functions behave as cel-go's, not as kube-cel's
+    /// own did before 0.9: pinned for the CHANGELOG entry.
+    #[test]
+    #[cfg(feature = "lists")]
+    fn upstream_lists_behaviour() {
+        // No string `reverse()`: the apiserver has none.
+        assert!(eval("'abc'.reverse()").is_err());
+        // Mixed numeric types do not sort; bytes do.
+        assert!(eval("[3, 1u, 2.0].sort()").is_err());
+        holds("[b'b', b'a'].sort() == [b'a', b'b']");
+        // An extra argument is refused, not ignored.
+        assert!(eval("[[1]].flatten(1, 2)").is_err());
+        assert!(eval("[1].distinct(99)").is_err());
+        assert!(eval("[1].reverse(99)").is_err());
+        // `lists.range` makes at most 1,000,000 elements.
+        holds("size(lists.range(1000000)) == 1000000");
+        assert!(eval("lists.range(1000001)").is_err());
+    }
+
+    /// The deprecated `with_all()` registers the context functions on
+    /// `Context::default()`, but not the part of kube-cel's environment that
+    /// lives on the `Env`, as its documentation says.
+    #[test]
+    #[cfg(all(feature = "lists", feature = "ip"))]
+    #[allow(deprecated)]
+    fn deprecated_with_all_registers_only_the_context_functions() {
         let ctx = Context::default().with_all();
-        assert!(cel::Program::compile(expr).unwrap().execute(&ctx).is_err());
-    }
-
-    #[test]
-    fn default_context_registers_everything() {
-        let mut ctx = Context::default();
-        assert!(ctx.try_register_all().is_ok());
-    }
-
-    #[test]
-    fn child_scope_is_rejected() {
-        let root = Context::default();
-        let mut child = root.new_inner_scope();
-        assert!(matches!(child.try_register_all(), Err(RegisterError::ChildScope)));
+        let run = |expr: &str| cel::Program::compile(expr).unwrap().execute(&ctx);
+        assert_eq!(run("[3, 1, 2].sum()"), Ok(Value::Int(6)));
+        assert!(run("[3, 1, 2].sort()").is_err());
+        assert!(run("string(ip('10.0.0.1'))").is_err());
+        // On an environment from `new_env` it has the whole set.
+        let env = Arc::new(new_env());
+        let ctx = Context::with_env(Arc::clone(&env)).with_all();
+        assert_eq!(
+            env.compile("[3, 1, 2].sortBy(x, x)").unwrap().execute(&ctx),
+            Ok(Value::List(Arc::new(vec![1.into(), 2.into(), 3.into()])))
+        );
+        assert_eq!(
+            env.compile("string(ip('10.0.0.1'))").unwrap().execute(&ctx),
+            Ok(Value::String(Arc::new("10.0.0.1".into())))
+        );
     }
 
     #[test]
     #[should_panic(expected = "child scope")]
+    #[allow(deprecated)]
     fn register_all_panics_on_child_scope() {
         let root = Context::default();
         let mut child = root.new_inner_scope();
         child.register_all();
     }
 
+    /// An environment that does not start from `new_env` lacks kube-cel's
+    /// `Env` part: `new_context` refuses it rather than build a context
+    /// missing it.
     #[test]
-    #[cfg(feature = "lists")]
+    fn env_not_from_new_env_is_rejected() {
+        let Err(err) = new_context(Arc::new(Env::stdlib())) else {
+            panic!("expected Env::stdlib() to be refused");
+        };
+        assert!(matches!(err, RegisterError::IncompleteEnv), "{err:?}");
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    /// The string `reverse()` the CHANGELOG points general users to: an
+    /// overload of their own, beside the upstream list `reverse()`.
+    #[test]
+    fn own_string_reverse_fits_new_env() {
+        use cel::common::types::CelString;
+        fn reverse(this: &CelString<'_>) -> CelString<'static> {
+            CelString::from(this.inner().chars().rev().collect::<String>())
+        }
+        let mut env = new_env();
+        cel::add_member_overload!(env, fn reverse: (CelString) -> CelString).unwrap();
+        let env = Arc::new(env);
+        let ctx = new_context(Arc::clone(&env)).unwrap();
+        let program = env.compile("'abc'.reverse() == 'cba'").unwrap();
+        assert_eq!(program.execute(&ctx), Ok(Value::Bool(true)));
+        #[cfg(feature = "lists")]
+        assert_eq!(
+            env.compile("[1, 2].reverse() == [2, 1]").unwrap().execute(&ctx),
+            Ok(Value::Bool(true))
+        );
+    }
+
+    /// `cel`'s own extensions can be added to `new_env`'s environment.
+    #[test]
+    fn extensions_on_new_env_are_accepted() {
+        let mut env = new_env();
+        env.add_extension(cel::extensions::math).unwrap();
+        env.add_extension(cel::extensions::bindings).unwrap();
+        let env = Arc::new(env);
+        let ctx = new_context(Arc::clone(&env)).unwrap();
+        let program = env.compile("cel.bind(x, math.abs(-2), x * x) == 4").unwrap();
+        assert_eq!(program.execute(&ctx), Ok(Value::Bool(true)));
+    }
+
+    /// `cel`'s `strings` extension declares overloads under the names of
+    /// kube-cel's string functions (cel-go's `ext.Strings`, which kube-cel
+    /// registers on the context), so a context on such an environment fails.
+    #[test]
+    #[cfg(feature = "strings")]
     fn name_declared_on_the_env_is_rejected() {
         let mut env = new_env();
-        cel::extensions::lists(&mut env).unwrap();
+        env.add_extension(cel::extensions::strings).unwrap();
         let Err(err) = new_context(Arc::new(env)) else {
             panic!("expected registration to fail");
         };
         let RegisterError::Rejected { function, .. } = &err else {
             panic!("expected Rejected, got {err:?}");
         };
-        assert!(
-            ["slice", "flatten", "distinct", "sort", "lists.range", "reverse"].contains(&function.as_str()),
-            "{function}"
-        );
+        assert_eq!(function, "charAt");
         assert!(std::error::Error::source(&err).is_some());
     }
 }

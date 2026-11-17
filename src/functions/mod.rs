@@ -1,10 +1,11 @@
 //! Kubernetes CEL extension-function libraries (Tier 1 — the primitive).
 //!
 //! Each submodule ports one upstream Kubernetes CEL library and exposes a
-//! `register` entry; [`register_all`] aggregates the compiled-in set. This is
-//! the faithful-port half of the crate — see the crate-level "Versioning and
-//! stability" docs (Tier 1). The public entry point is
-//! [`KubeCelExt`](crate::KubeCelExt); these modules are internal.
+//! `register` entry; [`register_all`] aggregates the compiled-in set, and
+//! [`declare_env`] declares what lives on the `Env`. This is the faithful-port
+//! half of the crate — see the crate-level "Versioning and stability" docs
+//! (Tier 1). The public entry points are [`new_env`](crate::new_env) and
+//! [`new_context`](crate::new_context); these modules are internal.
 
 #[cfg(feature = "strings")] mod strings;
 
@@ -27,6 +28,13 @@
 #[cfg(any(feature = "urls", feature = "named_format"))] mod go_url;
 #[cfg(feature = "named_format")] mod named_format;
 
+#[cfg(any(
+    feature = "strings",
+    feature = "lists",
+    feature = "semver_funcs",
+    feature = "quantity",
+    feature = "ip"
+))]
 mod dispatch;
 mod value_ops;
 
@@ -34,64 +42,36 @@ mod value_ops;
 /// of dropping it.
 ///
 /// `cel` 0.16 made [`cel::Context::add_function`] fallible (it refuses a name the
-/// context's `Env` already declares as an overload) and still returns `Ok(())`
-/// without registering anything on a child scope. Every module registers
-/// through this type so neither case can pass silently: a child scope is
-/// rejected up front, and the first refused name is reported by
-/// [`finish`](Registrar::finish).
+/// context's `Env` already declares as an overload). Every module registers
+/// through this type so a refusal cannot pass silently: the first refused name
+/// is reported by [`finish`](Registrar::finish). `cel` registers nothing on a
+/// child scope, so callers hand this a root context.
 pub(crate) struct Registrar<'c, 'p, 'v> {
     ctx: &'c mut cel::Context<'p, 'v>,
-    profile: Profile,
     error: Option<crate::RegisterError>,
     names: Vec<String>,
 }
 
-/// Which function set a [`Registrar`] registers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Profile {
-    /// Every compiled-in function: the public [`KubeCelExt`](crate::KubeCelExt)
-    /// and [`new_context`](crate::new_context) surface.
-    General,
-    /// The validation engine's set, on the validation `Env`, which has
-    /// `cel`'s upstream `lists` extension: see [`VALIDATION_EXCLUDED`].
-    #[cfg_attr(not(feature = "validation"), allow(dead_code))]
-    Validation,
-}
-
-/// Names the [`Profile::Validation`] set leaves out: the validation `Env`
-/// enables `cel`'s upstream `lists` extension, which declares these as
-/// overloads (so `cel` would refuse kube-cel's versions anyway). Its
-/// implementations are used instead; string `reverse` goes away with
-/// kube-cel's `reverse`, as in the apiserver.
-const VALIDATION_EXCLUDED: &[&str] = &["slice", "flatten", "distinct", "reverse", "sort", "lists.range"];
-
-impl Profile {
-    fn excludes(self, name: &str) -> bool {
-        match self {
-            Profile::General => false,
-            Profile::Validation => VALIDATION_EXCLUDED.contains(&name),
-        }
-    }
-}
-
 impl<'c, 'p, 'v> Registrar<'c, 'p, 'v> {
-    pub(crate) fn new(ctx: &'c mut cel::Context<'p, 'v>, profile: Profile) -> Self {
-        let error = (!matches!(ctx, cel::Context::Root { .. })).then_some(crate::RegisterError::ChildScope);
+    pub(crate) fn new(ctx: &'c mut cel::Context<'p, 'v>) -> Self {
+        debug_assert!(
+            matches!(ctx, cel::Context::Root { .. }),
+            "a child scope registers nothing"
+        );
         Self {
             ctx,
-            profile,
-            error,
+            error: None,
             names: Vec::new(),
         }
     }
 
-    /// Adds `f` as `name`, unless an earlier step already failed or the
-    /// profile leaves `name` out.
+    /// Adds `f` as `name`, unless an earlier step already failed.
+    #[allow(dead_code)] // unused when no function feature is enabled
     pub(crate) fn add<T: 'static, F>(&mut self, name: &str, f: F)
     where
         F: cel::extractors::IntoFunction<T> + 'static + Send + Sync,
     {
-        if self.error.is_some() || self.profile.excludes(name) {
+        if self.error.is_some() {
             return;
         }
         match self.ctx.add_function(name, f) {
@@ -111,35 +91,37 @@ impl<'c, 'p, 'v> Registrar<'c, 'p, 'v> {
     }
 }
 
-/// Declares the overloads kube-cel needs on the [`cel::Env`] rather than on a
-/// context: those of names the standard library already declares (`string`),
-/// which `cel` refuses as context functions.
-#[allow(unused_variables)]
-pub(crate) fn declare_overloads(env: &mut cel::Env) -> Result<(), cel::DeclarationError> {
+/// Declares the part of kube-cel's environment that lives on the [`cel::Env`]
+/// rather than on a context, as the apiserver's base environment has it
+/// (`k8s.io/apiserver/pkg/cel/environment`, `MustBaseEnvSet(..)`):
+///
+/// - with the `lists` feature, `cel`'s upstream `lists` extension (cel-go's
+///   `ext.Lists`: `slice`, `flatten`, `distinct`, `reverse`, `sort`,
+///   `lists.range` and the `sortBy` macro);
+/// - the two-variable comprehension macros (`all(i, v, ..)`, `transformList`,
+///   `transformMap`, ..);
+/// - with the `ip` feature, `string(<IP>)` and `string(<CIDR>)`: `string` is a
+///   standard-library overload, which `cel` refuses as a context function.
+pub(crate) fn declare_env(env: &mut cel::Env) -> Result<(), cel::DeclarationError> {
+    #[cfg(feature = "lists")]
+    env.add_extension(cel::extensions::lists)?;
+    env.add_extension(cel::extensions::two_var_comprehensions)?;
+
     #[cfg(feature = "ip")]
     ip::declare_string_overloads(env)?;
 
     Ok(())
 }
 
-/// Registers all compiled-in Kubernetes CEL extension functions into `ctx`.
+/// Registers all compiled-in Kubernetes CEL extension functions into `ctx`
+/// and returns the names it registered: the context half of kube-cel's
+/// environment, next to [`declare_env`].
 ///
-/// Internal implementation behind [`KubeCelExt::try_register_all`](crate::KubeCelExt::try_register_all);
-/// kept as a free function so the in-crate callers (vap, validation, …) can
-/// invoke it without importing the trait.
-pub(crate) fn register_all(ctx: &mut cel::Context<'_, '_>) -> Result<(), crate::RegisterError> {
-    register_profile(ctx, Profile::General).map(drop)
-}
-
-/// Registers the `profile`'s function set into `ctx` and returns the names it
-/// registered.
-///
-/// [`Profile::Validation`] leaves out the names in [`VALIDATION_EXCLUDED`].
-pub(crate) fn register_profile(
-    ctx: &mut cel::Context<'_, '_>,
-    profile: Profile,
-) -> Result<Vec<String>, crate::RegisterError> {
-    let mut r = Registrar::new(ctx, profile);
+/// Internal implementation behind [`new_context`](crate::new_context) and the
+/// deprecated `KubeCelExt`.
+pub(crate) fn register_all(ctx: &mut cel::Context<'_, '_>) -> Result<Vec<String>, crate::RegisterError> {
+    #[allow(unused_mut)] // nothing to register when no function feature is enabled
+    let mut r = Registrar::new(ctx);
 
     #[cfg(feature = "strings")]
     strings::register(&mut r);
@@ -171,22 +153,53 @@ pub(crate) fn register_profile(
     #[cfg(feature = "named_format")]
     named_format::register(&mut r);
 
-    // Dispatch: registers functions with name collisions (indexOf, reverse,
-    // min/max, ip, isGreaterThan, etc.). Order-independent since individual
-    // modules no longer register these conflicting names.
+    // Dispatch: registers functions with name collisions (indexOf, ip,
+    // isGreaterThan, etc.). Order-independent since individual modules no
+    // longer register these conflicting names.
+    #[cfg(any(
+        feature = "strings",
+        feature = "lists",
+        feature = "semver_funcs",
+        feature = "quantity",
+        feature = "ip"
+    ))]
     dispatch::register(&mut r);
 
     r.finish()
 }
 
-/// Test helper: registers only the given module entries onto `ctx`, panicking
-/// on failure.
+/// Test helper: evaluates `expr` the public way, on [`new_env`](crate::new_env)
+/// and [`new_context`](crate::new_context), compiled with [`cel::Env::compile`].
 #[cfg(test)]
-#[allow(dead_code)] // unused when no function feature is enabled
-pub(crate) fn register_parts(ctx: &mut cel::Context<'_, '_>, parts: &[fn(&mut Registrar<'_, '_, '_>)]) {
-    let mut r = Registrar::new(ctx, Profile::General);
-    for part in parts {
-        part(&mut r);
+pub(crate) fn eval(expr: &str) -> Result<cel::Value, cel::ExecutionError> {
+    let env = std::sync::Arc::new(crate::new_env());
+    let ctx = crate::new_context(std::sync::Arc::clone(&env)).expect("kube-cel's context on new_env()");
+    env.compile(expr)
+        .expect("the test expression compiles")
+        .execute(&ctx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::register_all;
+
+    /// A dispatcher is registered only with a feature it can dispatch to: with
+    /// every function feature off, `indexOf` or `compareTo` would otherwise be
+    /// registered and fail on every call.
+    #[test]
+    fn dispatchers_need_a_feature_that_implements_them() {
+        let names = register_all(&mut cel::Context::default()).unwrap();
+        let has = |name: &str| names.iter().any(|n| n == name);
+        let search = cfg!(any(feature = "strings", feature = "lists"));
+        let compare = cfg!(any(feature = "semver_funcs", feature = "quantity"));
+        for (name, expected) in [
+            ("indexOf", search),
+            ("lastIndexOf", search),
+            ("isGreaterThan", compare),
+            ("isLessThan", compare),
+            ("compareTo", compare),
+        ] {
+            assert_eq!(has(name), expected, "{name}");
+        }
     }
-    r.finish().unwrap();
 }

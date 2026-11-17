@@ -27,9 +27,9 @@ pub enum Verdict {
 /// runtime verdicts both engines must agree on. The other two are cases the
 /// apiserver refuses at CRD registration (no valid CRD can carry the rule):
 /// `RegistrationRejected` where kube-cel rejects the object too, and
-/// `RegistrationRejectedFailOpen` where it accepts it, the one documented
-/// fail-open class (no type checker in `cel`, cel-rust#350; see
-/// `tests/apiserver_divergence.rs`).
+/// `RegistrationRejectedFailOpen` where it accepts it, the two documented
+/// fail-open classes (no type checker in `cel`, cel-rust#350; no cost model,
+/// cel-rust discussion #230; see `tests/apiserver_divergence.rs`).
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Expect {
     Accept,
@@ -1258,8 +1258,8 @@ pub fn cases() -> Vec<ParityCase> {
             expect: Expect::Accept,
             note: "the authorizer library is in the base env, so a CRD rule may name it → both accept",
         },
-        // No type checker in `cel` (cel-rust#350): the one documented fail-open
-        // class. The apiserver type-checks at registration; kube-cel accepts.
+        // No type checker in `cel` (cel-rust#350): a documented fail-open class.
+        // The apiserver type-checks at registration; kube-cel accepts.
         ParityCase {
             kind: "PmixedSorted",
             plural: "pmixedsorteds",
@@ -1310,6 +1310,21 @@ pub fn cases() -> Vec<ParityCase> {
             object: json!({}),
             expect: Expect::RegistrationRejectedFailOpen,
             note: "`authorizer` is a policy variable, undeclared in a CRD rule → rejected at registration; kube-cel accepts",
+        },
+        // No cost model in `cel` (cel-rust discussion #230): the other
+        // documented fail-open class. The apiserver estimates each rule's cost
+        // at registration; kube-cel evaluates the rule.
+        ParityCase {
+            kind: "PcostEstimate",
+            plural: "pcostestimates",
+            schema: json!({
+                "type": "object",
+                "properties": { "l": { "type": "array", "items": { "type": "string" } } },
+                "x-kubernetes-validations": [{ "rule": "self.l.all(x, self.l.exists(y, x == y))", "message": "cost" }]
+            }),
+            object: json!({"l": ["a", "b"]}),
+            expect: Expect::RegistrationRejectedFailOpen,
+            note: "a list with no maxItems iterated twice exceeds the estimated cost budget → rejected at registration; kube-cel accepts",
         },
         // ── Schema nodes the object does not reach (kube-rs/kube-cel#14) ─────
         // The apiserver compiles every rule, and checks the nesting depth, when

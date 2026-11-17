@@ -730,12 +730,9 @@ fn validate_timezone(tz: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel::{Context, Program};
 
     fn eval(expr: &str) -> Value {
-        let mut ctx = Context::default();
-        crate::functions::register_parts(&mut ctx, &[register]);
-        Program::compile(expr).unwrap().execute(&ctx).unwrap()
+        crate::functions::eval(expr).unwrap()
     }
 
     fn assert_valid(expr: &str) {

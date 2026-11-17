@@ -23,12 +23,12 @@ kube-cel = "0.8"
 ```rust
 use std::sync::Arc;
 
-// kube-cel's Env (the cel stdlib plus the overloads kube-cel declares on it)
-// and a context on it with every compiled-in function registered.
+// kube-cel's Env (the apiserver's base CEL environment, as far as kube-cel
+// models it) and a context on it with every compiled-in function registered.
 let env = Arc::new(kube_cel::new_env());
 let ctx = kube_cel::new_context(Arc::clone(&env)).unwrap();
 
-// String functions
+// Compile with env.compile(..), which expands the Env's macros.
 let result = env.compile("'hello'.upperAscii()")
     .unwrap().execute(&ctx).unwrap();
 
@@ -36,16 +36,23 @@ let result = env.compile("'hello'.upperAscii()")
 let result = env.compile("quantity('1Gi').isGreaterThan(quantity('500Mi'))")
     .unwrap().execute(&ctx).unwrap();
 
+// cel's lists extension and its sortBy macro
+let result = env.compile("[3, 1, 2].sortBy(x, -x)")
+    .unwrap().execute(&ctx).unwrap();
+
 // IP to string (an overload on kube-cel's Env)
 let result = env.compile("string(ip('192.168.0.1'))")
     .unwrap().execute(&ctx).unwrap();
 ```
 
-To add the functions to a context you already have, use the `KubeCelExt`
-extension trait: `Context::default().with_all()` (or `try_with_all()` /
-`try_register_all()` to get a `RegisterError` instead of a panic, e.g. on a child
-scope). That registers every function, but not the overloads that live on the
-`Env` (`string(<IP>)`, `string(<CIDR>)`), which need `new_env()`.
+`new_env()` is the environment the validation pipeline below uses too. Add
+`cel`'s extensions or overloads of your own to it before wrapping it in an
+`Arc`; `new_context` refuses an environment that does not start from
+`new_env()` (`RegisterError::IncompleteEnv`). The `KubeCelExt` trait
+(`Context::default().with_all()`) is deprecated: it registers only the
+functions that live on a context, not the lists extension, the macros or
+`string(<IP>)`, and will be removed once kube-cel's functions move to `Env`
+overloads ([#17](https://github.com/kube-rs/kube-cel/issues/17)).
 
 ## CRD Validation Pipeline
 
@@ -226,10 +233,18 @@ let warnings = analyze_rule(
 ## Supported Functions
 
 ### Strings
-`charAt`, `indexOf`, `lastIndexOf`, `lowerAscii`, `upperAscii`, `replace`, `split`, `substring`, `trim`, `join`, `reverse`, `strings.quote`
+`charAt`, `indexOf`, `lastIndexOf`, `lowerAscii`, `upperAscii`, `replace`, `split`, `substring`, `trim`, `join`, `strings.quote`
 
 ### Lists
-`isSorted`, `sum`, `min`, `max`, `indexOf`, `lastIndexOf`, `slice`, `sort`, `flatten`, `reverse`, `distinct`, `first`, `last`, `lists.range`
+`isSorted`, `sum`, `min`, `max`, `indexOf`, `lastIndexOf`, `first`, `last`, and
+`cel`'s upstream `lists` extension (cel-go's `ext.Lists`) on the `Env`:
+`slice`, `sort`, `sortBy`, `flatten`, `reverse`, `distinct`, `lists.range`
+(`sortBy` is a macro, so compile with `env.compile(..)`)
+
+### Comprehensions
+The two-variable macros (cel-go's `ext.TwoVarComprehensions`), on the `Env`
+whatever the features: `all(i, v, ..)`, `exists(i, v, ..)`, `existsOne(i, v, ..)`,
+`transformList`, `transformMap`, `transformMapEntry`
 
 ### Sets
 `sets.contains`, `sets.equivalent`, `sets.intersects`
@@ -258,12 +273,12 @@ let warnings = analyze_rule(
 ```rust
 // Returns optional: none = valid, of([...errors]) = invalid
 // K8s pattern: !format.<name>().validate(value).hasValue()
-let result = Program::compile("!format.dns1123Label().validate('my-name').hasValue()")
+let result = env.compile("!format.dns1123Label().validate('my-name').hasValue()")
     .unwrap().execute(&ctx).unwrap();
 // Value::Bool(true)
 
 // Dynamic format lookup — format.named() returns optional(Format); unwrap with .value()
-let result = Program::compile("!format.named('uuid').value().validate('550e8400-e29b-41d4-a716-446655440000').hasValue()")
+let result = env.compile("!format.named('uuid').value().validate('550e8400-e29b-41d4-a716-446655440000').hasValue()")
     .unwrap().execute(&ctx).unwrap();
 // Value::Bool(true)
 ```
@@ -305,7 +320,7 @@ kube-cel = { version = "0.8", default-features = false, features = ["full"] }
 | Feature | Dependencies | Description |
 |---------|-------------|-------------|
 | `strings` | - | String extension functions |
-| `lists` | - | List extension functions (with `validation`, also `cel`'s upstream `lists` extension in the validation environment) |
+| `lists` | - | List extension functions, and `cel`'s upstream `lists` extension on the `Env` |
 | `sets` | - | Set operations |
 | `regex_funcs` | `regex` | Regex find/findAll |
 | `urls` | `url` | URL parsing and accessors |
@@ -329,11 +344,12 @@ breaking changes (the Cargo convention for `0.x`).
 
 Two stability tiers, by surface:
 
-- **Tier 1 — registration (committed).** The `KubeCelExt` trait
-  (`with_all`/`register_all` and their `try_` forms), the `new_env`/`new_context`
-  constructors, the `pub use cel` re-export, and the set of
-  registered Kubernetes CEL functions. This is the crate's core identity and
-  changes only deliberately.
+- **Tier 1 — entry points (committed).** The `new_env`/`new_context`
+  constructors and their `RegisterError`, the `pub use cel` re-export, and the
+  set of Kubernetes CEL functions they provide. This is the crate's core
+  identity and changes only deliberately. The deprecated `KubeCelExt` trait is
+  not part of it: it stays until kube-cel's functions move to `Env` overloads
+  ([#17](https://github.com/kube-rs/kube-cel/issues/17)).
 - **Tier 2 — validation engine (evolving, `validation` feature).** `Validator`,
   the VAP evaluator, static analysis, schema defaults, and the
   `compilation`/`validation`/`vap`/`analysis` types. Still maturing; expect its
@@ -344,14 +360,17 @@ Two stability tiers, by surface:
 The validation pipeline aims to return the same verdict the Kubernetes API
 server would, client-side. Where it cannot today, it diverges **fail-closed** —
 it reports an error rather than silently accepting — so a passing result is as
-strict as the API server, with two exceptions (the last two rows below). `cel`
-has no type checker yet
+strict as the API server, with two exception classes (the last two rows below),
+which stay until `cel` ships the missing piece. `cel` has no type checker yet
 ([cel-rust#350](https://github.com/cel-rust/cel-rust/issues/350)), so a rule the
 apiserver rejects at registration for a type, arity or call-shape error can
-still pass client-side. And part of `format()`'s output (`%f`, `%e`, `%b`, `%o`,
-`%x`, `%X`, and `%s` in a few cases) differs from the cel-go v0.26 the
-apiserver uses, a gap to be fixed before 0.9.0
-([#14](https://github.com/kube-rs/kube-cel/issues/14)). These
+still pass client-side. And `cel` has no cost model yet (on its roadmap,
+[cel-rust#230](https://github.com/cel-rust/cel-rust/discussions/230)), so a rule
+the apiserver rejects for its estimated cost at registration, or an object it
+rejects for a rule's runtime cost, can still pass client-side. Besides those,
+part of `format()`'s output (`%f`, `%e`, `%b`, `%o`, `%x`, `%X`, and `%s` in a
+few cases) differs from the cel-go v0.26 the apiserver uses, a gap to be fixed
+before 0.9.0 ([#14](https://github.com/kube-rs/kube-cel/issues/14)). These
 divergences are pinned by
 `tests/apiserver_divergence.rs`.
 
@@ -363,6 +382,7 @@ divergences are pinned by
 | `base64.*` (cel-go `ext.Encoders`), `jsonpatch.escapeKey` | rejects the CRD at registration (not in the base environment; `jsonpatch` is a MutatingAdmissionPolicy library) | `CompilationFailure` | fail-closed |
 | Global `min(..)` / `max(..)` | rejects the CRD at registration (only `<list>.min()` / `<list>.max()`) | `CompilationFailure` | fail-closed |
 | String `reverse()` (`'abc'.reverse()`) | rejects the CRD at registration (no matching overload) | `EvaluationError` | fail-closed |
+| `lists.range(-1)`; `sort()` on a list holding a NaN (`[double('NaN')].sort()`) | evaluates: `lists.range(-1)` is `[]`, and the list sorts | `EvaluationError` | fail-closed |
 | `<IP>.string()`, `<CIDR>.string()` | rejects the CRD at registration (no matching overload; only `string(<IP>)`) | `UnsupportedReference` | fail-closed |
 | A rule reading `oldSelf` in the items of a list that is not `x-kubernetes-list-type: map`, or `optionalOldSelf` on a rule that does not read `oldSelf` | rejects the CRD at registration | `CompilationFailure` | fail-closed |
 | Quantity `add` / `sub` past `i128` (`quantity('2e38').add(quantity('1'))`) | exact (`inf.Dec`), so `….isGreaterThan(quantity('2e38'))` holds | `EvaluationError` (quantity overflow) | fail-closed |
@@ -370,17 +390,19 @@ divergences are pinned by
 | Rule whose `messageExpression` does not compile (a syntax error, or a call refused above) | rejects the CRD at registration | `CompilationFailure` (the rule is rejected, not just its message) | fail-closed |
 | Functions the apiserver declares that kube-cel does not implement: `optional.unwrap(..)`, `<list>.unwrapOpt()`, the authz library (`authorizer.*` in a VAP), or a function whose kube-cel feature is disabled | evaluates (the authz library against the cluster) | compiles, and passes where evaluation does not reach the call; `UnsupportedReference` where it does | fail-closed (the authz library is out of scope) |
 | `format()` output: `%f`, `%e`, `%b`, `%o`, `%x`, `%X`, and `%s` in a few cases | prints `%f` / `%e` through a locale printer (`'%.2f'.format([1500.0])` is `1,500.00`, `'%.2e'.format([1500.0])` is `1.500000×10⁰³`, the precision ignored), a negative `%b` / `%o` / `%x` as sign and magnitude (`'%b'.format([-5])` is `-101`), and refuses `%f` / `%e` on a non-double; `%s` breaks a `%g` rounding tie Go's way (`1.0000000000000002e+15`), escapes unassigned code points (`["\u0378"]`) and writes a nested type as `[int]` | `1500.00`, `1.50e+03`, two's complement (`1111…1011`), `%f` on an int, `1.0000000000000003e+15`, the raw code point, `["int"]` | **fail-open** (to be fixed before 0.9.0) |
-| No type checker: type errors (`[1, 2] == [1.0, 2.0]`, `[1, 2.0].isSorted()`), arity errors (`'a'.lowerAscii(42)`), call-shape errors (`family(ip(..))`, and the `reverse()` / `.string()` rows above), a non-string `messageExpression`, and an undeclared identifier (such as `authorizer` in a CRD rule), where evaluation does not reach the error | rejects the CRD at registration (type-checks every expression) | passes; `cel` has no type checker yet ([cel-rust#350](https://github.com/cel-rust/cel-rust/issues/350)) | **fail-open** (the one known exception) |
+| No type checker: type errors (`[1, 2] == [1.0, 2.0]`, `[1, 2.0].isSorted()`), arity errors (`'a'.lowerAscii(42)`), call-shape errors (`family(ip(..))`, and the `reverse()` / `.string()` rows above), a non-string `messageExpression`, and an undeclared identifier (such as `authorizer` in a CRD rule), where evaluation does not reach the error | rejects the CRD at registration (type-checks every expression) | passes; `cel` has no type checker yet ([cel-rust#350](https://github.com/cel-rust/cel-rust/issues/350)) | **fail-open** (exception class) |
+| No cost model: a rule whose estimated cost exceeds the budget (`self.l.all(x, self.l.exists(y, x == y))` on a list with no `maxItems`), or whose evaluation exceeds the per-expression cost limit (`lists.range(1000000).size() > 0`, `lists.range(600000).map(x, x).size() > 0`) | rejects the CRD at registration ("estimated rule cost exceeds budget"), or the object at evaluation ("actual cost limit exceeded") | passes; `cel` has no cost model yet ([cel-rust#230](https://github.com/cel-rust/cel-rust/discussions/230)) | **fail-open** (exception class) |
 
-The validation pipeline compiles and runs rules in its own `cel` environment,
-modelled on the apiserver's base CEL environment (`k8s.io/apiserver`
+The validation pipeline compiles and runs rules in the environment `new_env()`
+builds, modelled on the apiserver's base CEL environment (`k8s.io/apiserver`
 `environment.MustBaseEnvSet(..).NewExpressionsEnv()`): it enables the
 two-variable comprehensions (`all(i, v, …)`, `transformList`, `transformMap`, …)
 and, with the `lists` feature, `cel`'s `lists` extension (`sortBy`, `slice`,
 `flatten`, `distinct`, `reverse`, `sort`, `lists.range`), which evaluate as in
-the apiserver, and it leaves out what the base environment lacks: `cel.bind`
-and the `math` and `base64.*` libraries. (`cel` has them as its `bindings`,
-`math` and `encoders` extensions, for an `Env` of your own.) `cel` only parses,
+the apiserver but for the `lists.range(-1)` / NaN row above, and it leaves out
+what the base environment lacks: `cel.bind` and the `math` and `base64.*`
+libraries. (`cel` has them as its `bindings`, `math` and `encoders` extensions,
+for an `Env` of your own.) `cel` only parses,
 so kube-cel walks the AST of every rule and `messageExpression` at compile time
 and refuses a call to a function the apiserver does not declare as
 `ErrorKind::CompilationFailure`, even in a branch evaluation never reaches

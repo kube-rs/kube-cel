@@ -322,12 +322,9 @@ fn owned_string<'b, 'v>(s: String) -> Result<CowVal<'b, 'v>, ExecutionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel::{Context, Program};
 
     fn eval(expr: &str) -> Value {
-        let mut ctx = Context::default();
-        crate::register_all(&mut ctx).unwrap();
-        Program::compile(expr).unwrap().execute(&ctx).unwrap()
+        crate::functions::eval(expr).unwrap()
     }
 
     #[test]
@@ -407,9 +404,7 @@ mod tests {
     // --- Error & edge case tests ---
 
     fn eval_err(expr: &str) -> cel::ExecutionError {
-        let mut ctx = Context::default();
-        crate::register_all(&mut ctx).unwrap();
-        Program::compile(expr).unwrap().execute(&ctx).unwrap_err()
+        crate::functions::eval(expr).unwrap_err()
     }
 
     #[test]
@@ -504,15 +499,11 @@ mod tests {
 
     // --- IP/CIDR string tests ---
     //
-    // `string` is an overload on kube-cel's Env (see `declare_string_overloads`),
-    // so these run on `new_env` + `new_context`. Only the global form exists, as
-    // in the apiserver, where `ip(...).string()` fails to compile.
+    // `string` is an overload on kube-cel's Env (see `declare_string_overloads`).
+    // Only the global form exists, as in the apiserver, where
+    // `ip(...).string()` fails to compile.
 
-    fn eval_on_kube_env(expr: &str) -> Result<Value, cel::ExecutionError> {
-        let env = Arc::new(crate::new_env());
-        let ctx = crate::new_context(Arc::clone(&env)).unwrap();
-        env.compile(expr).unwrap().execute(&ctx)
-    }
+    use crate::functions::eval as eval_on_kube_env;
 
     fn assert_global_string_only(arg: &str, expected: &str) {
         assert_eq!(
@@ -546,23 +537,13 @@ mod tests {
     #[test]
     fn test_cidr_ip_v4() {
         // cidr_ip is tested via dispatch, but also directly
-        let mut ctx = Context::default();
-        crate::functions::register_parts(&mut ctx, &[register, crate::functions::dispatch::register]);
-        let result = Program::compile("cidr('192.168.0.0/24').ip() == ip('192.168.0.0')")
-            .unwrap()
-            .execute(&ctx)
-            .unwrap();
+        let result = crate::functions::eval("cidr('192.168.0.0/24').ip() == ip('192.168.0.0')").unwrap();
         assert_eq!(result, Value::Bool(true));
     }
 
     #[test]
     fn test_cidr_ip_v6() {
-        let mut ctx = Context::default();
-        crate::functions::register_parts(&mut ctx, &[register, crate::functions::dispatch::register]);
-        let result = Program::compile("cidr('fd00::/64').ip() == ip('fd00::')")
-            .unwrap()
-            .execute(&ctx)
-            .unwrap();
+        let result = crate::functions::eval("cidr('fd00::/64').ip() == ip('fd00::')").unwrap();
         assert_eq!(result, Value::Bool(true));
     }
 
@@ -570,33 +551,20 @@ mod tests {
 
     #[test]
     fn test_cidr_contains_slash32() {
-        let mut ctx = Context::default();
-        crate::functions::register_parts(&mut ctx, &[register, crate::functions::dispatch::register]);
         assert_eq!(
-            Program::compile("cidr('192.168.0.0/24').containsCIDR(cidr('192.168.0.1/32'))")
-                .unwrap()
-                .execute(&ctx)
-                .unwrap(),
+            crate::functions::eval("cidr('192.168.0.0/24').containsCIDR(cidr('192.168.0.1/32'))").unwrap(),
             Value::Bool(true)
         );
         assert_eq!(
-            Program::compile("cidr('192.168.0.0/24').containsCIDR(cidr('192.169.0.1/32'))")
-                .unwrap()
-                .execute(&ctx)
-                .unwrap(),
+            crate::functions::eval("cidr('192.168.0.0/24').containsCIDR(cidr('192.169.0.1/32'))").unwrap(),
             Value::Bool(false)
         );
     }
 
     #[test]
     fn test_cidr_ipv6_containment() {
-        let mut ctx = Context::default();
-        crate::functions::register_parts(&mut ctx, &[register, crate::functions::dispatch::register]);
         assert_eq!(
-            Program::compile("cidr('2001:db8::/32').containsCIDR(cidr('2001:db8::/33'))")
-                .unwrap()
-                .execute(&ctx)
-                .unwrap(),
+            crate::functions::eval("cidr('2001:db8::/32').containsCIDR(cidr('2001:db8::/33'))").unwrap(),
             Value::Bool(true)
         );
     }
@@ -604,20 +572,12 @@ mod tests {
     #[test]
     fn test_cidr_masked_non_network() {
         // masking 192.168.1.5/24 should give 192.168.1.0/24
-        let mut ctx = Context::default();
-        crate::functions::register_parts(&mut ctx, &[register, crate::functions::dispatch::register]);
         assert_eq!(
-            Program::compile("cidr('192.168.1.5/24').masked().containsIP('192.168.1.0')")
-                .unwrap()
-                .execute(&ctx)
-                .unwrap(),
+            crate::functions::eval("cidr('192.168.1.5/24').masked().containsIP('192.168.1.0')").unwrap(),
             Value::Bool(true)
         );
         assert_eq!(
-            Program::compile("cidr('192.168.1.5/24').masked().containsIP('192.168.2.0')")
-                .unwrap()
-                .execute(&ctx)
-                .unwrap(),
+            crate::functions::eval("cidr('192.168.1.5/24').masked().containsIP('192.168.2.0')").unwrap(),
             Value::Bool(false)
         );
     }

@@ -27,8 +27,9 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   kube-cel's names, `cel` 0.16 refuses the name. Both used to pass silently.
   Neither happens on `Context::default()` or on `new_env()`.
 - **The validation engine's CEL environment now mirrors the apiserver's base
-  environment** (`k8s.io/apiserver` `environment.MustBaseEnvSet(..)`), separate
-  from the general-purpose `new_env()`. Verdicts change:
+  environment** (`k8s.io/apiserver` `environment.MustBaseEnvSet(..)`): it is
+  the environment `new_env()` builds (see "One environment" below), and its
+  compile path adds a check of function names. Verdicts change:
   - A rule, VAP expression or `messageExpression` that calls a function the
     apiserver does not declare (`cel.bind`, the `math` library, `base64.*`,
     `jsonpatch.escapeKey`, kube-cel's `isIPv4` / `isIPv6` / `isCIDRv4` /
@@ -64,9 +65,9 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     kube-cel does not implement or has behind a disabled feature, or a function
     called in a form none of its overloads takes, such as `ip(..).string()`); a
     function the apiserver does not declare is a `CompilationFailure`.
-  - Migration: none for rules the apiserver accepts. Global `min` / `max`
-    remain available through `new_env()` / `KubeCelExt` for general-purpose
-    evaluation; the other functions above are gone from kube-cel (next entry).
+  - Migration: none for rules the apiserver accepts. The functions above are
+    gone from kube-cel altogether (the next entry, and global `min` / `max`
+    under "One environment").
 - **kube-cel ships only functions the apiserver declares.** The `math.*`
   functions (18) and `base64.encode` / `base64.decode`, kube-cel's copies of
   cel-go's `ext.Math` and `ext.Encoders`, and `isIPv4`, `isIPv6`, `isCIDRv4`,
@@ -94,6 +95,55 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     `isIPv6`), `isCIDRv4(s)` → `isCIDR(s) && cidr(s).ip().family() == 4` (`6`
     for `isCIDRv6`), `jsonpatch.escapeKey(k)` →
     `k.replace('~', '~0').replace('/', '~1')`.
+- **One environment: `new_env()` / `new_context()` give general use the
+  environment the validation engine uses.** `new_env()` adds `cel`'s upstream
+  `lists` extension (with the `lists` feature; cel-go's `ext.Lists`, with the
+  `sortBy` macro) and the two-variable comprehension macros (`all(i, v, …)`,
+  `exists(i, v, …)`, `existsOne(i, v, …)`, `transformList`, `transformMap`,
+  `transformMapEntry`), and `new_context()` registers the same functions as
+  validation. kube-cel's own `slice`, `flatten`, `distinct`, `reverse`, `sort`
+  and `lists.range` are removed in favour of the upstream ones, and so is its
+  string `reverse()`. `sum`, `isSorted`, the list `min` / `max`, `indexOf`,
+  `lastIndexOf`, `first` and `last` stay. Validation verdicts do not change;
+  general-purpose evaluation does:
+  - `'abc'.reverse()` is an error: the apiserver's environment has no string
+    `reverse()`.
+  - `sort()` refuses a list mixing numeric types (`[3, 1u, 2.0].sort()`), a
+    `null`, a NaN, or elements it cannot compare even alone (`[{}].sort()`,
+    `[[1]].sort()`), all of which kube-cel's own sorted; it sorts `bytes` now.
+  - The list functions are member functions only: the global forms
+    `sort([2, 1])`, `reverse([1, 2])`, `distinct([1, 1])` and
+    `slice([1, 2], 0, 1)` are errors.
+  - An extra argument is refused (`[1].sort(99)`, `[1, 2].slice(0, 1, 99)`,
+    `[[1]].flatten(1, 2)`, `[1].distinct(99)`, `[1].reverse(99)`,
+    `lists.range(2, 99)`), where kube-cel's own ignored it.
+  - `lists.range(n)` makes at most 1,000,000 elements (kube-cel's own made up
+    to 10,000,000).
+  - Global `min(..)` / `max(..)` (`min(5, 3)`) are errors: kube-cel's list
+    `min` / `max` fell back to a variadic form that neither the apiserver
+    (only `<list>.min()` / `<list>.max()`) nor the `cel` standard library has.
+    The list members stay.
+  - `sortBy` and the two-variable comprehensions are macros: compile with
+    `env.compile(..)` on the environment from `new_env()`.
+    `Program::compile` knows only the standard macros, so such a program
+    fails on its iteration variable (`UndeclaredReference("x")`).
+  - Migration: build the env and context with `new_env()` / `new_context()`
+    and compile with `env.compile(..)`. Write a global `min(a, b)` as
+    `[a, b].min()`, and a global list call as a member call
+    (`[2, 1].sort()`). For a string `reverse()` outside the apiserver's
+    environment, declare the overload on the `Env` yourself:
+    ```rust
+    use kube_cel::cel::{self, common::types::CelString};
+    fn reverse(this: &CelString<'_>) -> CelString<'static> {
+        CelString::from(this.inner().chars().rev().collect::<String>())
+    }
+    let mut env = kube_cel::new_env();
+    cel::add_member_overload!(env, fn reverse: (CelString) -> CelString)?;
+    ```
+    `cel`'s `strings` extension has one too, but it also declares `charAt`,
+    `indexOf`, `lowerAscii`, `format`, … under kube-cel's names, so
+    `new_context()` refuses an environment with it (`RegisterError::Rejected`)
+    unless kube-cel's `strings`, `lists` and `format` features are all off.
 - **Validation verdicts follow the apiserver in more places.** Each change below
   was checked against a live kube-apiserver v1.36.1 (`just parity`):
   - Field-name escaping escapes only `__` (to `__underscores__`), `.`, `-`
@@ -172,18 +222,33 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     to be fixed before 0.9.0.
 
 ### Added
-- `new_env() -> cel::Env`: the `cel` standard library plus the overloads
-  kube-cel declares on the environment (`string(<IP>)`, `string(<CIDR>)`).
+- `new_env() -> cel::Env`: kube-cel's environment, the apiserver's base CEL
+  environment as far as kube-cel models it: the `cel` standard library, `cel`'s
+  upstream `lists` extension (feature `lists`), the two-variable comprehension
+  macros and `string(<IP>)` / `string(<CIDR>)` (feature `ip`). The validation
+  engine uses it too.
 - `new_context(env) -> Result<cel::Context, RegisterError>`: a root context on
-  `env` with every compiled-in function registered.
-- `KubeCelExt::try_register_all` / `try_with_all` and `RegisterError`
-  (`ChildScope`, `Rejected { function, source }`): the fallible forms of
-  `register_all` / `with_all`.
+  `env` with every compiled-in function registered, the path that replaces
+  `KubeCelExt`. `env` must start from `new_env()`, with `cel`'s extensions or
+  overloads of your own added as you need.
+- `RegisterError`: `IncompleteEnv` for an `env` that does not start from
+  `new_env()` (such as `Env::stdlib()`), `Rejected { function, source }` for an
+  `env` that declares one of kube-cel's names (such as with `cel`'s `strings`
+  extension).
+
+### Deprecated
+- `KubeCelExt::register_all` / `with_all`. They keep working, but register
+  only the functions that live on a context: on `Context::default()` the
+  `lists` extension, the macros and `string(<IP>)` are missing. Use
+  `new_env()` and `new_context()`. They will be removed once kube-cel's
+  functions move to `Env` overloads
+  ([#17](https://github.com/kube-rs/kube-cel/issues/17)).
 
 ### Changed
 - The validation engine (`Validator`, `compile_schema`, `VapEvaluator`, static
-  analysis) compiles with `Env::compile` on a shared, private `Env` instead of
-  `Program::compile`, so it sees the environment's macros and overloads.
+  analysis) compiles with `Env::compile` on a shared `Env` from `new_env()`
+  instead of `Program::compile`, so it sees the environment's macros and
+  overloads.
 - The `UnsupportedReference` message no longer blames an unsupported CEL macro
   or function; it names the reference evaluation could not resolve.
 
@@ -198,8 +263,12 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   field-name escaping, so `object.metadata.labels['app.kubernetes.io/name']`
   resolves.
 - `<list>.sum()` overflow is an error instead of a panic (debug) or a wrapped
-  result (release). `lists.range()` in `new_env()` refuses more than 10,000,000
-  elements.
+  result (release).
+- With every function feature off, `indexOf`, `lastIndexOf`, `isGreaterThan`,
+  `isLessThan` and `compareTo` are no longer registered: there was nothing for
+  them to call, and they took those names from a user's own functions. Each
+  pair now needs a feature that implements it (`strings` or `lists`;
+  `semver_funcs` or `quantity`).
 - Quantity `add` / `sub` past the `i128` range is an error instead of a panic
   or a wrapped result (the apiserver's quantities are exact, so this is a
   documented fail-closed limit).
@@ -211,15 +280,21 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   `cel.bind` (its base environment has no `ext.Bindings`); it rejects the CRD at
   registration. The `sortBy` and two-variable comprehension rows are gone (both
   now evaluate), and rows for `math.*`, the `isIPv4`-style helpers, `base64.*` /
-  `jsonpatch.escapeKey`, global `min` / `max`, string `reverse()` and
-  `<IP>.string()` are added (all fail closed). The authz library row now covers
+  `jsonpatch.escapeKey`, global `min` / `max`, string `reverse()`,
+  `lists.range(-1)` / `sort()` of a list holding a NaN, and `<IP>.string()` are
+  added (all fail closed). The authz library row now covers
   every function the apiserver declares that kube-cel does not implement
-  (`optional.unwrap`, `<list>.unwrapOpt()`, ..). A last row documents the one
-  known fail-open class: `cel` has no type checker yet
+  (`optional.unwrap`, `<list>.unwrapOpt()`, ..). Two last rows document the
+  known fail-open classes. `cel` has no type checker yet
   ([cel-rust#350](https://github.com/cel-rust/cel-rust/issues/350)), so a type,
   arity or call-shape error the apiserver rejects at registration passes when
-  evaluation does not reach it. The claim that a passing result is always at
-  least as strict as the apiserver is narrowed accordingly.
+  evaluation does not reach it. And `cel` has no cost model yet
+  ([cel-rust#230](https://github.com/cel-rust/cel-rust/discussions/230)), so a
+  rule the apiserver rejects for its estimated cost at registration
+  (`self.l.all(x, self.l.exists(y, x == y))` on a list with no `maxItems`), or
+  an object it rejects for a rule's runtime cost
+  (`lists.range(1000000).size() > 0`), passes. The claim that a passing result
+  is always at least as strict as the apiserver is narrowed accordingly.
 
 ## [0.8.0] - 2026-06-19
 

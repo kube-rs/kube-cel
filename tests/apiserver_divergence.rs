@@ -7,9 +7,12 @@
 //!   accept the object (a false positive; safe, but not faithful).
 //! - **fail-open** — kube-cel accepts where the apiserver would reject (a false
 //!   negative; dangerous). There should be **none** of these, with two
-//!   documented exceptions: the errors only a type checker catches, which `cel`
-//!   does not have yet (cel-rust#350), see [`no_type_checker_fails_open`]; and,
-//!   until it is fixed before 0.9.0 (#14), `format()`'s output, see
+//!   documented exception classes, which stay until `cel` ships the missing
+//!   piece: the errors only a type checker catches (cel-rust#350), see
+//!   [`no_type_checker_fails_open`], and the rules only a cost model refuses
+//!   (on `cel`'s roadmap, cel-rust discussion #230), see
+//!   [`no_cost_model_fails_open`]. Besides those, until it is fixed before
+//!   0.9.0 (#14), `format()`'s output, see
 //!   [`format_numeric_verbs_fail_open`] and [`format_s_fail_open`]. Rules on
 //!   schema nodes the object does not reach used to be another; since 0.9
 //!   every rule in the schema is compiled before the object is walked.
@@ -284,7 +287,7 @@ fn declared_unimplemented_functions_fail_closed_when_reached() {
     );
 }
 
-// ── No type checker — fails OPEN (the one documented exception) ──────────────
+// ── No type checker — fails OPEN (a documented exception class) ──────────────
 // apiserver: type-checks every expression at registration, so a type, arity or
 //            call-shape error, or an undeclared identifier, rejects the CRD
 //            even in a branch that is never evaluated.
@@ -299,7 +302,7 @@ fn assert_fails_open(rule: &str) {
     let result = run_rule(rule);
     assert!(
         result.is_ok(),
-        "{rule}: expected the known fail-open (no type checker) to pass, got {result:?}"
+        "{rule}: expected the documented fail-open to pass, got {result:?}"
     );
 }
 
@@ -338,6 +341,40 @@ fn no_type_checker_fails_open() {
     );
 }
 
+// ── No cost model — fails OPEN (a documented exception class) ────────────────
+// apiserver: estimates each rule's cost at registration and rejects the CRD
+//            past the budget ("estimated rule cost exceeds budget": a list
+//            with no `maxItems` iterated twice), and stops an evaluation past
+//            the per-expression cost limit, rejecting the object ("actual cost
+//            limit exceeded"). Both checked on v1.36.1.
+// kube-cel:  `cel` has no cost model yet (on its roadmap, cel-rust discussion
+//            #230), so these rules evaluate, and pass. Pinned so the gap is
+//            visible, and so this test fails (and gets updated) once one
+//            lands. `lists.range` refuses more than 1,000,000 elements, where
+//            the apiserver's cost limit stops it already.
+
+#[test]
+fn no_cost_model_fails_open() {
+    // Estimated cost, refused at registration (parity row `PcostEstimate`).
+    let schema = json!({
+        "type": "object",
+        "properties": { "l": { "type": "array", "items": { "type": "string" } } },
+        "x-kubernetes-validations": [{ "rule": "self.l.all(x, self.l.exists(y, x == y))" }]
+    });
+    let result = Validator::new().validate(&schema, &json!({"l": ["a", "b"]}), None);
+    assert!(
+        result.is_ok(),
+        "the estimated-cost rule is a documented fail-open, got {result:?}"
+    );
+
+    // Runtime cost, the object refused at evaluation.
+    #[cfg(feature = "lists")]
+    {
+        assert_fails_open("lists.range(1000000).size() > 0");
+        assert_fails_open("lists.range(600000).map(x, x).size() > 0");
+    }
+}
+
 // ── `format()` output — fail OPEN (fix before 0.9.0) ─────────────────────────
 // apiserver: cel-go v0.26's formatter (`ext.Strings` version 2). It prints `%f`
 //            and `%e` through golang.org/x/text's locale printer, a negative
@@ -353,6 +390,7 @@ fn no_type_checker_fails_open() {
 //            holds on one side only. Pinned so the tests fail once fixed.
 
 #[test]
+#[cfg(feature = "format")]
 fn format_numeric_verbs_fail_open() {
     // kube-cel's own output: these hold here and fail on the apiserver.
     for rule in [
@@ -389,6 +427,7 @@ fn format_numeric_verbs_fail_open() {
 }
 
 #[test]
+#[cfg(feature = "format")]
 fn format_s_fail_open() {
     // kube-cel's own output: these hold here and fail on the apiserver.
     for rule in [
@@ -493,6 +532,30 @@ fn kubernetes_list_functions_coexist() {
     assert_passes("!self.items.isSorted() && self.items.sum() == 6 && self.items.min() == 1");
 }
 
+// ── `lists` extension edge cases — fail CLOSED ──────────────────────────────
+// apiserver: cel-go v0.26's `ext.Lists` makes `[]` of `lists.range(-1)`, and
+//            `sort()` orders a list holding a NaN (Go's `sort.Slice` with `<`,
+//            which no NaN satisfies), so the rules below hold (checked on
+//            v1.36.1).
+// kube-cel:  `cel`'s `lists` extension refuses a negative size and a NaN it
+//            cannot order: EvaluationError, the object is rejected.
+
+#[test]
+#[cfg(feature = "lists")]
+fn upstream_lists_edge_cases_fail_closed() {
+    for rule in [
+        "lists.range(-1) == []",
+        "[double('NaN')].sort().size() == 1",
+        "[1.0, double('NaN'), 2.0].sort().size() == 3",
+    ] {
+        let errors = run_rule(rule).unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.kind == ErrorKind::EvaluationError),
+            "{rule}: expected EvaluationError, got {errors:?}"
+        );
+    }
+}
+
 /// Control: the single-argument comprehension is supported alongside the
 /// two-variable form above; enabling the two-variable macros must not shadow it.
 #[test]
@@ -547,6 +610,7 @@ fn runtime_error_chains_its_cause() {
 //            a wrapped value.
 
 #[test]
+#[cfg(feature = "quantity")]
 fn quantity_arithmetic_past_i128_fails_closed() {
     for rule in [
         "quantity('2e38').add(quantity('1')).isGreaterThan(quantity('2e38'))",

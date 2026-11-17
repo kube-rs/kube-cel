@@ -7,7 +7,8 @@
 //!
 //! Build kube-cel's [`cel::Env`] with [`new_env`] and a context on it with
 //! [`new_context`], then compile with [`cel::Env::compile`] on the same
-//! environment:
+//! environment, which expands its macros (`sortBy`, the two-variable
+//! comprehensions):
 //!
 //! ```rust
 //! use std::sync::Arc;
@@ -18,21 +19,12 @@
 //! # let _ = program.execute(&ctx);
 //! ```
 //!
-//! To add the functions to a context you already have, use the [`KubeCelExt`]
-//! extension trait:
-//!
-//! ```rust
-//! use kube_cel::{cel, KubeCelExt};
-//!
-//! let ctx = cel::Context::default().with_all();
-//! # let _ = ctx;
-//! ```
-//!
-//! That registers every compiled-in function, but not the few overloads
-//! kube-cel declares on the [`cel::Env`] itself (`string(<IP>)` and
-//! `string(<CIDR>)`), which need an environment from [`new_env`]. See
-//! [`KubeCelExt`] for the fallible `try_` forms and the function-group →
-//! upstream-source table.
+//! [`new_env`] is the environment kube-cel's validation engine uses too: the
+//! apiserver's base CEL environment as far as kube-cel models it. Add `cel`'s
+//! extensions or overloads of your own to it before sharing it; see [`new_env`]
+//! and [`new_context`] for what lives where and the function-group → upstream
+//! source table. The [`KubeCelExt`] trait, which registers the context
+//! functions on a context you already have, is deprecated.
 //!
 //! # Version coherence
 //!
@@ -78,7 +70,7 @@
 //! stable while its public dependencies are not (Rust API Guidelines C-STABLE).
 //! After `cel` 1.0, kube-cel 1.x tracks `cel` 1.y; a `cel` major forces a
 //! kube-cel major. Two stability tiers: **Tier 1** (committed) is the
-//! registration surface — [`KubeCelExt`], [`new_env`]/[`new_context`] and the
+//! entry-point surface — [`new_env`]/[`new_context`], [`RegisterError`] and the
 //! `cel` re-export; **Tier 2** (evolving, `validation` feature) is the
 //! validation engine, whose surface may still change across pre-1.0 minors. See
 //! the README for details.
@@ -132,7 +124,8 @@ pub use cel;
 // set of crate-root re-exports below, not the file layout.
 //
 // `functions/` — Tier 1, the Kubernetes CEL extension-function port (always on,
-// each library behind its own feature). Public entry point: `KubeCelExt`.
+// each library behind its own feature). Public entry points: `new_env` and
+// `new_context` (`ext`).
 mod ext;
 mod functions;
 
@@ -140,7 +133,8 @@ mod functions;
 // feature). Its public items are re-exported flatly below.
 #[cfg(feature = "validation")] mod validation;
 
-pub use ext::{KubeCelExt, RegisterError, new_context, new_env};
+#[allow(deprecated)] pub use ext::KubeCelExt;
+pub use ext::{RegisterError, new_context, new_env};
 
 #[cfg(feature = "validation")]
 pub use crate::validation::{
@@ -160,7 +154,7 @@ pub use crate::validation::{
 
 /// Registers all compiled-in Kubernetes CEL extension functions into `ctx`.
 ///
-/// Re-exported from [`functions`] so in-crate callers can keep writing
+/// Re-exported from [`functions`] so in-crate callers can write
 /// `crate::register_all`.
 pub(crate) use functions::register_all;
 
@@ -170,12 +164,11 @@ mod tests {
 
     #[allow(unused_imports)] use std::sync::Arc;
 
-    use cel::{Context, Program, Value};
+    use cel::Value;
 
     #[allow(dead_code)]
     fn eval(expr: &str) -> Value {
-        let ctx = Context::default().with_all();
-        Program::compile(expr).unwrap().execute(&ctx).unwrap()
+        crate::functions::eval(expr).unwrap()
     }
 
     #[test]

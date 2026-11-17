@@ -201,8 +201,8 @@ fn kubecel_verdicts(schema: &Value, object: &Value, old: Option<&Value>) -> [Ver
 
 /// Drive the entire shared table through the kind/kubectl path. For each case:
 /// either pin a CRD-registration rejection (and kube-cel's verdict on a valid
-/// object: a rejection, or an acceptance for the documented no-type-checker
-/// fail-open class), or feed the identical (schema, object) to the apiserver
+/// object: a rejection, or an acceptance for the documented fail-open classes,
+/// no type checker and no cost model), or feed the identical (schema, object) to the apiserver
 /// and every kube-cel entry point and require all of them to match the
 /// expected verdict.
 #[test]
@@ -267,7 +267,8 @@ fn parity_against_kind() {
     }
     println!(
         "parity_against_kind: {total}/{total} cases as expected ({fail_open} of them the pinned \
-         no-type-checker fail-open, kube-cel accepting what the apiserver refuses at registration)"
+         fail-open classes, no type checker and no cost model: kube-cel accepting what the apiserver \
+         refuses at registration)"
     );
 }
 

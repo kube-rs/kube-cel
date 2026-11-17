@@ -61,12 +61,9 @@ fn sets_intersects(a: Arc<Vec<Value>>, b: Arc<Vec<Value>>) -> ResolveResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel::{Context, Program};
 
     fn eval(expr: &str) -> Value {
-        let mut ctx = Context::default();
-        crate::functions::register_parts(&mut ctx, &[register]);
-        Program::compile(expr).unwrap().execute(&ctx).unwrap()
+        crate::functions::eval(expr).unwrap()
     }
 
     #[test]

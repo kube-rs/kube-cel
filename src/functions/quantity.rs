@@ -477,12 +477,9 @@ fn quantity_or_int(val: &Value, func: &str) -> Result<KubeQuantity, ExecutionErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel::{Context, Program};
 
     fn eval(expr: &str) -> Value {
-        let mut ctx = Context::default();
-        crate::functions::register_parts(&mut ctx, &[register, crate::functions::dispatch::register]);
-        Program::compile(expr).unwrap().execute(&ctx).unwrap()
+        crate::functions::eval(expr).unwrap()
     }
 
     #[test]
@@ -519,11 +516,7 @@ mod tests {
     #[test]
     fn add_overflow_errors() {
         // 2e38 scaled to scale 0 overflows i128 → error, not panic/wrap.
-        let mut ctx = Context::default();
-        crate::functions::register_parts(&mut ctx, &[register, crate::functions::dispatch::register]);
-        let r = Program::compile("quantity('2e38').add(quantity('1'))")
-            .unwrap()
-            .execute(&ctx);
+        let r = crate::functions::eval("quantity('2e38').add(quantity('1'))");
         assert!(r.is_err(), "expected overflow error, got {r:?}");
     }
 
@@ -685,9 +678,7 @@ mod tests {
     // --- Error & edge case tests ---
 
     fn eval_err(expr: &str) -> cel::ExecutionError {
-        let mut ctx = Context::default();
-        crate::functions::register_parts(&mut ctx, &[register, crate::functions::dispatch::register]);
-        Program::compile(expr).unwrap().execute(&ctx).unwrap_err()
+        crate::functions::eval(expr).unwrap_err()
     }
 
     #[test]

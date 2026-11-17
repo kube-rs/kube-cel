@@ -12,21 +12,23 @@ fn run(env: &Env, ctx: &Context, label: &str, expr: &str) {
 }
 
 fn main() {
-    // kube-cel's Env (stdlib + the overloads kube-cel declares on it) and a
-    // context on it with every compiled-in function registered.
+    // kube-cel's Env (the apiserver's: stdlib, cel's lists extension, the
+    // two-variable comprehensions, string(<IP>)) and a context on it with
+    // every compiled-in function registered.
     let env = Arc::new(kube_cel::new_env());
     let ctx = kube_cel::new_context(Arc::clone(&env)).unwrap();
     let run = |label: &str, expr: &str| run(&env, &ctx, label, expr);
 
     // String functions
     run("upperAscii", "'hello world'.upperAscii()");
-    run("reverse", "'hello'.reverse()");
 
     // List functions
     run("isSorted", "[3, 1, 2].isSorted()");
     run("sort", "[3, 1, 2].sort()");
     run("lists.range", "lists.range(5)");
     run("flatten(2)", "[[1, [2]], [3]].flatten(2)");
+    run("sortBy", "['bb', 'a', 'ccc'].sortBy(s, size(s))");
+    run("transformList", "[1, 2, 3].transformList(i, v, i * v)");
 
     // Quantity comparison
     run("1Gi > 500Mi", "quantity('1Gi').isGreaterThan(quantity('500Mi'))");

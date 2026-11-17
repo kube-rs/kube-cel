@@ -167,12 +167,9 @@ pub(crate) fn semver_compare_to(This(this): This<Value>, other: Value) -> Resolv
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel::{Context, Program};
 
     fn eval(expr: &str) -> Value {
-        let mut ctx = Context::default();
-        crate::functions::register_parts(&mut ctx, &[register, crate::functions::dispatch::register]);
-        Program::compile(expr).unwrap().execute(&ctx).unwrap()
+        crate::functions::eval(expr).unwrap()
     }
 
     #[test]
@@ -264,9 +261,7 @@ mod tests {
     // --- Error & edge case tests ---
 
     fn eval_err(expr: &str) -> cel::ExecutionError {
-        let mut ctx = Context::default();
-        crate::functions::register_parts(&mut ctx, &[register, crate::functions::dispatch::register]);
-        Program::compile(expr).unwrap().execute(&ctx).unwrap_err()
+        crate::functions::eval(expr).unwrap_err()
     }
 
     #[test]

@@ -5,8 +5,6 @@
 //! both strings and lists), this module provides unified dispatch functions
 //! that route to the correct implementation based on the runtime type of `this`.
 
-#[cfg(feature = "lists")] use std::sync::Arc;
-
 use cel::{
     ExecutionError, ResolveResult,
     extractors::{Arguments, This},
@@ -19,35 +17,35 @@ use crate::functions::Registrar;
 /// Registration order is independent
 /// of individual module registrations since modules no longer register
 /// these conflicting names.
+///
+/// A name is registered only when a feature that implements it is on: with
+/// neither `strings` nor `lists` there is no `indexOf` to dispatch to, so
+/// registering one would only shadow a user's function of that name.
 pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
-    r.add("indexOf", index_of);
-    r.add("lastIndexOf", last_index_of);
+    #[cfg(any(feature = "strings", feature = "lists"))]
+    {
+        r.add("indexOf", index_of);
+        r.add("lastIndexOf", last_index_of);
+    }
 
     // Comparison/arithmetic: shared between semver_funcs and quantity
-    r.add("isGreaterThan", is_greater_than);
-    r.add("isLessThan", is_less_than);
-    r.add("compareTo", compare_to);
+    #[cfg(any(feature = "semver_funcs", feature = "quantity"))]
+    {
+        r.add("isGreaterThan", is_greater_than);
+        r.add("isLessThan", is_less_than);
+        r.add("compareTo", compare_to);
+    }
 
     // ip: string → parse IP, CIDR → extract network address
     #[cfg(feature = "ip")]
     r.add("ip", ip_dispatch);
-
-    // reverse: string → reversed string, list → reversed list
-    #[cfg(any(feature = "strings", feature = "lists"))]
-    r.add("reverse", reverse);
-
-    // min/max: list method vs cel built-in variadic
-    #[cfg(feature = "lists")]
-    {
-        r.add("min", min_dispatch);
-        r.add("max", max_dispatch);
-    }
 }
 
 // ---------------------------------------------------------------------------
 // indexOf / lastIndexOf
 // ---------------------------------------------------------------------------
 
+#[cfg(any(feature = "strings", feature = "lists"))]
 #[allow(unused_variables)]
 fn index_of(This(this): This<Value>, Arguments(args): Arguments) -> ResolveResult {
     match this {
@@ -64,6 +62,7 @@ fn index_of(This(this): This<Value>, Arguments(args): Arguments) -> ResolveResul
     }
 }
 
+#[cfg(any(feature = "strings", feature = "lists"))]
 #[allow(unused_variables)]
 fn last_index_of(This(this): This<Value>, Arguments(args): Arguments) -> ResolveResult {
     match this {
@@ -87,6 +86,7 @@ fn last_index_of(This(this): This<Value>, Arguments(args): Arguments) -> Resolve
 /// Generate a dispatch function that routes to semver or quantity based on opaque type.
 macro_rules! opaque_comparison_dispatch {
     ($fn_name:ident, $name:literal, $semver_fn:path, $quantity_fn:path) => {
+        #[cfg(any(feature = "semver_funcs", feature = "quantity"))]
         #[allow(unused_variables)]
         fn $fn_name(This(this): This<Value>, Arguments(args): Arguments) -> ResolveResult {
             let arg = args
@@ -169,70 +169,17 @@ fn ip_dispatch(This(this): This<Value>, Arguments(args): Arguments) -> ResolveRe
     }
 }
 
-// ---------------------------------------------------------------------------
-// reverse (string → reversed string, list → reversed list)
-// ---------------------------------------------------------------------------
-
-#[cfg(any(feature = "strings", feature = "lists"))]
-#[allow(unused_variables)]
-fn reverse(This(this): This<Value>) -> ResolveResult {
-    match this {
-        #[cfg(feature = "strings")]
-        Value::String(s) => crate::functions::strings::string_reverse(This(s)),
-
-        #[cfg(feature = "lists")]
-        Value::List(list) => crate::functions::lists::list_reverse_value(This(list)),
-
-        _ => Err(ExecutionError::function_error(
-            "reverse",
-            format!("reverse not supported on type {:?}", this.type_of()),
-        )),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// min / max (list method vs cel built-in variadic)
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "lists")]
-fn min_dispatch(This(this): This<Value>, Arguments(args): Arguments) -> ResolveResult {
-    match this {
-        Value::List(list) if args.is_empty() => crate::functions::lists::list_min(This(list)),
-        _ => {
-            let mut all_args = vec![this];
-            all_args.extend(args.iter().cloned());
-            cel::functions::min(Arguments(Arc::new(all_args)))
-        }
-    }
-}
-
-#[cfg(feature = "lists")]
-fn max_dispatch(This(this): This<Value>, Arguments(args): Arguments) -> ResolveResult {
-    match this {
-        Value::List(list) if args.is_empty() => crate::functions::lists::list_max(This(list)),
-        _ => {
-            let mut all_args = vec![this];
-            all_args.extend(args.iter().cloned());
-            cel::functions::max(Arguments(Arc::new(all_args)))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(dead_code)]
-    use cel::{Context, Program, Value};
+    use cel::Value;
 
     fn eval(expr: &str) -> Value {
-        let mut ctx = Context::default();
-        crate::register_all(&mut ctx).unwrap();
-        Program::compile(expr).unwrap().execute(&ctx).unwrap()
+        crate::functions::eval(expr).unwrap()
     }
 
     fn eval_err(expr: &str) -> cel::ExecutionError {
-        let mut ctx = Context::default();
-        crate::register_all(&mut ctx).unwrap();
-        Program::compile(expr).unwrap().execute(&ctx).unwrap_err()
+        crate::functions::eval(expr).unwrap_err()
     }
 
     // --- Dispatch error tests ---
@@ -265,32 +212,5 @@ mod tests {
     #[cfg(feature = "semver_funcs")]
     fn test_compare_to_unsupported_type() {
         eval_err("'hello'.compareTo('world')");
-    }
-
-    // --- min/max dispatch: list method and global variadic coexistence ---
-
-    #[test]
-    #[cfg(feature = "lists")]
-    fn test_min_list_method() {
-        assert_eq!(eval("[3, 1, 2].min()"), Value::Int(1));
-    }
-
-    #[test]
-    #[cfg(feature = "lists")]
-    fn test_max_list_method() {
-        assert_eq!(eval("[3, 1, 2].max()"), Value::Int(3));
-    }
-
-    #[test]
-    #[cfg(feature = "lists")]
-    fn test_min_global_variadic() {
-        // cel built-in variadic min must still work after dispatch
-        assert_eq!(eval("min(5, 3)"), Value::Int(3));
-    }
-
-    #[test]
-    #[cfg(feature = "lists")]
-    fn test_max_global_variadic() {
-        assert_eq!(eval("max(5, 3)"), Value::Int(5));
     }
 }

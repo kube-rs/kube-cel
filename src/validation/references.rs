@@ -25,8 +25,9 @@
 //! It checks names only. Type, arity and call-shape errors (`[1, 2.0].isSorted()`,
 //! `'a'.lowerAscii(42)`, `family(ip(..))`) still need a type checker: see the
 //! README "apiserver divergence" table. The one call shape it does refuse is a
-//! global `min(..)`/`max(..)`, which kube-cel's functions accept but the
-//! apiserver only has as `<list>.min()`/`<list>.max()`.
+//! global `min(..)`/`max(..)`: the apiserver only has `<list>.min()`/
+//! `<list>.max()`, while `cel` evaluates any member function called as a
+//! global, so `min([1, 2])` would run.
 
 use std::{collections::HashSet, sync::LazyLock};
 
@@ -211,7 +212,7 @@ mod tests {
 
     use super::apiserver_functions;
     use crate::{
-        functions::{Profile, register_profile},
+        functions::register_all,
         validation::{compile, validation_env},
     };
 
@@ -241,40 +242,33 @@ mod tests {
     ];
 
     /// Whether kube-cel can call `name` in a rule: `cel` declares it on the
-    /// validation env, or kube-cel's validation profile registers it.
+    /// validation env, or kube-cel registers it on a context.
     fn implemented(name: &str, registered: &BTreeSet<String>) -> bool {
         validation_env().function(name).is_some() || registered.contains(name)
     }
 
     fn registered() -> BTreeSet<String> {
         let mut ctx = cel::Context::with_env(Arc::clone(validation_env()));
-        register_profile(&mut ctx, Profile::Validation)
-            .expect("kube-cel's functions register onto its validation Env")
+        register_all(&mut ctx)
+            .expect("kube-cel's functions register onto its Env")
             .into_iter()
             .collect()
     }
 
-    /// Every function kube-cel registers, for rules (the validation profile)
-    /// and through `new_env()` / `KubeCelExt` (the general one), is one the
-    /// apiserver declares: kube-cel ships no function Kubernetes lacks, and the
-    /// name check would refuse a call to one in a rule.
+    /// Every function kube-cel registers is one the apiserver declares:
+    /// kube-cel ships no function Kubernetes lacks, and the name check would
+    /// refuse a call to one in a rule. General use and validation share the
+    /// set, so this covers both.
     #[test]
     fn registered_functions_are_declared_by_the_apiserver() {
-        for (profile, env) in [
-            (Profile::Validation, Arc::clone(validation_env())),
-            (Profile::General, Arc::new(crate::new_env())),
-        ] {
-            let mut ctx = cel::Context::with_env(env);
-            let stray: Vec<String> = register_profile(&mut ctx, profile)
-                .expect("kube-cel's functions register onto its Env")
-                .into_iter()
-                .filter(|name| !apiserver_functions().contains(name.as_str()))
-                .collect();
-            assert!(
-                stray.is_empty(),
-                "{profile:?} profile registers functions the apiserver does not declare: {stray:?}"
-            );
-        }
+        let stray: Vec<String> = registered()
+            .into_iter()
+            .filter(|name| !apiserver_functions().contains(name.as_str()))
+            .collect();
+        assert!(
+            stray.is_empty(),
+            "kube-cel registers functions the apiserver does not declare: {stray:?}"
+        );
     }
 
     /// Declared = implemented ∪ declared-only, with the two disjoint. Fails
