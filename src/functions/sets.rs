@@ -3,64 +3,95 @@
 //! Provides set operations on lists, matching `cel-go/ext/sets.go`.
 //! These are namespaced functions called as `sets.contains(a, b)`.
 
-use cel::{ResolveResult, objects::Value};
-use std::sync::Arc;
+use cel::{
+    ExecutionError, FunctionContext,
+    common::{
+        types::CelBool,
+        value::{CowVal, Val},
+    },
+};
 
-use crate::functions::{Registrar, value_ops::val_eq};
+use crate::functions::{
+    Registrar,
+    val_args::{RawFunction, holds, list_items},
+};
 
-/// Register all set extension functions.
+/// Register all set extension functions. They read their lists as `Val`s, so
+/// a schema-aware element (a set in a list) keeps its own equality.
 pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
-    r.add("sets.contains", sets_contains);
-    r.add("sets.equivalent", sets_equivalent);
-    r.add("sets.intersects", sets_intersects);
+    r.add("sets.contains", Box::new(sets_contains) as RawFunction);
+    r.add("sets.equivalent", Box::new(sets_equivalent) as RawFunction);
+    r.add("sets.intersects", Box::new(sets_intersects) as RawFunction);
+}
+
+/// The two list arguments of a `sets` function.
+fn two_lists<'f, 'c, 'call>(
+    ftx: &'f FunctionContext<'c, 'call>,
+    name: &str,
+) -> Result<(&'f (dyn Val + 'call), &'f (dyn Val + 'call)), ExecutionError> {
+    match ftx.args.as_slice() {
+        [a, b] => Ok((a.as_ref(), b.as_ref())),
+        args => Err(ExecutionError::function_error(
+            name,
+            format!("expected 2 arguments, got {}", args.len()),
+        )),
+    }
+}
+
+/// Whether `list` holds every element of `sublist`: cel-go's `setsContains`,
+/// `list.Contains(item)` for each item.
+fn contains_all(name: &str, list: &dyn Val, sublist: &dyn Val) -> Result<bool, ExecutionError> {
+    for item in list_items(name, sublist)? {
+        if !holds(name, list, item)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// `sets.contains(list, list) -> bool`
 ///
 /// Returns true if the first list contains all elements of the second list.
-fn sets_contains(a: Arc<Vec<Value>>, b: Arc<Vec<Value>>) -> ResolveResult {
-    for item in b.iter() {
-        if !a.iter().any(|x| val_eq(x, item)) {
-            return Ok(Value::Bool(false));
-        }
-    }
-    Ok(Value::Bool(true))
+fn sets_contains<'c, 'call>(
+    ftx: &mut FunctionContext<'c, 'call>,
+) -> Result<CowVal<'c, 'call>, ExecutionError> {
+    let (a, b) = two_lists(ftx, "sets.contains")?;
+    Ok(CowVal::owned(CelBool::from(contains_all("sets.contains", a, b)?)))
 }
 
 /// `sets.equivalent(list, list) -> bool`
 ///
 /// Returns true if both lists contain the same set of elements
 /// (ignoring duplicates and order).
-fn sets_equivalent(a: Arc<Vec<Value>>, b: Arc<Vec<Value>>) -> ResolveResult {
-    // a contains all of b AND b contains all of a
-    for item in b.iter() {
-        if !a.iter().any(|x| val_eq(x, item)) {
-            return Ok(Value::Bool(false));
-        }
-    }
-    for item in a.iter() {
-        if !b.iter().any(|x| val_eq(x, item)) {
-            return Ok(Value::Bool(false));
-        }
-    }
-    Ok(Value::Bool(true))
+fn sets_equivalent<'c, 'call>(
+    ftx: &mut FunctionContext<'c, 'call>,
+) -> Result<CowVal<'c, 'call>, ExecutionError> {
+    let (a, b) = two_lists(ftx, "sets.equivalent")?;
+    let equivalent = contains_all("sets.equivalent", a, b)? && contains_all("sets.equivalent", b, a)?;
+    Ok(CowVal::owned(CelBool::from(equivalent)))
 }
 
 /// `sets.intersects(list, list) -> bool`
 ///
-/// Returns true if the two lists share at least one common element.
-fn sets_intersects(a: Arc<Vec<Value>>, b: Arc<Vec<Value>>) -> ResolveResult {
-    for item in a.iter() {
-        if b.iter().any(|x| val_eq(x, item)) {
-            return Ok(Value::Bool(true));
+/// Returns true if the two lists share at least one common element: cel-go's
+/// `setsIntersects`, the second list's `Contains` for each item of the first.
+fn sets_intersects<'c, 'call>(
+    ftx: &mut FunctionContext<'c, 'call>,
+) -> Result<CowVal<'c, 'call>, ExecutionError> {
+    let (a, b) = two_lists(ftx, "sets.intersects")?;
+    let mut intersects = false;
+    for item in list_items("sets.intersects", a)? {
+        if holds("sets.intersects", b, item)? {
+            intersects = true;
+            break;
         }
     }
-    Ok(Value::Bool(false))
+    Ok(CowVal::owned(CelBool::from(intersects)))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use cel::Value;
 
     fn eval(expr: &str) -> Value {
         crate::functions::eval(expr).unwrap()

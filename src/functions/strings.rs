@@ -23,7 +23,17 @@ pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
     r.add("split", string_split);
     r.add("substring", substring);
     r.add("trim", trim);
-    r.add("join", join);
+    r.add(
+        "join",
+        crate::functions::val_args::snapshot(|this, args| {
+            // A legacy `Arguments` is every argument (see `lists::register`).
+            let all = Arguments(Arc::new(args.clone()));
+            join(
+                This(crate::functions::val_args::list_target("join", this, args)?.0),
+                all,
+            )
+        }),
+    );
     r.add("strings.quote", strings_quote);
 }
 

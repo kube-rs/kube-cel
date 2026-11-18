@@ -156,6 +156,16 @@ fn format_value(v: &dyn Val) -> Result<Value, ExecutionError> {
                     .collect::<Result<Vec<_>, _>>()?;
                 return Ok(Value::List(Arc::new(items)));
             }
+            // A list of an application's own type (the validation engine's
+            // set and map lists): through its elements, in order.
+            if let Some(iterable) = v.as_iterable() {
+                let mut elements = iterable.iter();
+                let mut items = Vec::new();
+                while let Some(item) = elements.next() {
+                    items.push(format_value(item)?);
+                }
+                return Ok(Value::List(Arc::new(items)));
+            }
         }
         Kind::Map => {
             if let Some(map) = v.downcast_ref::<CelMap>() {
@@ -164,6 +174,28 @@ fn format_value(v: &dyn Val) -> Result<Value, ExecutionError> {
                     .iter()
                     .map(|(k, v)| Ok((Key::from(k.clone()), format_value(v.as_ref())?)))
                     .collect::<Result<HashMap<_, _>, ExecutionError>>()?;
+                return Ok(Value::Map(Map {
+                    map: Arc::new(entries),
+                }));
+            }
+            // A map of an application's own type (the validation engine's
+            // objects): each key it iterates, looked up. A key it iterates
+            // but does not hold (an object's `null` property) fails, as the
+            // apiserver's formatter does.
+            if let (Some(iterable), Some(indexer)) = (v.as_iterable(), v.as_indexer()) {
+                let mut keys = iterable.iter();
+                let mut entries = HashMap::new();
+                while let Some(key) = keys.next() {
+                    let value = format_value(indexer.get(key)?.as_ref())?;
+                    let key = match Value::try_from(key)? {
+                        Value::String(s) => Key::String(s),
+                        Value::Int(i) => Key::Int(i),
+                        Value::UInt(u) => Key::Uint(u),
+                        Value::Bool(b) => Key::Bool(b),
+                        other => return Err(err(format!("unsupported map key {other:?}"))),
+                    };
+                    entries.insert(key, value);
+                }
                 return Ok(Value::Map(Map {
                     map: Arc::new(entries),
                 }));

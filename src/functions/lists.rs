@@ -4,27 +4,53 @@
 //! matching the behavior of `k8s.io/apiserver/pkg/cel/library/lists.go`.
 
 use cel::{
-    ExecutionError, ResolveResult,
+    ExecutionError, FunctionContext, ResolveResult,
+    common::{
+        types::{CelInt, CelOptional},
+        value::{CowVal, Val},
+    },
     extractors::{Arguments, This},
-    objects::{OptionalValue, Value},
+    objects::Value,
 };
 use std::{cmp::Ordering, sync::Arc};
 
 use crate::functions::{
     Registrar,
-    value_ops::{go_compare, val_add, val_eq},
+    val_args::{RawFunction, list_items, list_target, snapshot, val_target},
+    value_ops::{go_compare, val_add},
 };
 
-/// Register all list extension functions.
+/// Register all list extension functions. Each takes any list `Val`, the
+/// validation engine's schema-aware ones included (see `val_args`).
 pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
-    r.add("isSorted", is_sorted);
-    r.add("sum", sum);
-    r.add("min", list_min);
-    r.add("max", list_max);
+    r.add(
+        "isSorted",
+        snapshot(|this, args| is_sorted(This(list_target("isSorted", this, args)?.0))),
+    );
+    r.add(
+        "sum",
+        snapshot(|this, args| sum(This(list_target("sum", this, args)?.0))),
+    );
+    // A legacy `Arguments` is every argument, the one a global call takes as
+    // its target included, so `min([1, 2])` stays refused.
+    r.add(
+        "min",
+        snapshot(|this, args| {
+            let all = Arguments(Arc::new(args.clone()));
+            list_min(This(list_target("min", this, args)?.0), all)
+        }),
+    );
+    r.add(
+        "max",
+        snapshot(|this, args| {
+            let all = Arguments(Arc::new(args.clone()));
+            list_max(This(list_target("max", this, args)?.0), all)
+        }),
+    );
     // indexOf/lastIndexOf are registered via dispatch module to handle
     // name collision between string and list versions.
-    r.add("first", list_first);
-    r.add("last", list_last);
+    r.add("first", Box::new(list_first) as RawFunction);
+    r.add("last", Box::new(list_last) as RawFunction);
     // slice, sort, flatten, reverse, distinct and lists.range are cel-go's
     // `ext.Lists`, declared on the Env (see `lists_ext`).
 }
@@ -135,55 +161,51 @@ fn list_max(This(this): This<Arc<Vec<Value>>>, Arguments(args): Arguments) -> Re
     extreme("max", &this, Ordering::Less)
 }
 
-/// `<list>.indexOf(T) -> int`
-///
-/// Returns the index of the first occurrence of the value, or -1 if not found.
-pub(crate) fn list_index_of(list: &[Value], args: &[Value]) -> ResolveResult {
-    let target = args
-        .first()
-        .ok_or_else(|| ExecutionError::function_error("indexOf", "expected argument"))?;
-    for (i, item) in list.iter().enumerate() {
-        if val_eq(item, target) {
-            return Ok(Value::Int(i as i64));
-        }
-    }
-    Ok(Value::Int(-1))
+/// `<list>.indexOf(T) -> int`: the index of the first element equal to
+/// `target`, or -1. The element is on the left of `==`, as in the apiserver
+/// (`lister.Get(i).Equal(item)`), so a set element compares as a set.
+pub(crate) fn list_index_of<'c, 'call>(
+    list: &dyn Val,
+    target: &dyn Val,
+) -> Result<CowVal<'c, 'call>, ExecutionError> {
+    let index = list_items("indexOf", list)?
+        .iter()
+        .position(|item| item.equals(target))
+        .map_or(-1, |i| i as i64);
+    Ok(CowVal::owned(CelInt::from(index)))
 }
 
-/// `<list>.lastIndexOf(T) -> int`
-///
-/// Returns the index of the last occurrence of the value, or -1 if not found.
-pub(crate) fn list_last_index_of(list: &[Value], args: &[Value]) -> ResolveResult {
-    let target = args
-        .first()
-        .ok_or_else(|| ExecutionError::function_error("lastIndexOf", "expected argument"))?;
-    let mut result: i64 = -1;
-    for (i, item) in list.iter().enumerate() {
-        if val_eq(item, target) {
-            result = i as i64;
-        }
-    }
-    Ok(Value::Int(result))
+/// `<list>.lastIndexOf(T) -> int`: as [`list_index_of`], the last one.
+pub(crate) fn list_last_index_of<'c, 'call>(
+    list: &dyn Val,
+    target: &dyn Val,
+) -> Result<CowVal<'c, 'call>, ExecutionError> {
+    let index = list_items("lastIndexOf", list)?
+        .iter()
+        .rposition(|item| item.equals(target))
+        .map_or(-1, |i| i as i64);
+    Ok(CowVal::owned(CelInt::from(index)))
 }
 
-/// `<list>.first() -> optional<T>`
-///
-/// Returns `optional.of(first_element)` if non-empty, `optional.none()` if empty.
-fn list_first(This(this): This<Arc<Vec<Value>>>) -> ResolveResult {
-    match this.first() {
-        Some(v) => Ok(Value::Opaque(Arc::new(OptionalValue::of(v.clone())))),
-        None => Ok(Value::Opaque(Arc::new(OptionalValue::none()))),
-    }
+/// `<list>.first() -> optional<T>`: `optional.of` the first element, the
+/// element itself (a set stays a set), or `optional.none()`.
+fn list_first<'c, 'call>(ftx: &mut FunctionContext<'c, 'call>) -> Result<CowVal<'c, 'call>, ExecutionError> {
+    let (list, _) = val_target(ftx)?;
+    let items = list_items("first", list)?;
+    Ok(CowVal::owned(match items.first() {
+        Some(item) => CelOptional::of(item.clone_as_boxed()),
+        None => CelOptional::none(),
+    }))
 }
 
-/// `<list>.last() -> optional<T>`
-///
-/// Returns `optional.of(last_element)` if non-empty, `optional.none()` if empty.
-fn list_last(This(this): This<Arc<Vec<Value>>>) -> ResolveResult {
-    match this.last() {
-        Some(v) => Ok(Value::Opaque(Arc::new(OptionalValue::of(v.clone())))),
-        None => Ok(Value::Opaque(Arc::new(OptionalValue::none()))),
-    }
+/// `<list>.last() -> optional<T>`: as [`list_first`], the last element.
+fn list_last<'c, 'call>(ftx: &mut FunctionContext<'c, 'call>) -> Result<CowVal<'c, 'call>, ExecutionError> {
+    let (list, _) = val_target(ftx)?;
+    let items = list_items("last", list)?;
+    Ok(CowVal::owned(match items.last() {
+        Some(item) => CelOptional::of(item.clone_as_boxed()),
+        None => CelOptional::none(),
+    }))
 }
 
 #[cfg(test)]

@@ -5,8 +5,19 @@
 //! both strings and lists), this module provides unified dispatch functions
 //! that route to the correct implementation based on the runtime type of `this`.
 
+use cel::ExecutionError;
+#[cfg(any(feature = "semver_funcs", feature = "quantity", feature = "ip"))]
+use cel::ResolveResult;
+#[cfg(feature = "strings")] use cel::extractors::IntoResolveResult;
+#[cfg(any(feature = "strings", feature = "lists"))]
+use cel::{FunctionContext, common::value::CowVal};
+#[cfg(any(
+    feature = "strings",
+    feature = "semver_funcs",
+    feature = "quantity",
+    feature = "ip"
+))]
 use cel::{
-    ExecutionError, ResolveResult,
     extractors::{Arguments, This},
     objects::Value,
 };
@@ -24,8 +35,9 @@ use crate::functions::Registrar;
 pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
     #[cfg(any(feature = "strings", feature = "lists"))]
     {
-        r.add("indexOf", index_of);
-        r.add("lastIndexOf", last_index_of);
+        use crate::functions::val_args::RawFunction;
+        r.add("indexOf", Box::new(index_of) as RawFunction);
+        r.add("lastIndexOf", Box::new(last_index_of) as RawFunction);
     }
 
     // Comparison/arithmetic: shared between semver_funcs and quantity
@@ -45,36 +57,61 @@ pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
 // indexOf / lastIndexOf
 // ---------------------------------------------------------------------------
 
+/// `indexOf` on a string or a list, read as `Val`s so a list keeps its
+/// elements' own equality (see `val_args`).
 #[cfg(any(feature = "strings", feature = "lists"))]
-#[allow(unused_variables)]
-fn index_of(This(this): This<Value>, Arguments(args): Arguments) -> ResolveResult {
-    match this {
-        #[cfg(feature = "strings")]
-        Value::String(s) => crate::functions::strings::string_index_of(This(s), Arguments(args)),
+fn index_of<'c, 'call>(ftx: &mut FunctionContext<'c, 'call>) -> Result<CowVal<'c, 'call>, ExecutionError> {
+    index_dispatch(ftx, "indexOf", true)
+}
 
-        #[cfg(feature = "lists")]
-        Value::List(list) => crate::functions::lists::list_index_of(&list, &args),
-
-        _ => Err(ExecutionError::function_error(
-            "indexOf",
-            format!("indexOf not supported on type {:?}", this.type_of()),
-        )),
-    }
+/// `lastIndexOf` on a string or a list, as [`index_of`].
+#[cfg(any(feature = "strings", feature = "lists"))]
+fn last_index_of<'c, 'call>(
+    ftx: &mut FunctionContext<'c, 'call>,
+) -> Result<CowVal<'c, 'call>, ExecutionError> {
+    index_dispatch(ftx, "lastIndexOf", false)
 }
 
 #[cfg(any(feature = "strings", feature = "lists"))]
 #[allow(unused_variables)]
-fn last_index_of(This(this): This<Value>, Arguments(args): Arguments) -> ResolveResult {
-    match this {
-        #[cfg(feature = "strings")]
-        Value::String(s) => crate::functions::strings::string_last_index_of(This(s), Arguments(args)),
-
+fn index_dispatch<'c, 'call>(
+    ftx: &mut FunctionContext<'c, 'call>,
+    name: &str,
+    first: bool,
+) -> Result<CowVal<'c, 'call>, ExecutionError> {
+    let (this, args) = crate::functions::val_args::val_target(ftx)?;
+    match this.get_type().kind() {
         #[cfg(feature = "lists")]
-        Value::List(list) => crate::functions::lists::list_last_index_of(&list, &args),
-
+        cel::common::types::Kind::List => {
+            let target = args
+                .first()
+                .ok_or_else(|| ExecutionError::function_error(name, "expected argument"))?;
+            if first {
+                crate::functions::lists::list_index_of(this, target.as_ref())
+            } else {
+                crate::functions::lists::list_last_index_of(this, target.as_ref())
+            }
+        }
+        #[cfg(feature = "strings")]
+        cel::common::types::Kind::String => {
+            let s = match Value::try_from(this)? {
+                Value::String(s) => s,
+                _ => unreachable!("a string Val converts to a string"),
+            };
+            let args = args
+                .iter()
+                .map(|a| crate::functions::val_args::to_value(a.as_ref()))
+                .collect::<Result<Vec<_>, _>>()?;
+            let result = if first {
+                crate::functions::strings::string_index_of(This(s), Arguments(std::sync::Arc::new(args)))
+            } else {
+                crate::functions::strings::string_last_index_of(This(s), Arguments(std::sync::Arc::new(args)))
+            };
+            result.into_resolve_result()
+        }
         _ => Err(ExecutionError::function_error(
-            "lastIndexOf",
-            format!("lastIndexOf not supported on type {:?}", this.type_of()),
+            name,
+            format!("{name} not supported on type {}", this.get_type().name()),
         )),
     }
 }
