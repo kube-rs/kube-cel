@@ -111,32 +111,43 @@ test:
 bump version:
     #!/usr/bin/env bash
     set -euo pipefail
-    old=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+    # Validated before anything is written; only digits and dots reach sed.
+    version={{quote(version)}}
+    semver_re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+    if [[ ! "${version}" =~ ${semver_re} ]]; then
+        echo "⚠ version must be X.Y.Z (digits only), got: ${version}"
+        exit 1
+    fi
+    old=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
+    if [[ ! "${old}" =~ ${semver_re} ]]; then
+        echo "⚠ Cargo.toml version is not X.Y.Z: ${old}"
+        exit 1
+    fi
     old_minor="${old%.*}"  # e.g. 0.5.0 → 0.5
-    new_minor="{{version}}"
-    new_minor="${new_minor%.*}"  # e.g. 0.6.0 → 0.6
+    new_minor="${version%.*}"  # e.g. 0.6.0 → 0.6
+    old_minor_re="${old_minor//./\\.}"
+    v_re="${version//./\\.}"
     sedi() { if [[ "$OSTYPE" == "darwin"* ]]; then sed -i '' "$@"; else sed -i "$@"; fi; }
     # Cargo.toml
-    sedi 's/^version = ".*"/version = "{{version}}"/' Cargo.toml
+    sedi "s/^version = \".*\"/version = \"${version}\"/" Cargo.toml
     # README.md + src/lib.rs — update version in dependency examples
-    sedi "s/kube-cel = \"${old_minor}\"/kube-cel = \"${new_minor}\"/g" README.md
-    sedi "s/version = \"${old_minor}\"/version = \"${new_minor}\"/g" README.md src/lib.rs
+    sedi "s/kube-cel = \"${old_minor_re}\"/kube-cel = \"${new_minor}\"/g" README.md
+    sedi "s/version = \"${old_minor_re}\"/version = \"${new_minor}\"/g" README.md src/lib.rs
     # Changelog: date an existing `## [X.Y.Z] - Unreleased` section (notes
     # written as the work landed), otherwise add an empty one.
     date=$(date +%Y-%m-%d)
-    v_re=$(printf '%s' "{{version}}" | sed 's/\./\\./g')
     if grep -q "^## \[${v_re}\] - Unreleased$" CHANGELOG.md; then
-        sedi "s/^## \[${v_re}\] - Unreleased$/## [{{version}}] - ${date}/" CHANGELOG.md
+        sedi "s/^## \[${v_re}\] - Unreleased$/## [${version}] - ${date}/" CHANGELOG.md
     elif grep -q "^## \[${v_re}\]" CHANGELOG.md; then
-        echo "⚠ CHANGELOG.md already has a dated section for {{version}}; left it as it is"
+        echo "⚠ CHANGELOG.md already has a dated section for ${version}; left it as it is"
     else
-        entry="## [{{version}}] - ${date}\n\n### Added\n\n### Fixed\n\n### Changed\n"
+        entry="## [${version}] - ${date}\n\n### Added\n\n### Fixed\n\n### Changed\n"
         sedi "s/^# Changelog$/# Changelog\n\n${entry}/" CHANGELOG.md
     fi
-    echo "Bumped ${old} → {{version}}"
+    echo "Bumped ${old} → ${version}"
     echo "Updated: Cargo.toml, README.md, src/lib.rs, CHANGELOG.md"
     echo "Edit CHANGELOG.md to fill in release notes, then commit with sign-off:"
-    echo "  git commit -s -am 'chore: release {{version}}'   (or a descriptive message)"
+    echo "  git commit -s -am 'chore: release ${version}'   (or a descriptive message)"
 
 # Run on the merged release commit (HEAD == origin/main, clean tree); never commits.
 # Release: publish, then tag and push only that tag, then the GitHub release
@@ -146,50 +157,92 @@ release:
     # `git commit -s`, merge). This recipe refuses a dirty tree and never creates
     # commits, so every release commit carries a DCO sign-off and a real message
     # (an old recipe made an unsigned `chore: release` commit, failing kube-rs DCO).
+    #
+    # Each git query is assigned before it is tested: a failed command
+    # substitution in an assignment stops the script under `set -e`, while a
+    # test of its (empty) output would carry on.
     set -euo pipefail
-    version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-    tag="v${version}"
-    v_re=$(printf '%s' "${version}" | sed 's/\./\\./g')
-    if ! grep -Eq "^## \[${v_re}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md; then
-        echo "⚠ no dated CHANGELOG.md section for ${version} (\`just bump ${version}\` dates it)"
+    # Pin the release to the commit this fetch brought (FETCH_HEAD; origin/main
+    # stays stale where the fetch refspec does not cover main). That commit is
+    # checked, published and tagged from its own checkout below, so moving HEAD
+    # during the run cannot change what ships.
+    git fetch --quiet origin refs/heads/main
+    sha=$(git rev-parse --verify 'FETCH_HEAD^{commit}')
+    head=$(git rev-parse --verify 'HEAD^{commit}')
+    if [ "${head}" != "${sha}" ]; then
+        echo "⚠ HEAD is not origin/main — release the merged release commit:"
+        echo "  HEAD        $(git log -1 --format='%h %s' "${head}")"
+        echo "  origin/main $(git log -1 --format='%h %s' "${sha}")"
         exit 1
     fi
-    if [ -n "$(git status --porcelain)" ]; then
+    dirty=$(git status --porcelain)
+    if [ -n "${dirty}" ]; then
         echo "⚠ working tree is dirty — commit the version bump first (git commit -s)."
         echo "  This recipe never commits, so the release commit keeps your sign-off."
-        git status --short
+        echo "${dirty}"
         exit 1
     fi
-    git fetch --quiet origin main
-    if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
-        echo "⚠ HEAD is not origin/main — release the merged release commit:"
-        echo "  HEAD        $(git log -1 --format='%h %s' HEAD)"
-        echo "  origin/main $(git log -1 --format='%h %s' origin/main)"
+    manifest=$(git show "${sha}:Cargo.toml")
+    # Here-strings, not pipes: under pipefail a reader that stops early
+    # (`grep -q`, `exit`) can fail the writer with SIGPIPE.
+    version=$(awk -F'"' '/^version = /{print $2; exit}' <<< "${manifest}")
+    tag="v${version}"
+    changelog=$(git show "${sha}:CHANGELOG.md")
+    v_re=$(printf '%s' "${version}" | sed 's/\./\\./g')
+    heading=$(grep -E "^## \[${v_re}\] - " <<< "${changelog}" || true)
+    date="${heading##* - }"
+    if [[ ! "${date}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \
+        || ! python3 -c 'import datetime, sys; datetime.date.fromisoformat(sys.argv[1])' "${date}" 2>/dev/null; then
+        echo "⚠ no CHANGELOG.md section for ${version} dated with a real date (\`just bump ${version}\` dates it)"
         exit 1
     fi
-    if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null \
-        || [ -n "$(git ls-remote --tags origin "refs/tags/${tag}")" ]; then
-        echo "⚠ tag ${tag} already exists (locally or on origin)"
+    # Work left for this release is marked "before X.Y.Z" where it lives (the
+    # README rows and tests that wait on cel-rust, the cel floor in Cargo.toml).
+    # git grep exits 1 when nothing matches; anything else is an error.
+    if markers=$(git grep -n -i -F "before ${version}" "${sha}" -- . ':!CHANGELOG.md'); then
+        echo "⚠ notes marked \"before ${version}\" remain; finish them first:"
+        echo "${markers}"
+        exit 1
+    elif [ $? -ne 1 ]; then
         exit 1
     fi
-    # The gate runs after the cheap refusals above, on the commit being released.
-    just check
-    echo "Releasing ${tag}..."
-    # Publish before tagging: a failed publish leaves no tag anywhere. Only this
-    # tag is pushed (never --tags, which would push every stray local tag).
-    cargo publish
-    git tag "${tag}"
-    if ! git push origin "refs/tags/${tag}"; then
+    if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+        echo "⚠ tag ${tag} already exists locally"
+        exit 1
+    fi
+    remote_tag=$(git ls-remote --tags origin "refs/tags/${tag}")
+    if [ -n "${remote_tag}" ]; then
+        echo "⚠ tag ${tag} already exists on origin"
+        exit 1
+    fi
+    tmp=$(mktemp -d)
+    trap 'git worktree remove --force "${tmp}/kube-cel" >/dev/null 2>&1 || true; rm -rf "${tmp}"' EXIT
+    git worktree add --quiet --detach "${tmp}/kube-cel" "${sha}"
+    # Release notes from that commit, written to a file before anything ships,
+    # so a failure stops the release (an exit status inside `<(..)` is lost).
+    notes="${tmp}/notes.md"
+    (cd "${tmp}/kube-cel" && just release-notes "${version}") > "${notes}"
+    if [ ! -s "${notes}" ]; then
+        echo "⚠ the release notes for ${version} came out empty"
+        exit 1
+    fi
+    echo "Releasing ${tag} from ${sha}..."
+    # The gate runs on the commit being released, after the cheap refusals.
+    # Publish before tagging: a failed publish leaves no tag anywhere.
+    (cd "${tmp}/kube-cel" && just check && cargo publish)
+    git tag "${tag}" "${sha}"
+    # Only this tag is pushed: an explicit refspec (never --tags), and
+    # --no-follow-tags so `push.followTags` cannot add other annotated tags.
+    if ! git push --no-follow-tags origin "refs/tags/${tag}"; then
         echo "⚠ published ${version}, but pushing ${tag} failed; retry with:"
-        echo "  git push origin refs/tags/${tag}"
-        echo "  gh release create ${tag} --title ${tag} --notes-file <(just release-notes ${version}) --verify-tag"
+        echo "  git push --no-follow-tags origin refs/tags/${tag}"
+        echo "  just release-notes ${version} > notes.md && gh release create ${tag} --title ${tag} --notes-file notes.md --verify-tag"
         exit 1
     fi
     # GitHub release: notes reflowed to one line per paragraph/bullet (GitHub
     # renders single newlines as <br>, so hard-wrapped CHANGELOG text breaks
     # mid-sentence otherwise).
-    gh release create "${tag}" --title "${tag}" \
-        --notes-file <(just release-notes "${version}") --verify-tag
+    gh release create "${tag}" --title "${tag}" --notes-file "${notes}" --verify-tag
     echo "Published + released kube-cel ${tag}"
 
 # Print GitHub-friendly (reflowed) release notes for VERSION from the CHANGELOG
@@ -198,17 +251,41 @@ release-notes version:
     # Each paragraph/bullet is reflowed onto a single line, because GitHub
     # renders single newlines as <br> (hard-wrapped CHANGELOG text would break
     # mid-sentence). Used by `release`; also handy for re-editing a release:
-    #   gh release edit vX.Y.Z --notes-file <(just release-notes X.Y.Z)
-    import re
-    version = "{{version}}"
-    lines = open('CHANGELOG.md').read().splitlines()
-    start = next(i for i, l in enumerate(lines) if l.startswith(f'## [{version}]')) + 1
-    sec = []
-    for l in lines[start:]:
-        if l.startswith('## ['):
-            break
-        sec.append(l)
-    out, cur, fence = [], None, False
+    #   just release-notes X.Y.Z > notes.md && gh release edit vX.Y.Z --notes-file notes.md
+    import re, sys
+    version = {{quote(version)}}
+    if not re.fullmatch(r'\d+\.\d+\.\d+', version):
+        sys.exit(f'version must be X.Y.Z, got: {version}')
+
+    def fence_open(line):
+        """The (char, length) of a ``` or ~~~ fence opening on this line."""
+        m = re.match(r'\s*(`{3,}|~{3,})', line)
+        return (m.group(1)[0], len(m.group(1))) if m else None
+
+    def fence_closes(line, fence):
+        m = re.fullmatch(r'\s*(`{3,}|~{3,})\s*', line)
+        return bool(m) and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1]
+
+    # The section runs from its heading to the next `## [` heading, both
+    # recognised only outside fenced code blocks.
+    sec, inside, fence = [], False, None
+    for l in open('CHANGELOG.md', encoding='utf-8').read().splitlines():
+        if fence is None and l.startswith('## ['):
+            if inside:
+                break
+            inside = l.startswith(f'## [{version}]')
+            continue
+        if fence is not None:
+            if fence_closes(l, fence):
+                fence = None
+        else:
+            fence = fence_open(l)
+        if inside:
+            sec.append(l)
+    if not inside:
+        sys.exit(f'no CHANGELOG.md section for {version}')
+
+    out, cur, fence = [], None, None
     def flush():
         global cur
         if cur:
@@ -219,10 +296,13 @@ release-notes version:
         s = l.strip()
         # A fenced code block passes through verbatim (indentation kept, so it
         # stays inside its list item).
-        if s.startswith('```'):
-            flush(); out.append(l); fence = not fence; continue
-        if fence:
-            out.append(l); continue
+        if fence is not None:
+            out.append(l)
+            if fence_closes(l, fence):
+                fence = None
+            continue
+        if fence_open(l):
+            flush(); out.append(l); fence = fence_open(l); continue
         if s == '':
             flush()
             if out and out[-1] != '':

@@ -26,6 +26,9 @@ rustdoc-args = ["--cfg", "docsrs"]
 # downstreams pick up `cel` 0.16.x patches without a kube-cel release. Do not
 # switch to an exact `=0.16.x` pin (it would block that patch uptake), and bump
 # the major-coupling note in the versioning policy if this constraint changes.
+# Before 0.9.0: raise the floor to the cel release carrying cel-rust#460 and
+# #462 (`^0.16` still admits 0.16.0, where tests/apiserver_divergence.rs pins
+# both fail-opens). `just release` refuses while such a note remains.
 cel = "0.16"
 # Lower bounds are the oldest versions that build and pass `cargo test` under
 # `cargo +nightly update -Z direct-minimal-versions`. regex 1.10.5 is cel's own
