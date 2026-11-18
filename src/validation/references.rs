@@ -232,7 +232,7 @@ impl Scope {
 }
 
 /// The functions the apiserver declares, from `apiserver_functions.txt`.
-fn apiserver_functions() -> &'static HashSet<&'static str> {
+pub(crate) fn apiserver_functions() -> &'static HashSet<&'static str> {
     static NAMES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         include_str!("apiserver_functions.txt")
             .lines()

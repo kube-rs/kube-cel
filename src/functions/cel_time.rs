@@ -388,19 +388,24 @@ struct GoTime {
 
 /// `timestamp(<string>)` as cel-go has it: Go's parse, then cel-go's range. A
 /// zone offset of 24 hours or more, which Go accepts up to `+24:60`, is an
-/// error here: `chrono` cannot hold it.
+/// error here, `chrono` cannot hold it, and noted as unsupported: the
+/// validation engine refuses the rule even where CEL absorbs the error.
 fn go_timestamp(s: &str) -> Result<DateTime<FixedOffset>, ExecutionError> {
     let t = parse_rfc3339(s.as_bytes())
         .ok_or_else(|| conversion_error("timestamp", "google.protobuf.Timestamp"))?;
     if !(MIN_UNIX..=MAX_UNIX).contains(&t.unix) {
         return Err(ExecutionError::function_error("timestamp", "timestamp overflow"));
     }
-    let offset = FixedOffset::east_opt(t.offset).ok_or_else(|| {
-        ExecutionError::function_error(
-            "timestamp",
-            "a zone offset of 24 hours or more, which kube-cel does not support",
-        )
-    })?;
+    let Some(offset) = FixedOffset::east_opt(t.offset) else {
+        let error = || {
+            ExecutionError::function_error(
+                "timestamp",
+                "a zone offset of 24 hours or more, which kube-cel does not support",
+            )
+        };
+        crate::functions::note_unsupported_error(error);
+        return Err(error());
+    };
     let utc = DateTime::from_timestamp(t.unix, t.nanos).expect("cel-go's timestamp range fits chrono");
     Ok(utc.with_timezone(&offset))
 }

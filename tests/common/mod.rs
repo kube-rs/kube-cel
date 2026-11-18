@@ -1425,6 +1425,55 @@ pub fn cases() -> Vec<ParityCase> {
             expect: Expect::RegistrationRejected,
             note: "a timestamp literal with a lowercase t fails to compile → rejected at registration",
         },
+        // cel-go's `or` / `orValue` short-circuit (src/functions/cel_optional.rs), so
+        // the alternative's failure or quantity update does not happen.
+        ParityCase {
+            kind: "PoptOrLazy",
+            plural: "poptorlazies",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "optional.of(1).orValue(1 / 0) == 1 && optional.of(1).or(optional.of(1 / 0)).value() == 1 && dyn(dyn(1).orValue(2)) == 1",
+                    "message": "poptorlazies"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "or / orValue evaluate the alternative only for an empty optional → ACCEPT",
+        },
+        ParityCase {
+            kind: "PoptOrQuantity",
+            plural: "poptorquantities",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "[quantity('2')].all(q, ([optional.of(0).or(optional.of(1 / 0)).value(), q.compareTo(quantity('12345678901234567890'))].exists(x, x == 1) || true) && q.isInteger())",
+                    "message": "poptorquantities"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Reject,
+            note: "the list goes on past a lazy or, compareTo turns q into an inf.Dec → REJECT",
+        },
+        // An update of a variable's quantity where cel and cel-go evaluate in
+        // different orders is refused (src/validation/evaluation_order.rs).
+        ParityCase {
+            kind: "PquantOrderRefused",
+            plural: "pquantorderrefuseds",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "[quantity('1')].all(q, ((1 / 0 == q.compareTo(quantity('1.5Gi'))) || true) && q.isInteger())",
+                    "message": "pquantorderrefuseds"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Reject,
+            note: "cel-go evaluates the second operand after a failure, cel does not: refused at compile time → REJECT",
+        },
         ParityCase {
             kind: "PquantSignMember",
             plural: "pquantsignmembers",

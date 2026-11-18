@@ -21,6 +21,7 @@
 
 #[cfg(feature = "semver_funcs")] mod semver_funcs;
 
+mod cel_optional;
 mod cel_time;
 #[cfg(feature = "validation")] pub(crate) use cel_time::go_parse_duration;
 #[cfg(feature = "format")] mod format;
@@ -31,6 +32,8 @@ mod go_isprint;
 #[cfg(feature = "lists")] mod lists_ext;
 
 #[cfg(feature = "quantity")] mod quantity;
+#[cfg(all(feature = "quantity", feature = "validation"))]
+pub(crate) use quantity::parses as quantity_parses;
 
 #[cfg(any(feature = "urls", feature = "named_format"))] mod go_url;
 #[cfg(feature = "named_format")] mod named_format;
@@ -111,9 +114,11 @@ impl<'c, 'p, 'v> Registrar<'c, 'p, 'v> {
 /// - with the `ip` feature, `string(<IP>)` and `string(<CIDR>)`: `string` is a
 ///   standard-library overload, which `cel` refuses as a context function;
 /// - cel-go's standard time conversions and duration arithmetic, in front of
-///   `cel`'s (see `cel_time`).
+///   `cel`'s (see `cel_time`), and its short-circuiting `or` / `orValue` on
+///   optionals (see `cel_optional`).
 pub(crate) fn declare_env(env: &mut cel::Env) -> Result<(), cel::DeclarationError> {
     cel_time::declare(env)?;
+    cel_optional::declare(env)?;
     #[cfg(feature = "lists")]
     lists_ext::declare(env)?;
     env.add_extension(cel::extensions::two_var_comprehensions)?;
@@ -180,30 +185,51 @@ pub(crate) fn register_all(ctx: &mut cel::Context<'_, '_>) -> Result<Vec<String>
 }
 
 thread_local! {
-    /// Set when an evaluation reaches a quantity kube-cel cannot treat as the
-    /// apiserver does: past its supported range (an `add`/`sub` result past
-    /// `i128` included), or the right side of an equality being an `add`/`sub`
-    /// result (an error there).
-    static UNSUPPORTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The first error of the running evaluation that kube-cel noted as one
+    /// it cannot treat as the apiserver does (see [`note_unsupported`]).
+    static UNSUPPORTED: std::cell::RefCell<Option<cel::ExecutionError>> =
+        const { std::cell::RefCell::new(None) };
 }
 
-/// Notes that the running evaluation reached a value kube-cel does not
-/// support. The function also returns an error, but CEL can absorb that
-/// (`quantity(s) == q || true`); [`tracking_unsupported`] lets the validation
-/// engine refuse the rule anyway.
+/// Why an evaluation that reached an unsupported quantity fails.
+const UNSUPPORTED_QUANTITY: &str = "evaluation reached a quantity kube-cel cannot treat as the \
+                                    apiserver does (an exponent or scale outside ±1000, more \
+                                    significant digits than an i128 holds, in a quantity or an \
+                                    add() / sub() result, or == / != with an add() / sub() \
+                                    result on the right)";
+
+/// Notes that the running evaluation reached a quantity kube-cel does not
+/// support: past its supported range (an `add`/`sub` result past `i128`
+/// included), or the right side of an equality being an `add`/`sub` result.
+/// See [`note_unsupported_error`].
 #[cfg_attr(not(feature = "quantity"), allow(dead_code))]
 pub(crate) fn note_unsupported() {
-    UNSUPPORTED.with(|u| u.set(true));
+    note_unsupported_error(|| cel::ExecutionError::function_error("quantity", UNSUPPORTED_QUANTITY));
 }
 
-/// Runs `f` (one evaluation) and reports whether it reached a value kube-cel
-/// does not support, see [`note_unsupported`]. A call evaluation does not
+/// Notes that the running evaluation reached an error kube-cel has where the
+/// apiserver has a value, with `error` the one to report. The function also
+/// returns an error, but CEL can absorb that (`quantity(s) == q || true`), and
+/// where the apiserver's quantities share state an absorbed error can skip an
+/// update the apiserver makes: [`tracking_unsupported`] lets the validation
+/// engine refuse the rule anyway.
+pub(crate) fn note_unsupported_error(error: impl FnOnce() -> cel::ExecutionError) {
+    UNSUPPORTED.with(|u| {
+        let mut u = u.borrow_mut();
+        if u.is_none() {
+            *u = Some(error());
+        }
+    });
+}
+
+/// Runs `f` (one evaluation) and returns the first error it noted as
+/// unsupported, see [`note_unsupported_error`]. A call evaluation does not
 /// reach (`true || quantity(s) == q`) is not noted.
 #[cfg_attr(not(feature = "validation"), allow(dead_code))]
-pub(crate) fn tracking_unsupported<R>(f: impl FnOnce() -> R) -> (R, bool) {
-    let outer = UNSUPPORTED.with(|u| u.replace(false));
+pub(crate) fn tracking_unsupported<R>(f: impl FnOnce() -> R) -> (R, Option<cel::ExecutionError>) {
+    let outer = UNSUPPORTED.with(|u| u.borrow_mut().take());
     let result = f();
-    let reached = UNSUPPORTED.with(|u| u.replace(outer));
+    let reached = UNSUPPORTED.with(|u| std::mem::replace(&mut *u.borrow_mut(), outer));
     (result, reached)
 }
 

@@ -902,7 +902,9 @@ fn ip_member_string_fails_closed() {
 //            declares (src/validation/apiserver_functions.txt), so the CRD or
 //            policy compiles and a call evaluation does not reach passes, as on
 //            the apiserver. Reaching the call rejects the object with
-//            UnsupportedReference (kube-cel binds no `authorizer`). The
+//            UnsupportedReference (kube-cel binds no `authorizer`), even where
+//            CEL absorbs the error: the apiserver has a value there, and an
+//            absorbed error could skip a quantity update it makes. The
 //            unreached cases are parity rows (PoptUnwrapShort, ..).
 
 #[test]
@@ -925,10 +927,12 @@ fn declared_unimplemented_functions_fail_closed_when_reached() {
         "optional.unwrap in the messageExpression of a rule that holds must compile"
     );
 
-    // Reached: the apiserver evaluates both to true; kube-cel rejects.
+    // Reached: the apiserver evaluates these to true; kube-cel rejects.
     for rule in [
         "optional.unwrap([optional.of(1), optional.none()]) == [1]",
         "[optional.of(1), optional.none()].unwrapOpt() == [1]",
+        "optional.unwrap([optional.of(1)]) == [2] || true",
+        "[1].exists(x, size([optional.of(x)].unwrapOpt()) == 2 || x == 1)",
     ] {
         let errors = run_rule(rule).unwrap_err();
         assert!(
@@ -1293,7 +1297,9 @@ fn quantity_past_supported_range_fails_closed() {
 //            (k8s.io/apiserver v0.36.1 `MustBaseEnvSet(1.36)`).
 // kube-cel:  ports that parser (src/functions/cel_time.rs), but `chrono`
 //            holds an offset under 24 hours, so such a timestamp is an
-//            EvaluationError. A literal one still compiles, as on the apiserver.
+//            EvaluationError, even where CEL absorbs the error: noted as
+//            unsupported, as an absorbed error could skip a quantity update the
+//            apiserver makes. A literal one still compiles, as on the apiserver.
 //            Everything else the conversions take or refuse matches the
 //            apiserver (parity rows PtimeGo, PtimeDynamic, ..).
 
@@ -1304,6 +1310,7 @@ fn timestamp_offset_of_a_day_fails_closed() {
         "timestamp('2024-01-15T10:30:00+23:60') == timestamp('2024-01-14T10:30:00Z')",
         "timestamp('2024-01-15T10:30:00-24:00') == timestamp('2024-01-16T10:30:00Z')",
         "'%s'.format([timestamp('2024-01-15T10:30:00+24:00')]) == '2024-01-15T10:30:00+24:00'",
+        "timestamp('2024-01-15T10:30:00+24:00') == timestamp(0) || true",
     ] {
         let errors = run_rule(rule).unwrap_err();
         assert!(
@@ -1323,7 +1330,9 @@ fn timestamp_offset_of_a_day_fails_closed() {
 //            bytes as a string, valid UTF-8 or not (`url('http://h%80x/')`
 //            has the host bytes `h\x80x`; k8s.io/apiserver v0.36.1).
 // kube-cel:  a CEL string must be UTF-8, so such a component is an
-//            EvaluationError rather than a different string.
+//            EvaluationError rather than a different string, even where CEL
+//            absorbs the error (noted as unsupported, as an absorbed error
+//            could skip a quantity update the apiserver makes).
 
 #[test]
 #[cfg(feature = "urls")]
@@ -1332,6 +1341,7 @@ fn url_component_not_utf8_fails_closed() {
         "url('http://h%80x/').getHost() != 'x'",
         "url('http://h%80x/').getHostname() != 'x'",
         "url('/p?k=%FF').getQuery().size() == 1",
+        "url('http://h%80x/').getHost() == 'x' || true",
     ] {
         let errors = run_rule(rule).unwrap_err();
         assert!(
@@ -1341,6 +1351,60 @@ fn url_component_not_utf8_fails_closed() {
     }
     // The other components are written escaped, so they are always UTF-8.
     assert!(run_rule("url('http://h%80x/p%FF').getEscapedPath() == '/p%FF'").is_ok());
+}
+
+// ── A quantity update whose result depends on the order — fails CLOSED ─────
+// apiserver: cel-go evaluates a call's receiver before its arguments, and both
+//            operands of a two-operand call even when the first fails, and its
+//            quantities share state: `add` / `sub` write into the receiver's
+//            inf.Dec, `compareTo` / `isGreaterThan` / `isLessThan` turn an
+//            int64Amount receiver into an inf.Dec (k8s.io/apiserver v0.36.1
+//            `MustBaseEnvSet(1.36)`).
+// kube-cel:  keeps the state, but `cel` 0.16 evaluates the arguments first and
+//            skips the second operand after a failure, so an update of a
+//            quantity held by a variable (a comprehension's, or reached through
+//            `dyn(..)`, `[q][0]`, ..) in a call's receiver or arguments, or in
+//            the second operand of a two-operand call, is refused at compile
+//            time when another part could fail or read a quantity:
+//            CompilationFailure, reached or not. Not refused: an update of a
+//            new quantity (`quantity(s)`, `add` / `sub` on one); one next to
+//            parts that can neither fail nor read a quantity (a comprehension
+//            variable, a literal, `quantity(<literal>)`); one where both
+//            evaluate in the same order (`&&`, `||`, `?:`, list and map
+//            literals, indexing). Names are matched without types: a semver's
+//            `compareTo` in such a position is refused too. Where kube-cel
+//            would otherwise accept what the apiserver rejects, the refusal is
+//            a parity row (PquantOrderRefused).
+
+#[test]
+#[cfg(feature = "quantity")]
+fn quantity_update_in_an_order_dependent_position_fails_closed() {
+    // The apiserver evaluates each to true.
+    for rule in [
+        "[quantity('1')].all(q, sign(q) > q.compareTo(quantity('2')))",
+        "[quantity('1')].all(q, sign(q) > dyn(q).compareTo(quantity('2')))",
+        "[quantity('1')].all(q, ((1 / 0 == q.compareTo(quantity('1.5Gi'))) || true) && !q.isInteger())",
+        "[quantity('1')].all(q, quantity('2').add(sign(q)).add(q.compareTo(quantity('3'))).isInteger())",
+        "[quantity('1')].all(q, (q.isInteger() ? 'a' : 'b').startsWith(q.compareTo(quantity('1.5Gi')) < 0 ? 'a' : 'b'))",
+        "true || [quantity('1')].all(q, sign(q) > q.compareTo(quantity('2')))",
+        "[semver('1.0.0')].all(v, sign(quantity('1')) > v.compareTo(semver('2.0.0')))",
+    ] {
+        assert_refused(rule);
+    }
+    // Not refused, and true as on the apiserver: a new quantity, or parts that
+    // can neither fail nor read a quantity next to the update.
+    for rule in [
+        "0 > quantity('1').compareTo(quantity('2'))",
+        "[quantity('1')].all(q, 0 > q.compareTo(quantity('2')))",
+        "[quantity('1')].all(q, quantity('1').add(q.compareTo(quantity('2'))).isInteger())",
+        "[quantity('1')].all(q, q.compareTo(quantity('1').add(quantity('1.5Gi'))) < 0)",
+        "[quantity('1.5Gi')].all(q, q.add(q).compareTo(quantity('3Gi')) == 0 && q.compareTo(quantity('3Gi')) == 0)",
+        "[quantity('1')].all(q, q.compareTo(quantity('1.5Gi')) < 0 && !q.isInteger())",
+        "['1', '2'].map(s, quantity(s)).all(q, q.isGreaterThan(quantity('0')) && q.isLessThan(quantity('3')))",
+        "[semver('1.0.0')].all(v, 0 > v.compareTo(semver('2.0.0')))",
+    ] {
+        assert_passes(rule);
+    }
 }
 
 // ── Quantity `!=` with an add/sub result on the right — fails CLOSED ────────

@@ -10,6 +10,7 @@ pub(crate) mod analysis;
 pub(crate) mod compilation;
 pub(crate) mod defaults;
 pub(crate) mod escaping;
+#[cfg(feature = "quantity")] pub(crate) mod evaluation_order;
 pub(crate) mod references;
 pub(crate) mod structural;
 pub(crate) mod values;
@@ -34,8 +35,9 @@ use std::sync::{Arc, LazyLock};
 ///
 /// It mirrors the apiserver's base CEL environment
 /// (`k8s.io/apiserver/pkg/cel/environment`, `MustBaseEnvSet(..).NewExpressionsEnv()`),
-/// as far as `cel` provides it. What validation adds is the name check of
-/// [`compile`].
+/// as far as `cel` provides it. What validation adds is the name and
+/// evaluation-order checks of [`compile`] and the stand-ins of
+/// [`base_context`].
 ///
 /// Rules must compile with [`compile`] (not [`cel::Program::compile`], which
 /// only knows the standard macros) and run on a context from [`base_context`].
@@ -44,25 +46,56 @@ pub(crate) fn validation_env() -> &'static Arc<Env> {
     &ENV
 }
 
-/// A root context on [`validation_env`] with kube-cel's functions registered:
-/// [`new_context`](crate::new_context).
+/// A root context on [`validation_env`] with kube-cel's functions registered
+/// ([`new_context`](crate::new_context)), and each function the apiserver
+/// declares that kube-cel does not implement (`optional.unwrap`,
+/// `<list>.unwrapOpt()`, the `authorizer` library, a function whose feature is
+/// disabled) as one that fails with an `UndeclaredReference` and notes it as
+/// unsupported: the apiserver returns a value there, so the rule fails even
+/// where CEL absorbs the error.
 pub(crate) fn base_context() -> Context<'static, 'static> {
-    crate::new_context(Arc::clone(validation_env())).expect("kube-cel's functions register onto its Env")
+    let mut ctx =
+        crate::new_context(Arc::clone(validation_env())).expect("kube-cel's functions register onto its Env");
+    for &name in declared_only() {
+        ctx.add_function(name, move |_: &cel::FunctionContext| -> cel::ResolveResult {
+            let error = || cel::ExecutionError::UndeclaredReference(Arc::new(name.to_owned()));
+            crate::functions::note_unsupported_error(error);
+            Err(error())
+        })
+        .expect("a function kube-cel does not implement is free to register");
+    }
+    ctx
 }
 
-/// Runs a rule or VAP expression. One that reached a quantity kube-cel cannot
-/// treat as the apiserver does (past its supported range, or compared with an
-/// `add`/`sub` result on the right) fails, even where CEL absorbed the error
-/// (`|| true`, `exists`, an optional).
+/// The functions the apiserver declares that neither `cel` nor kube-cel's
+/// context provides.
+fn declared_only() -> &'static [&'static str] {
+    static NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+        let mut ctx = Context::with_env(Arc::clone(validation_env()));
+        let registered: std::collections::HashSet<String> = crate::register_all(&mut ctx)
+            .expect("kube-cel's functions register onto its Env")
+            .into_iter()
+            .collect();
+        let mut names: Vec<&'static str> = references::apiserver_functions()
+            .iter()
+            .copied()
+            .filter(|name| validation_env().function(name).is_none() && !registered.contains(*name))
+            .collect();
+        names.sort_unstable();
+        names
+    });
+    &NAMES
+}
+
+/// Runs a rule or VAP expression. One that reached a value kube-cel cannot
+/// treat as the apiserver does (a quantity past its supported range, or
+/// compared with an `add`/`sub` result on the right, a timestamp offset of a
+/// day or more, a URL component that is not UTF-8, a function the apiserver
+/// declares that kube-cel does not implement) fails, even where CEL absorbed
+/// the error (`|| true`, `exists`, an optional).
 pub(crate) fn execute_supported(program: &Program, ctx: &Context<'_, '_>) -> cel::ResolveResult {
     match crate::functions::tracking_unsupported(|| program.execute(ctx)) {
-        (Ok(_), true) => Err(cel::ExecutionError::function_error(
-            "quantity",
-            "evaluation reached a quantity kube-cel cannot treat as the apiserver does (an \
-             exponent or scale outside ±1000, more significant digits than an i128 holds, in a \
-             quantity or an add() / sub() result, or == / != with an add() / sub() result on \
-             the right)",
-        )),
+        (Ok(_), Some(error)) => Err(error),
         (result, _) => result,
     }
 }
@@ -71,13 +104,16 @@ pub(crate) fn execute_supported(program: &Program, ctx: &Context<'_, '_>) -> cel
 /// [`validation_env`], refusing a call to a function the apiserver does not
 /// declare, or an identifier `scope` does not declare, even where evaluation
 /// would never reach it, as the apiserver does at registration (see
-/// [`references`]).
+/// [`references`]), and a quantity update whose result depends on evaluation
+/// order (see `evaluation_order`).
 pub(crate) fn compile(
     source: &str,
     scope: Scope,
 ) -> Result<Program, Box<dyn std::error::Error + Send + Sync>> {
     let program = validation_env().compile(source)?;
     references::check(program.expression(), scope)?;
+    #[cfg(feature = "quantity")]
+    evaluation_order::check(program.expression())?;
     Ok(program)
 }
 
@@ -110,9 +146,13 @@ pub enum ErrorKind {
     /// The rule, or its `messageExpression`, does not compile: a syntax error,
     /// a call to a function the apiserver's CEL environment does not declare
     /// (`cel.bind`, the `math` library, `base64.*`, `isIPv4`, a global
-    /// `min(..)`, ..), or an identifier not declared where it appears (`slef`,
-    /// a macro's variable outside the macro, `authorizer` in a CRD rule). The
-    /// apiserver rejects such a CRD at registration.
+    /// `min(..)`, ..), an identifier not declared where it appears (`slef`,
+    /// a macro's variable outside the macro, `authorizer` in a CRD rule), or
+    /// a literal `duration(..)` / `timestamp(..)` argument the conversion
+    /// refuses. The apiserver rejects such a CRD at registration. Also a
+    /// quantity update whose result depends on evaluation order, which the
+    /// apiserver accepts and kube-cel cannot evaluate in its order
+    /// (fail-closed; see the README "apiserver divergence" table).
     CompilationFailure,
     /// A malformed rule: JSON that is not a rule, or a field the apiserver
     /// refuses at registration beside the expressions (a blank or multi-line

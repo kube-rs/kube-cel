@@ -75,10 +75,17 @@ fn extract_url(val: &Value) -> Result<&KubeUrl, ExecutionError> {
 
 /// A component as a CEL string. Go's unescaped components are bytes: one that
 /// is not UTF-8 (`%FF` in a host) is an error rather than a different string.
+///
+/// The apiserver has a value there, so the error is noted as unsupported: the
+/// validation engine refuses the rule even where CEL absorbs the error.
 fn text(function: &str, bytes: &[u8]) -> Result<Value, ExecutionError> {
     std::str::from_utf8(bytes)
         .map(|s| Value::String(Arc::new(s.to_owned())))
-        .map_err(|_| ExecutionError::function_error(function, "the URL component is not valid UTF-8"))
+        .map_err(|_| {
+            let error = || ExecutionError::function_error(function, "the URL component is not valid UTF-8");
+            crate::functions::note_unsupported_error(error);
+            error()
+        })
 }
 
 /// `<URL>.getScheme() -> string`: Go's `URL.Scheme`, lowercased; empty for a

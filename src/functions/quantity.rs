@@ -475,6 +475,13 @@ const INVALID: &str =
 /// range (a malformed string is [`ParseError::Invalid`] whatever its exponent),
 /// and the range before the value is simplified or rounded, so `0e2147483648`
 /// does not pass as 0.
+/// Whether `quantity(s)` succeeds: neither invalid nor unsupported. Nothing is
+/// noted.
+#[cfg_attr(not(feature = "validation"), allow(dead_code))]
+pub(crate) fn parses(s: &str) -> bool {
+    parse_quantity(s).is_ok()
+}
+
 fn parse_quantity(s: &str) -> Result<KubeQuantity, ParseError> {
     if s.is_empty() {
         return Err(ParseError::Invalid(INVALID.into()));
@@ -1024,7 +1031,8 @@ mod tests {
 
     /// `(result, whether the evaluation noted an unsupported quantity)`.
     fn eval_tracked(expr: &str) -> (Result<Value, ExecutionError>, bool) {
-        crate::functions::tracking_unsupported(|| crate::functions::eval(expr))
+        let (result, noted) = crate::functions::tracking_unsupported(|| crate::functions::eval(expr));
+        (result, noted.is_some())
     }
 
     #[test]

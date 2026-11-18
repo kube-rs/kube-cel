@@ -260,10 +260,10 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     `v` and refuse a fourth component (`1.2.3.4`).
   - Quantity comparison is exact for magnitudes beyond `i128` scaling
     (`compareTo` used to call quantities 3 apart equal there).
-- **The standard time conversions, `string()` of a time value and duration
-  arithmetic follow cel-go v0.26**: `new_env()` puts cel-go's in front of
-  `cel`'s, through macros, so general use and validation both see them (each
-  checked live on v1.36.1):
+- **The standard time conversions, `string()` of a time value, duration
+  arithmetic and optional `or` / `orValue` follow cel-go v0.26**: `new_env()`
+  puts cel-go's in front of `cel`'s, through macros, so general use and
+  validation both see them (each checked live on v1.36.1):
   - `duration(string)` is Go's `time.ParseDuration` and `timestamp(string)`
     Go's `time.Parse(time.RFC3339, ..)` with cel-go's range. A duration past
     int64 nanoseconds, an exponent, a sign between components, trailing text,
@@ -284,7 +284,27 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     checks; they went up to `cel`'s ±315,576,000,000 seconds. `-` negates a
     duration reached through `dyn`, and `int(<duration>)` is its nanoseconds;
     both were errors.
+  - `x.or(y)` and `x.orValue(y)` evaluate `y` only when `x` is an optional
+    holding no value (`optional.of(1).orValue(1 / 0)` is `1`, it was an
+    error), and return an `x` that is not an optional as it is.
   - Migration: none for rules the apiserver accepts.
+- **A quantity update whose result depends on evaluation order is refused**
+  at compile time (`CompilationFailure`, reached or not): an `add`, `sub`,
+  `compareTo`, `isGreaterThan` or `isLessThan` on a quantity held by a
+  variable (a comprehension's, or reached through `dyn(..)` or `[q][0]`) in a
+  call's receiver or arguments, or in the second operand of a two-operand
+  call, next to a part that could fail or read a quantity. The apiserver's quantities share state, and `cel` evaluates a call's
+  arguments before its receiver and skips a second operand after a failure,
+  where cel-go does neither; such a rule could pass client-side where the
+  apiserver rejects it. Fail-closed: an update of a new quantity
+  (`quantity(s)`, `add` / `sub` on one), one next to parts that can neither
+  fail nor read a quantity (a comprehension variable, a literal,
+  `quantity(<literal>)`) and one where both orders agree (`&&`, `||`) are not
+  refused.
+  For the same reason an error kube-cel has where the apiserver has a value
+  (a timestamp offset of a day or more, a URL component that is not UTF-8, a
+  declared function kube-cel does not implement) now fails the rule even
+  where CEL absorbs the error (`… || true`).
 - **Every rule in the schema is compiled before the object is walked**, as
   the apiserver compiles them all when it registers the CRD. A rule or
   `messageExpression` that does not compile on a node the object does not
