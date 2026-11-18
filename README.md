@@ -473,7 +473,11 @@ an optional lazily, as cel-go does. Regular expressions are RE2's: `matches`,
 before the `regex` crate compiles it, and refuse what Go refuses (`\u0041`,
 `(?x)`, `a**`, `a{1001}`, `[a--b]`, `\p{Emoji}`, which the `regex` crate
 takes); a pattern the apiserver compiles at registration (see the table)
-fails to compile, reached or not, as there. Every
+fails to compile, reached or not, as there. The apiserver also folds a type
+conversion of a constant when it builds the program (cel-go's
+`OptOptimize`), so one that fails (`int('x')`, `uint(-1)`, `string(b'\xff')`)
+rejects the CRD at registration; kube-cel evaluates such a conversion when it
+compiles the rule, and refuses it as `CompilationFailure`. Every
 rule in the schema is compiled before the object is walked, including those on
 nodes the object does not reach (an omitted property, the items of an empty
 list), and if any fails to compile the object is rejected with those errors

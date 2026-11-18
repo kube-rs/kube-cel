@@ -8,11 +8,11 @@
 
 pub(crate) mod analysis;
 pub(crate) mod compilation;
+pub(crate) mod constants;
 pub(crate) mod defaults;
 pub(crate) mod escaping;
 #[cfg(feature = "quantity")] pub(crate) mod evaluation_order;
 pub(crate) mod references;
-pub(crate) mod regex_constants;
 pub(crate) mod structural;
 pub(crate) mod values;
 pub(crate) mod vap;
@@ -105,8 +105,9 @@ pub(crate) fn execute_supported(program: &Program, ctx: &Context<'_, '_>) -> cel
 /// [`validation_env`], refusing a call to a function the apiserver does not
 /// declare, or an identifier `scope` does not declare, even where evaluation
 /// would never reach it, as the apiserver does at registration (see
-/// [`references`]), a constant regular expression the apiserver compiles at
-/// registration that does not compile (see [`regex_constants`]), and a
+/// [`references`]), a conversion of a constant the apiserver folds at
+/// registration that fails, or a constant regular expression it compiles then
+/// that does not compile (see [`constants`]), and a
 /// quantity update whose result depends on evaluation order (see
 /// `evaluation_order`).
 pub(crate) fn compile(
@@ -115,7 +116,7 @@ pub(crate) fn compile(
 ) -> Result<Program, Box<dyn std::error::Error + Send + Sync>> {
     let program = validation_env().compile(source)?;
     references::check(program.expression(), scope)?;
-    regex_constants::check(program.expression())?;
+    constants::check(program.expression())?;
     #[cfg(feature = "quantity")]
     evaluation_order::check(program.expression())?;
     Ok(program)

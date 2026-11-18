@@ -311,6 +311,15 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     registration, and is an error noted as unsupported at evaluation
     (fail-closed).
   - Migration: none for rules the apiserver accepts.
+- **A type conversion of a constant that fails is refused at compile time**
+  (`CompilationFailure`, reached or not): `int('x')`, `uint(-1)`,
+  `string(b'\xff')`, `int(dyn('x'))`. The apiserver builds each rule's
+  program at registration with cel-go's `OptOptimize`, which folds a
+  conversion (`bool`, `bytes`, `double`, `duration`, `dyn`, `int`, `string`,
+  `timestamp`, `type`, `uint`) of a literal, of a folded conversion or of a
+  list or map literal of them, and rejects the CRD when one fails; such a
+  rule passed client-side where evaluation did not reach it, a **fail-open**,
+  now closed. Nothing else is folded, as in cel-go.
 - **A quantity update whose result depends on evaluation order is refused**
   at compile time (`CompilationFailure`, reached or not): an `add`, `sub`,
   `compareTo`, `isGreaterThan` or `isLessThan` on a quantity held by a

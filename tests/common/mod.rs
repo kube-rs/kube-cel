@@ -1380,6 +1380,23 @@ pub fn cases() -> Vec<ParityCase> {
             expect: Expect::Accept,
             note: "a local year of 10000 prints without a sign, as Go's RFC3339Nano → ACCEPT",
         },
+        // A conversion of a constant is folded, and a failing one rejects the CRD,
+        // when the apiserver builds the program (src/validation/constants.rs).
+        ParityCase {
+            kind: "PfoldConversion",
+            plural: "pfoldconversions",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "true || [int(dyn('x'))].size() == 0",
+                    "message": "pfoldconversions"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "int(dyn('x')) folds and fails when the program is built → rejected at registration",
+        },
         // Regular expressions are RE2's (src/functions/re2.rs, cel_regex.rs): the apiserver
         // checks matches' literal first argument and compiles constant patterns at registration.
         ParityCase {
