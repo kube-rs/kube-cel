@@ -4,7 +4,10 @@
 //! `kubectl apply --dry-run=server` over a CRD wrapping each schema; server
 //! dry-run runs CEL admission but persists nothing) and asserts kube-cel's
 //! [`Validator`] agrees on every case. This pins kube-cel to ground truth and
-//! catches divergences a hand-written expectation would miss.
+//! catches divergences a hand-written expectation would miss. The policy table
+//! ([`common::vap_cases`]) is server-dry-run as ValidatingAdmissionPolicy
+//! creations, which the apiserver compiles at registration, against
+//! [`VapEvaluator::compile_expressions`].
 //!
 //! The tests are `#[ignore]`, so `cargo test` skips them (no cluster in CI).
 //! Run via `just parity`, which provisions a throwaway kind cluster and exports
@@ -20,9 +23,10 @@ use serde_json::{Value, json};
 
 mod common;
 use common::{
-    Expect, Verdict, cases, kubecel_compiled_verdict, kubecel_verdict, kubecel_verdict_with_defaults,
-    transition_cases,
+    Expect, VapCase, Verdict, cases, kubecel_compiled_verdict, kubecel_verdict,
+    kubecel_verdict_with_defaults, transition_cases, vap_cases,
 };
+use kube_cel::{VapEvaluator, VapExpression};
 
 fn ctx() -> String {
     std::env::var("KUBE_CEL_PARITY_CTX")
@@ -386,4 +390,87 @@ fn transition_parity_against_kind() {
         println!("ok {n}/{total} {} — {}", c.kind, c.note);
     }
     println!("transition_parity_against_kind: {total}/{total} update cases as expected");
+}
+
+/// The ValidatingAdmissionPolicy wrapping a [`VapCase`]: a ConfigMap
+/// `paramKind` if the case has one, no `spec.variables`, matching ConfigMap
+/// creation.
+fn vap_for(c: &VapCase) -> Value {
+    let mut validation = json!({ "expression": c.expression });
+    if let Some(m) = c.message_expression {
+        validation["messageExpression"] = json!(m);
+    }
+    let mut policy = json!({
+        "apiVersion": "admissionregistration.k8s.io/v1",
+        "kind": "ValidatingAdmissionPolicy",
+        "metadata": { "name": c.name },
+        "spec": {
+            "failurePolicy": "Fail",
+            "matchConstraints": {
+                "resourceRules": [{
+                    "apiGroups": [""],
+                    "apiVersions": ["v1"],
+                    "operations": ["CREATE"],
+                    "resources": ["configmaps"]
+                }]
+            },
+            "validations": [validation]
+        }
+    });
+    if c.param_kind {
+        policy["spec"]["paramKind"] = json!({ "apiVersion": "v1", "kind": "ConfigMap" });
+    }
+    policy
+}
+
+/// Drive the policy table: server-dry-run each policy's creation (the
+/// apiserver compiles every expression at registration, nothing is stored)
+/// and require kube-cel's `VapEvaluator::compile_expressions` to compile
+/// exactly the policies the apiserver registers, on an evaluator told whether
+/// the policy has a `paramKind` (`has_param_kind`).
+#[test]
+#[ignore = "needs a live kind cluster; run via `just parity`"]
+fn vap_registration_parity_against_kind() {
+    let cases = vap_cases();
+    let total = cases.len();
+    for (i, c) in cases.iter().enumerate() {
+        let n = i + 1;
+        let (registered, out) = kubectl(
+            &["create", "--dry-run=server", "-f", "-"],
+            Some(&vap_for(c).to_string()),
+        );
+        if !registered {
+            // The apiserver's 422 for an invalid policy, as kubectl prints it;
+            // any other failure says nothing about the expressions.
+            assert!(
+                out.contains(&format!("\"{}\" is invalid", c.name)),
+                "[{n}/{total}] {}: policy create failed without the apiserver rejecting it: {out}",
+                c.name
+            );
+        }
+        assert_eq!(
+            registered, c.registers,
+            "[{n}/{total}] {}: apiserver registration drifted from expected ({})\n  {out}",
+            c.name, c.note
+        );
+        let evaluator = VapEvaluator::builder().has_param_kind(c.param_kind);
+        let compiled = evaluator.build().compile_expressions(&[VapExpression {
+            expression: c.expression.into(),
+            message: None,
+            message_expression: c.message_expression.map(Into::into),
+        }]);
+        assert_eq!(
+            compiled[0].is_ok(),
+            registered,
+            "[{n}/{total}] {} DIVERGENCE: apiserver registers={registered} vs kube-cel compiles={} ({})",
+            c.name,
+            compiled[0].is_ok(),
+            c.note
+        );
+        println!("ok {n}/{total} {} — {}", c.name, c.note);
+        if !registered && let Some(line) = out.lines().find(|l| !l.trim().is_empty()) {
+            println!("   apiserver: {line}");
+        }
+    }
+    println!("vap_registration_parity_against_kind: {total}/{total} policies as expected");
 }

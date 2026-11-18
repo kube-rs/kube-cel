@@ -378,7 +378,10 @@ divergences are pinned by
 | `math.*` (cel-go `ext.Math`) | rejects the CRD at registration (not in the base environment) | `CompilationFailure` | fail-closed |
 | `isIPv4`, `isIPv6`, `isCIDRv4`, `isCIDRv6` (kube-cel functions before 0.9) | rejects the CRD at registration (not in the base environment) | `CompilationFailure` | fail-closed |
 | `base64.*` (cel-go `ext.Encoders`), `jsonpatch.escapeKey` | rejects the CRD at registration (not in the base environment; `jsonpatch` is a MutatingAdmissionPolicy library) | `CompilationFailure` | fail-closed |
+| An undeclared identifier: a typo (`slef`), a macro's variable outside the macro (or bound as `.x` and read as `x`), a policy variable in a CRD rule (`authorizer`, `object`), `self` in a policy, `authorizer` in a policy's `messageExpression`, `params` in a policy without a `paramKind`, `variables` in a policy without `spec.variables`, a type name the apiserver does not declare (`dyn`, `duration`); and `__result__` as a standard macro's variable ("iteration variable overwrites accumulator variable") | rejects the CRD or policy at registration ("undeclared reference") | `CompilationFailure` | fail-closed |
 | Global `min(..)` / `max(..)` | rejects the CRD at registration (only `<list>.min()` / `<list>.max()`) | `CompilationFailure` | fail-closed |
+| `variables` in a VAP with `spec.variables` (`variables.foo == 1`) | evaluates the policy's variables | `VapError`: kube-cel does not model `spec.variables`, so `variables` is never declared | fail-closed |
+| Names `cel` cannot evaluate: type names with no `cel` value (`net.IP`, `net.CIDR`, `google.protobuf.Empty`), `google.protobuf.NullValue.NULL_VALUE`, a message construction (`google.protobuf.Duration{seconds: 1}`), and `.x` naming a macro's variable `x` | evaluates (`type(ip('1.2.3.4')) == net.IP` holds) | compiles; `UnsupportedReference` where evaluation reaches it (`EvaluationError` for the construction) | fail-closed |
 | String `reverse()` (`'abc'.reverse()`) | rejects the CRD at registration (no matching overload) | `EvaluationError` | fail-closed |
 | `<IP>.string()`, `<CIDR>.string()` | rejects the CRD at registration (no matching overload; only `string(<IP>)`) | `UnsupportedReference` | fail-closed |
 | A rule reading `oldSelf` in the items of a list that is not `x-kubernetes-list-type: map`, or `optionalOldSelf` on a rule that does not read `oldSelf` | rejects the CRD at registration | `CompilationFailure` | fail-closed |
@@ -390,7 +393,7 @@ divergences are pinned by
 | An object reaching more than 64 levels of schema nesting | no nesting limit; evaluates rules at any depth | `SchemaTooDeep` error | fail-closed |
 | Rule whose `messageExpression` does not compile (a syntax error, or a call refused above) | rejects the CRD at registration | `CompilationFailure` (the rule is rejected, not just its message) | fail-closed |
 | Functions the apiserver declares that kube-cel does not implement: `optional.unwrap(..)`, `<list>.unwrapOpt()`, the authz library (`authorizer.*` in a VAP), or a function whose kube-cel feature is disabled | evaluates (the authz library against the cluster) | compiles, and passes where evaluation does not reach the call; `UnsupportedReference` where it does | fail-closed (the authz library is out of scope) |
-| No type checker: type errors (`[1, 2] == [1.0, 2.0]`, `[1, 2.0].isSorted()`), arity errors (`'a'.lowerAscii(42)`), call-shape errors (`family(ip(..))`, a literal `format()` call with more arguments than clauses or an argument its clause cannot take, such as `'%s'.format([1, 2])`, and the `reverse()` / `.string()` rows above), a non-string `messageExpression`, and an undeclared identifier (such as `authorizer` in a CRD rule), where evaluation does not reach the error | rejects the CRD at registration (type-checks every expression) | passes; `cel` has no type checker yet ([cel-rust#350](https://github.com/cel-rust/cel-rust/issues/350)) | **fail-open** (exception class) |
+| No type checker: type errors (`[1, 2] == [1.0, 2.0]`, `[1, 2.0].isSorted()`), arity errors (`'a'.lowerAscii(42)`), call-shape errors (`family(ip(..))`, a literal `format()` call with more arguments than clauses or an argument its clause cannot take, such as `'%s'.format([1, 2])`, and the `reverse()` / `.string()` rows above), a field the type does not have (`self.undeclared` on a schema without it), and a non-string `messageExpression`, where evaluation does not reach the error | rejects the CRD at registration (type-checks every expression) | passes; `cel` has no type checker yet ([cel-rust#350](https://github.com/cel-rust/cel-rust/issues/350)) | **fail-open** (exception class) |
 | No cost model: a rule whose estimated cost exceeds the budget (`self.l.all(x, self.l.exists(y, x == y))` on a list with no `maxItems`), or whose evaluation exceeds the per-expression cost limit (`lists.range(1000000).size() > 0`, `lists.range(600000).map(x, x).size() > 0`) | rejects the CRD at registration ("estimated rule cost exceeds budget"), or the object at evaluation ("actual cost limit exceeded") | passes; `cel` has no cost model yet ([cel-rust#230](https://github.com/cel-rust/cel-rust/discussions/230)) | **fail-open** (exception class) |
 
 The validation pipeline compiles and runs rules in the environment `new_env()`
@@ -404,10 +407,19 @@ what the base environment lacks: `cel.bind` and the `math` and `base64.*`
 libraries. (`cel` has them as its `bindings`, `math` and `encoders` extensions,
 for an `Env` of your own.) `cel` only parses,
 so kube-cel walks the AST of every rule and `messageExpression` at compile time
-and refuses a call to a function the apiserver does not declare as
-`ErrorKind::CompilationFailure`, even in a branch evaluation never reaches
-(`self.s == '' || isIPv4(self.s)`), as the apiserver does at registration. The
-declared names
+and refuses a call to a function the apiserver does not declare, and an
+identifier not declared where it appears, as `ErrorKind::CompilationFailure`,
+even in a branch evaluation never reaches (`self.s == '' || isIPv4(self.s)`,
+`self.s == '' || slef.t == ''`), as the apiserver does at registration. A CRD
+rule and its `messageExpression` read `self` and `oldSelf`; a VAP expression
+reads `object`, `oldObject`, `request`, `namespaceObject` (`null` when not
+set), `authorizer` (in the expression, not its `messageExpression`), and
+`params` when the policy has a `paramKind` (`VapEvaluatorBuilder::has_param_kind`;
+unset, whether a parameter object is set), `null` when no parameter object is
+set; `variables` comes with `spec.variables`, which kube-cel does not model, so
+it does not compile; a macro's variables are declared inside the macro, and
+type names (`int`, `net.IP`, `google.protobuf.Timestamp`) everywhere.
+The declared function names
 (`src/validation/apiserver_functions.txt`, from the `k8s.io/apiserver` v0.36.1
 base environment) are checked against a live apiserver by `just parity`. CRD
 rules, their `messageExpression`s and VAP expressions share them, since the
@@ -418,8 +430,9 @@ rule in the schema is compiled before the object is walked, including those on
 nodes the object does not reach (an omitted property, the items of an empty
 list), and if any fails to compile the object is rejected with those errors
 alone. A
-reference evaluation cannot resolve (such a function, an undeclared identifier,
-or a function called in a form none of its overloads takes) surfaces as
+reference evaluation cannot resolve (such a function, a declared variable
+kube-cel does not bind, such as `authorizer`, or a function called in a form
+none of its overloads takes) surfaces as
 `ErrorKind::UnsupportedReference`, distinct from
 `EvaluationError` (reserved for genuine runtime errors in a supported rule), so a
 consumer can tell a coverage gap apart from an actual rule failure. Either way the

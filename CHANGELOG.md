@@ -62,7 +62,7 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     rejected (`UnsupportedReference`), and one using `sortBy` (a macro) does
     not compile.
   - `ErrorKind::UnsupportedReference` now covers a reference evaluation cannot
-    resolve (an undeclared identifier, a function the apiserver declares but
+    resolve (a variable kube-cel does not bind, a function the apiserver declares but
     kube-cel does not implement or has behind a disabled feature, or a function
     called in a form none of its overloads takes, such as `ip(..).string()`); a
     function the apiserver does not declare is a `CompilationFailure`.
@@ -247,6 +247,63 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     (`[int]`). The output differed before, a documented **fail-open**, now
     closed.
 
+- **An identifier not declared where it appears fails to compile.** The
+  validation engine's compile-time check covers identifiers as well as
+  function names. A CRD rule and its `messageExpression` read `self` and
+  `oldSelf`; a VAP expression reads `object`, `oldObject`, `request`,
+  `namespaceObject`, `authorizer` (not in its `messageExpression`), and
+  `params` when the policy has a `paramKind` (below); a macro's variables
+  (`all`, `exists`, `map`, `filter`, `sortBy`, `optMap`, the two-variable
+  forms, …) are declared inside the macro only; type names (`int`, `string`,
+  `net.IP`, `google.protobuf.Timestamp`, …) everywhere. A typo (`self.x > 0 || slef.y == 1`), a macro's variable
+  outside the macro (or bound as `.x` and read as `x`), `__result__` as the
+  variable of `all`, `exists`, `map`, `filter` or `sortBy` (cel-go's legacy
+  accumulator name), `authorizer` or `object` in a CRD rule, `self` in a VAP
+  expression, `authorizer` in a VAP `messageExpression`, `params` in a VAP
+  expression of a policy without a `paramKind`, `variables` in any VAP
+  expression (it comes with `spec.variables`, which kube-cel does not model;
+  the apiserver rejects it without them), `dyn` or `duration` used as a
+  value, or the construction of an undeclared message type (`Foo{a: 1}`) is
+  now `ErrorKind::CompilationFailure` (`CompilationError::Parse` /
+  `MessageExpressionParse`, `VapError`), even where evaluation never reaches
+  it. The apiserver rejects all of these at registration (checked on
+  v1.36.1); they used to pass client-side unless evaluation reached them: a
+  **fail-open** divergence, now closed and gone from the README "no type
+  checker" row. Field names are not checked (`self.undeclared` on a schema
+  without it still needs a type checker). The declared type names and message types were
+  measured one by one, as values and as constructions, so a name the
+  apiserver accepts (`google.protobuf.Struct.FieldsEntry`, `duration{}`)
+  compiles.
+  - `VapEvaluator` takes the policy's declarations apart from the
+    request's values, as the apiserver does. The new
+    `VapEvaluatorBuilder::has_param_kind(bool)` says whether the policy has a
+    `paramKind`, which declares `params`; unset, it follows `params(..)` (a
+    parameter object set means a `paramKind`). `has_param_kind(false)` with
+    `params(..)`, in either order, is a policy without one: `params` is not
+    declared and the object is not bound. Each `CompiledVapExpression` keeps
+    whether `params` was declared, and `evaluate_compiled` binds `params` to
+    `null` when it was and the evaluator has no parameter object, as for a
+    binding with no `paramRef`. An expression naming `params` on an
+    evaluator with neither used to compile and fail only when evaluation
+    reached `params`; it now fails to compile.
+  - Migration: none for expressions the apiserver accepts in the policy
+    they come from, but for those naming `variables` (below). To compile a policy's expressions once, ahead of the
+    requests, pass its `spec.paramKind.is_some()`; per request, set the
+    parameter object, or nothing for a binding with no `paramRef`:
+    ```rust
+    let compiled = VapEvaluator::builder()
+        .has_param_kind(true)
+        .build()
+        .compile_expressions(&expressions);
+    let results = VapEvaluator::builder()
+        .object(object)
+        .params(param_object) // or omit it: `params` is null
+        .build()
+        .evaluate_compiled(&compiled);
+    ```
+    A policy with `spec.variables` cannot be evaluated client-side until
+    kube-cel models them (README "apiserver divergence").
+
 ### Added
 - `new_env() -> cel::Env`: kube-cel's environment, the apiserver's base CEL
   environment as far as kube-cel models it: the `cel` standard library,
@@ -258,6 +315,9 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   `env` with every compiled-in function registered, the path that replaces
   `KubeCelExt`. `env` must start from `new_env()`, with `cel`'s extensions or
   overloads of your own added as you need.
+- `VapEvaluatorBuilder::has_param_kind(bool)`: whether the policy has a
+  `paramKind`, which declares `params` (see "An identifier not declared
+  where it appears" above).
 - `RegisterError`: `IncompleteEnv` for an `env` that does not start from
   `new_env()` (such as `Env::stdlib()`), `Rejected { function, source }` for an
   `env` that declares one of kube-cel's names (such as with `cel`'s `strings`
@@ -289,6 +349,9 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
 - VAP `object` / `oldObject` / `params` / `namespaceObject` are bound without
   field-name escaping, so `object.metadata.labels['app.kubernetes.io/name']`
   resolves.
+- VAP `namespaceObject` is `null` when no namespace object is set (a
+  cluster-scoped request), as on the apiserver; `namespaceObject == null`
+  used to fail as an unresolved reference.
 - `<list>.sum()` overflow is an error instead of a panic (debug) or a wrapped
   result (release).
 - With every function feature off, `indexOf`, `lastIndexOf`, `isGreaterThan`,

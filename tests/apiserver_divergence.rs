@@ -25,9 +25,9 @@
 //! `environment.MustBaseEnvSet(1.36).NewExpressionsEnv()`). `cel` has no type
 //! checker, so kube-cel walks each rule's AST at compile time and refuses a
 //! call to a function the apiserver does not declare (`cel.bind`, `math.*`,
-//! `isIPv4`, `base64.*`, a global `min(..)`, ...) as
-//! [`ErrorKind::CompilationFailure`], even in a branch evaluation never
-//! reaches, as the apiserver does at registration. A function the apiserver
+//! `isIPv4`, `base64.*`, a global `min(..)`, ...), and an identifier not
+//! declared where it appears, as [`ErrorKind::CompilationFailure`], even in a
+//! branch evaluation never reaches, as the apiserver does at registration. A function the apiserver
 //! declares but kube-cel does not implement compiles, and fails closed only
 //! when evaluation reaches it, see
 //! [`declared_unimplemented_functions_fail_closed_when_reached`].
@@ -55,6 +55,13 @@ fn run_rule(rule: &str) -> Result<(), ValidationErrors> {
 /// `CompilationFailure` for it as a CRD rule, and the VAP evaluator fails to
 /// compile it. The apiserver rejects such a CRD or policy at registration.
 fn assert_refused(rule: &str) {
+    assert_rule_refused(rule);
+    assert_policy_refused(rule);
+}
+
+/// Asserts the Validator (`validate` and `validate_compiled`) reports a
+/// `CompilationFailure` for `rule` as a CRD rule.
+fn assert_rule_refused(rule: &str) {
     let errors = run_rule(rule).unwrap_err();
     assert!(
         errors.iter().any(|e| e.kind == ErrorKind::CompilationFailure),
@@ -73,17 +80,20 @@ fn assert_refused(rule: &str) {
         errors.iter().any(|e| e.kind == ErrorKind::CompilationFailure),
         "{rule}: expected CompilationFailure from validate_compiled, got {errors:?}"
     );
+}
 
+/// Asserts the VAP evaluator fails to compile `expression`.
+fn assert_policy_refused(expression: &str) {
     let compiled = VapEvaluator::builder()
         .build()
         .compile_expressions(&[VapExpression {
-            expression: rule.into(),
+            expression: expression.into(),
             message: None,
             message_expression: None,
         }]);
     assert!(
         compiled[0].is_err(),
-        "{rule}: expected the VAP expression to fail to compile"
+        "{expression}: expected the VAP expression to fail to compile"
     );
 }
 
@@ -169,6 +179,102 @@ fn unsupported_call_in_message_expression_fails_closed() {
         compiled[0].is_err(),
         "expected the VAP messageExpression to fail to compile"
     );
+}
+
+// ── Undeclared identifiers — all fail CLOSED ─────────────────────────────────
+// apiserver: rejects the CRD or policy at registration ("undeclared reference
+//            to 'x'") for an identifier not declared where it appears: a typo,
+//            a macro's variable outside the macro, a policy variable in a CRD
+//            rule (`authorizer`, `object`) or a CRD variable in a policy
+//            (`self`), even in a branch evaluation never reaches.
+// kube-cel:  CompilationFailure (a compile error for a policy), from the same
+//            compile-time walk, which tracks what each comprehension binds.
+//            Before 0.9 these passed client-side unless evaluation reached
+//            them: fail-OPEN (filed under the no-type-checker class).
+
+#[test]
+fn undeclared_identifiers_fail_closed() {
+    assert_rule_refused("self.items.size() > 0 || slef.x == 1");
+    assert_rule_refused("true || undeclared == 1");
+    assert_rule_refused("true || authorizer.group('').resource('pods').check('get').allowed()");
+    assert_rule_refused("true || object.x == 1");
+    assert_rule_refused("self.items.all(x, x > 0) && (true || x == 1)");
+    assert_rule_refused("true || [].all(i, v, slef)");
+
+    // The `messageExpression` of a rule that holds is checked too.
+    let schema = json!({
+        "type": "object",
+        "x-kubernetes-validations": [{ "rule": "true", "messageExpression": "'bad: ' + string(slef)" }]
+    });
+    let errors = Validator::new().validate(&schema, &json!({}), None).unwrap_err();
+    assert!(
+        errors.iter().any(|e| e.kind == ErrorKind::CompilationFailure),
+        "expected CompilationFailure, got {errors:?}"
+    );
+
+    assert_policy_refused("true || self.x == 1");
+    assert_policy_refused("true || oldSelf.x == 1");
+    assert_policy_refused("true || slef.x == 1");
+    let compiled = VapEvaluator::builder()
+        .build()
+        .compile_expressions(&[VapExpression {
+            expression: "true".into(),
+            message: None,
+            message_expression: Some("'bad: ' + string(slef)".into()),
+        }]);
+    assert!(
+        compiled[0].is_err(),
+        "expected the VAP messageExpression to fail to compile"
+    );
+}
+
+/// `variables` is declared for a policy with `spec.variables` only
+/// (`undeclared reference to 'variables'` without, checked on v1.36.1).
+/// kube-cel does not model `spec.variables`, so it refuses every expression
+/// naming `variables`, also in a policy that defines it, which the apiserver
+/// registers and evaluates.
+#[test]
+fn policy_variables_fail_closed() {
+    assert_policy_refused("true || variables.foo == 1");
+    assert_policy_refused("variables.foo == 1");
+}
+
+/// Names the apiserver declares and evaluates but `cel` cannot: type names
+/// with no `cel` value (`net.IP`, `google.protobuf.Empty`), the protobuf
+/// `NullValue` constant, a message construction, and `.x` for a macro's `x`
+/// (cel-go resolves it to the macro's variable; `cel` looks only outside the
+/// comprehension). Each evaluates to true on the apiserver (Go oracle,
+/// v0.36.1). They compile in kube-cel, as the apiserver registers them, and
+/// fail closed when evaluation reaches them.
+#[test]
+#[cfg(feature = "ip")]
+fn names_cel_cannot_evaluate_fail_closed() {
+    for (rule, want) in [
+        ("type(ip('1.2.3.4')) == net.IP", ErrorKind::UnsupportedReference),
+        (
+            "type(cidr('1.2.3.0/24')) == net.CIDR",
+            ErrorKind::UnsupportedReference,
+        ),
+        (
+            "[google.protobuf.Empty].size() == 1",
+            ErrorKind::UnsupportedReference,
+        ),
+        (
+            "google.protobuf.NullValue.NULL_VALUE == 0",
+            ErrorKind::UnsupportedReference,
+        ),
+        ("self.items.all(x, .x > 0)", ErrorKind::UnsupportedReference),
+        (
+            "google.protobuf.Duration{seconds: 1} == duration('1s')",
+            ErrorKind::EvaluationError,
+        ),
+    ] {
+        let errors = run_rule(rule).unwrap_err();
+        assert!(
+            errors.iter().all(|e| e.kind == want),
+            "{rule}: expected fail-closed {want:?}, got {errors:?}"
+        );
+    }
 }
 
 /// The apiserver has no string `reverse()` (its `reverse` is the list one):
@@ -288,10 +394,10 @@ fn declared_unimplemented_functions_fail_closed_when_reached() {
 
 // ── No type checker — fails OPEN (a documented exception class) ──────────────
 // apiserver: type-checks every expression at registration, so a type, arity or
-//            call-shape error, or an undeclared identifier, rejects the CRD
-//            even in a branch that is never evaluated.
+//            call-shape error rejects the CRD even in a branch that is never
+//            evaluated.
 // kube-cel:  `cel` has no type checker yet (cel-rust#350), and kube-cel's
-//            compile-time walk checks function names only. Such a rule passes
+//            compile-time walk checks names only. Such a rule passes
 //            whenever evaluation does not trip over the error. Pinned so the
 //            gap is visible, and so this test fails (and gets updated) once a
 //            checker lands.
@@ -331,11 +437,8 @@ fn no_type_checker_fails_open() {
         assert_fails_open("'%s'.format([1, 2]) == '1'");
         assert_fails_open("true || '%d'.format(['a']) == ''");
     }
-    // An undeclared identifier in a branch that is never evaluated. A CRD rule
-    // has no `authorizer` (a policy variable); the functions called on it are
-    // declared for CRD rules too, so only the identifier is wrong.
-    assert_fails_open("true || undeclared == 1");
-    assert_fails_open("true || authorizer.group('').resource('pods').check('get').allowed()");
+    // A field the schema does not declare ("undefined field 'undeclared'").
+    assert_fails_open("true || self.undeclared == 1");
 
     // A `messageExpression` must be a string; this one is only evaluated when
     // the rule fails, and the rule holds.

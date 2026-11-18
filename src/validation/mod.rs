@@ -26,6 +26,7 @@ use crate::validation::{
     values::{json_to_cel_with_compiled, json_to_cel_with_schema},
 };
 use cel::{Context, Env, Program};
+pub(crate) use references::Scope;
 use std::sync::{Arc, LazyLock};
 
 /// The `cel` environment that CRD rules and VAP expressions compile and run
@@ -70,11 +71,15 @@ pub(crate) fn execute_supported(program: &Program, ctx: &Context<'_, '_>) -> cel
 
 /// Compiles a CRD rule, a VAP expression or either's `messageExpression` on
 /// [`validation_env`], refusing a call to a function the apiserver does not
-/// declare even where evaluation would never reach it, as the apiserver does
-/// at registration (see [`references`]).
-pub(crate) fn compile(source: &str) -> Result<Program, Box<dyn std::error::Error + Send + Sync>> {
+/// declare, or an identifier `scope` does not declare, even where evaluation
+/// would never reach it, as the apiserver does at registration (see
+/// [`references`]).
+pub(crate) fn compile(
+    source: &str,
+    scope: Scope,
+) -> Result<Program, Box<dyn std::error::Error + Send + Sync>> {
     let program = validation_env().compile(source)?;
-    references::check(program.expression())?;
+    references::check(program.expression(), scope)?;
     Ok(program)
 }
 
@@ -97,9 +102,11 @@ pub struct RootContext {
 #[non_exhaustive]
 pub enum ErrorKind {
     /// The rule, or its `messageExpression`, does not compile: a syntax error,
-    /// or a call to a function the apiserver's CEL environment does not
-    /// declare (`cel.bind`, the `math` library, `base64.*`, `isIPv4`, a global
-    /// `min(..)`, ..). The apiserver rejects such a CRD at registration.
+    /// a call to a function the apiserver's CEL environment does not declare
+    /// (`cel.bind`, the `math` library, `base64.*`, `isIPv4`, a global
+    /// `min(..)`, ..), or an identifier not declared where it appears (`slef`,
+    /// a macro's variable outside the macro, `authorizer` in a CRD rule). The
+    /// apiserver rejects such a CRD at registration.
     CompilationFailure,
     /// Malformed rule JSON.
     InvalidRule,
@@ -109,9 +116,10 @@ pub enum ErrorKind {
     InvalidResult,
     /// Runtime evaluation error.
     EvaluationError,
-    /// Evaluating the rule reached a reference it could not resolve: an
-    /// undeclared identifier, a function the apiserver declares but kube-cel
-    /// does not implement (`optional.unwrap`, `<list>.unwrapOpt()`, the
+    /// Evaluating the rule reached a reference it could not resolve: a
+    /// variable kube-cel does not bind (`authorizer` in a policy), a function
+    /// the apiserver declares but kube-cel does not implement
+    /// (`optional.unwrap`, `<list>.unwrapOpt()`, the
     /// `authorizer` library) or implements only behind a disabled feature, or
     /// a function called in a form no overload takes (`ip(..).string()`). A
     /// call to a function the apiserver does not declare at all is a
@@ -1060,12 +1068,14 @@ impl Validator {
             Err(e) => {
                 // The rule compiled but evaluation failed. Calls to functions
                 // the apiserver does not declare were refused at compile time
-                // (see `references`); an `UndeclaredReference` here is an
-                // undeclared identifier, a declared function kube-cel does not
-                // implement, or a function called in a form none of its
-                // overloads takes, classified distinctly so callers can tell a
-                // coverage gap from a real runtime error. Either way the owned
-                // `ExecutionError` is the cause and is preserved via `source()`.
+                // (see `references`), and so were undeclared identifiers; an
+                // `UndeclaredReference` here is a declared name kube-cel cannot
+                // resolve (`.x` for a macro's `x`, `net.IP`), a declared
+                // function kube-cel does not implement, or a function called
+                // in a form none of its overloads takes, classified distinctly
+                // so callers can tell a coverage gap from a real runtime error.
+                // Either way the owned `ExecutionError` is the cause and is
+                // preserved via `source()`.
                 let (kind, message) = match &e {
                     cel::ExecutionError::UndeclaredReference(name) => (
                         ErrorKind::UnsupportedReference,

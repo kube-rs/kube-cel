@@ -230,7 +230,7 @@ fn kube_cel_eval(expr: &str) -> Result<Value, String> {
     // environment, the apiserver's base environment as far as kube-cel models
     // it: the probe measures what `Validator` evaluates.
     let caught = std::panic::catch_unwind(|| {
-        let program = super::compile(expr).map_err(|e| format!("compile: {e}"))?;
+        let program = super::compile(expr, super::Scope::Crd).map_err(|e| format!("compile: {e}"))?;
         program
             .execute(&super::base_context())
             .map_err(|e| format!("eval: {e}"))

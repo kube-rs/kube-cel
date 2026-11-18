@@ -1,6 +1,8 @@
 //! Client-side evaluation of Kubernetes ValidatingAdmissionPolicy CEL expressions.
 //!
-//! Supports all VAP variables except `authorizer` (requires API server).
+//! Binds every VAP variable but `authorizer` (it needs an API server) and
+//! `variables` (kube-cel does not model `spec.variables`, so an expression
+//! naming it does not compile).
 //!
 //! # Example
 //!
@@ -33,7 +35,7 @@ use cel::{
     objects::{Key, Map},
 };
 
-use crate::validation::values::json_to_cel_raw;
+use crate::validation::{Scope, values::json_to_cel_raw};
 
 /// Group/Version/Kind identifier.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -123,6 +125,10 @@ pub struct CompiledVapExpression {
     expression: String,
     message: Option<String>,
     message_program: Option<Program>,
+    /// Whether `params` was declared when this compiled: the policy has a
+    /// `paramKind`. Evaluation binds `params` to `null` when it was and the
+    /// evaluator has no parameter object.
+    params_declared: bool,
 }
 
 impl std::fmt::Debug for CompiledVapExpression {
@@ -131,6 +137,7 @@ impl std::fmt::Debug for CompiledVapExpression {
             .field("expression", &self.expression)
             .field("message", &self.message)
             .field("has_message_program", &self.message_program.is_some())
+            .field("params_declared", &self.params_declared)
             .finish_non_exhaustive()
     }
 }
@@ -171,9 +178,12 @@ impl std::error::Error for VapError {
 
 /// Client-side evaluator for Kubernetes ValidatingAdmissionPolicy CEL expressions.
 ///
-/// Binds `object`, `oldObject`, `request`, and optionally `params` and
-/// `namespaceObject` into a CEL context, then evaluates one or more
-/// [`VapExpression`]s.
+/// Binds `object`, `oldObject`, `request`, `namespaceObject` and, for a
+/// policy with a `paramKind`, `params` into a CEL context, then evaluates one
+/// or more [`VapExpression`]s. As on the apiserver, the policy decides what is
+/// declared (`params` only with a `paramKind`, see
+/// [`VapEvaluatorBuilder::has_param_kind`]) and the request supplies the
+/// values; one not supplied is `null`.
 ///
 /// Construct via [`VapEvaluator::builder()`].
 #[derive(Debug)]
@@ -181,6 +191,9 @@ pub struct VapEvaluator {
     object: serde_json::Value,
     old_object: Option<serde_json::Value>,
     request: AdmissionRequest,
+    /// Whether the policy has a `paramKind`, which declares `params`.
+    param_kind: bool,
+    /// The parameter object; `None` with `param_kind` binds `params` to null.
     params: Option<serde_json::Value>,
     namespace_object: Option<serde_json::Value>,
 }
@@ -191,6 +204,7 @@ pub struct VapEvaluatorBuilder {
     object: Option<serde_json::Value>,
     old_object: Option<serde_json::Value>,
     request: AdmissionRequest,
+    param_kind: Option<bool>,
     params: Option<serde_json::Value>,
     namespace_object: Option<serde_json::Value>,
 }
@@ -215,15 +229,77 @@ impl VapEvaluatorBuilder {
         self
     }
 
-    /// Set the policy parameters (`params` variable).
-    /// Only bound when provided.
+    /// Declare whether the policy has a `paramKind` (`spec.paramKind`), which
+    /// is what declares `params`.
+    ///
+    /// The apiserver declares `params` only for a policy with a `paramKind`,
+    /// and refuses an expression naming it in one without, even in a branch
+    /// never evaluated (`true || params.x == 1`). With `true`, expressions
+    /// may name `params`, and it is `null` when no parameter object is set
+    /// ([`params`](Self::params)), as for a binding with no `paramRef`. With
+    /// `false`, an expression naming `params` does not compile.
+    ///
+    /// Unset, it follows [`params`](Self::params): a policy has a `paramKind`
+    /// when a parameter object is set. Pass the policy's
+    /// `spec.paramKind.is_some()` to compile its expressions as the apiserver
+    /// does whether or not a parameter object is at hand, such as once, ahead
+    /// of the requests:
+    ///
+    /// ```rust
+    /// use kube_cel::{VapEvaluator, VapExpression};
+    /// use serde_json::json;
+    ///
+    /// let expressions = [VapExpression {
+    ///     expression: "params == null || object.spec.replicas <= params.data.max".into(),
+    ///     message: None,
+    ///     message_expression: None,
+    /// }];
+    /// // The policy has a paramKind: `params` is declared while compiling.
+    /// let compiled = VapEvaluator::builder()
+    ///     .has_param_kind(true)
+    ///     .build()
+    ///     .compile_expressions(&expressions);
+    /// assert!(compiled[0].is_ok());
+    ///
+    /// // Per request, the parameter object the binding resolved...
+    /// let evaluator = VapEvaluator::builder()
+    ///     .object(json!({"spec": {"replicas": 3}}))
+    ///     .params(json!({"data": {"max": 5}}))
+    ///     .build();
+    /// assert!(evaluator.evaluate_compiled(&compiled)[0].passed);
+    ///
+    /// // ...or none, for a binding with no paramRef: `params` is null, since
+    /// // the compiled expressions declared it.
+    /// let evaluator = VapEvaluator::builder()
+    ///     .object(json!({"spec": {"replicas": 9}}))
+    ///     .build();
+    /// assert!(evaluator.evaluate_compiled(&compiled)[0].passed);
+    /// ```
+    ///
+    /// `has_param_kind(false)` together with [`params`](Self::params), in
+    /// either order, is a policy without a `paramKind`: `params` is not
+    /// declared and the parameter object is not bound.
+    pub fn has_param_kind(mut self, has_param_kind: bool) -> Self {
+        self.param_kind = Some(has_param_kind);
+        self
+    }
+
+    /// Set the parameter object (`params` variable) for this request.
+    ///
+    /// Unless [`has_param_kind`](Self::has_param_kind) says otherwise, this
+    /// also marks the policy as having a `paramKind`, so expressions may name
+    /// `params`. `Value::Null` binds `params` to `null`, as for a binding with
+    /// no `paramRef`. (A `paramRef` whose parameter object is not found is
+    /// the caller's to resolve: the apiserver then skips the binding
+    /// (`parameterNotFoundAction: Allow`) or denies the request (`Deny`)
+    /// without evaluating it.)
     pub fn params(mut self, p: serde_json::Value) -> Self {
         self.params = Some(p);
         self
     }
 
-    /// Set the namespace object (`namespaceObject` variable).
-    /// Only bound when provided.
+    /// Set the namespace object (`namespaceObject` variable). When not set,
+    /// `namespaceObject` is `null`, as for a cluster-scoped request.
     pub fn namespace_object(mut self, ns: serde_json::Value) -> Self {
         self.namespace_object = Some(ns);
         self
@@ -231,11 +307,15 @@ impl VapEvaluatorBuilder {
 
     /// Consume the builder and produce a [`VapEvaluator`].
     pub fn build(self) -> VapEvaluator {
+        let param_kind = self.param_kind.unwrap_or(self.params.is_some());
         VapEvaluator {
             object: self.object.unwrap_or(serde_json::Value::Null),
             old_object: self.old_object,
             request: self.request,
-            params: self.params,
+            param_kind,
+            // An explicit `has_param_kind(false)` drops the parameter object:
+            // a policy without a paramKind has none.
+            params: self.params.filter(|_| param_kind),
             namespace_object: self.namespace_object,
         }
     }
@@ -247,8 +327,9 @@ impl VapEvaluator {
         VapEvaluatorBuilder::default()
     }
 
-    /// Build a CEL [`Context`] with all VAP variables bound.
-    fn build_context(&self) -> Context<'static, 'static> {
+    /// Build a CEL [`Context`] with all VAP variables bound: `params` to the
+    /// parameter object, else to `null` when `params_declared`.
+    fn build_context(&self, params_declared: bool) -> Context<'static, 'static> {
         let mut ctx = crate::validation::base_context();
 
         // Bind `object`
@@ -264,15 +345,25 @@ impl VapEvaluator {
         // Bind `request`
         let _ = ctx.add_variable("request", request_to_cel(&self.request));
 
-        // Bind `params` only when provided
-        if let Some(params) = &self.params {
-            let _ = ctx.add_variable("params", json_to_cel_raw(params));
+        // Bind `params`: the parameter object, or null for a policy with a
+        // paramKind and none (the apiserver's nil `VersionedParams`).
+        match &self.params {
+            Some(params) => {
+                let _ = ctx.add_variable("params", json_to_cel_raw(params));
+            }
+            None if params_declared => {
+                let _ = ctx.add_variable("params", Value::Null);
+            }
+            None => {}
         }
 
-        // Bind `namespaceObject` only when provided
-        if let Some(ns) = &self.namespace_object {
-            let _ = ctx.add_variable("namespaceObject", json_to_cel_raw(ns));
-        }
+        // Bind `namespaceObject` — null when not provided (a cluster-scoped
+        // request), as the apiserver declares it for every policy.
+        let namespace_val = match &self.namespace_object {
+            Some(ns) => json_to_cel_raw(ns),
+            None => Value::Null,
+        };
+        let _ = ctx.add_variable("namespaceObject", namespace_val);
 
         ctx
     }
@@ -281,29 +372,53 @@ impl VapEvaluator {
     ///
     /// Returns one entry per input expression. Failed compilations are
     /// represented as `Err(`[`VapError`]`)`, which carries the offending
-    /// expression and the cause: the `cel` parse error, or a call to a function
-    /// outside the apiserver's base CEL environment, even one evaluation would
-    /// never reach (via [`source`](std::error::Error::source)).
+    /// expression and the cause: the `cel` parse error, a call to a function
+    /// outside the apiserver's base CEL environment, or an identifier a policy
+    /// does not declare (`self`, a typo), even one evaluation would never
+    /// reach (via [`source`](std::error::Error::source)). A policy declares
+    /// `object`, `oldObject`, `request` and `namespaceObject`, `authorizer`
+    /// in a validation expression but not in its `messageExpression`, and
+    /// `params` when it has a `paramKind`
+    /// ([`VapEvaluatorBuilder::has_param_kind`]). `variables` is declared only
+    /// with `spec.variables`, which kube-cel does not model, so an expression
+    /// naming it does not compile. Each compiled expression keeps whether
+    /// `params` was declared, for [`evaluate_compiled`](Self::evaluate_compiled).
     #[must_use]
     pub fn compile_expressions(
         &self,
         expressions: &[VapExpression],
     ) -> Vec<Result<CompiledVapExpression, VapError>> {
+        let params = self.param_kind;
+        // The apiserver declares `authorizer` for a validation, not for its
+        // messageExpression.
+        let scope = Scope::Vap {
+            params,
+            authorizer: true,
+        };
+        let message_scope = Scope::Vap {
+            params,
+            authorizer: false,
+        };
         expressions
             .iter()
             .map(|expr| {
-                let program = crate::validation::compile(&expr.expression).map_err(|source| VapError {
-                    expression: expr.expression.clone(),
-                    source,
-                })?;
+                let program =
+                    crate::validation::compile(&expr.expression, scope).map_err(|source| VapError {
+                        expression: expr.expression.clone(),
+                        source,
+                    })?;
                 // A messageExpression that fails to compile fails closed (the
                 // apiserver rejects such a policy at registration), mirroring the
                 // expression path above rather than silently dropping it.
                 let message_program = match expr.message_expression.as_deref() {
-                    Some(me) => Some(crate::validation::compile(me).map_err(|source| VapError {
-                        expression: me.to_string(),
-                        source,
-                    })?),
+                    Some(me) => {
+                        Some(
+                            crate::validation::compile(me, message_scope).map_err(|source| VapError {
+                                expression: me.to_string(),
+                                source,
+                            })?,
+                        )
+                    }
                     None => None,
                 };
                 Ok(CompiledVapExpression {
@@ -311,6 +426,7 @@ impl VapEvaluator {
                     expression: expr.expression.clone(),
                     message: expr.message.clone(),
                     message_program,
+                    params_declared: params,
                 })
             })
             .collect()
@@ -321,9 +437,16 @@ impl VapEvaluator {
     /// The context is built once and all compiled expressions are executed
     /// against it. Expressions that failed compilation (represented as
     /// `Err`) are returned as failed [`VapResult`]s.
+    ///
+    /// The compiled expressions carry the policy's declarations, this
+    /// evaluator the request's values: when they were compiled with `params`
+    /// declared (a policy with a `paramKind`) and this evaluator has no
+    /// parameter object, `params` is `null`, whatever this evaluator's own
+    /// [`has_param_kind`](VapEvaluatorBuilder::has_param_kind).
     #[must_use]
     pub fn evaluate_compiled(&self, compiled: &[Result<CompiledVapExpression, VapError>]) -> Vec<VapResult> {
-        let ctx = self.build_context();
+        let params_declared = compiled.iter().flatten().any(|c| c.params_declared);
+        let ctx = self.build_context(params_declared);
 
         compiled
             .iter()
@@ -626,6 +749,95 @@ mod tests {
             message_expression: None,
         }]);
         assert!(results[0].passed);
+    }
+
+    fn expr(expression: &str) -> VapExpression {
+        VapExpression {
+            expression: expression.into(),
+            message: None,
+            message_expression: None,
+        }
+    }
+
+    /// The policy declares `params` (`has_param_kind`); the request supplies
+    /// its value, `null` when there is none.
+    #[test]
+    fn param_kind_declares_params_and_binds_null_without_an_object() {
+        let declared = VapEvaluator::builder().has_param_kind(true).build();
+        assert!(declared.evaluate(&[expr("params == null")])[0].passed);
+
+        // Unset, it follows `params`.
+        assert!(
+            VapEvaluator::builder()
+                .build()
+                .compile_expressions(&[expr("params == null")])[0]
+                .is_err()
+        );
+        let inferred = VapEvaluator::builder().params(json!({"x": 1})).build();
+        assert!(inferred.evaluate(&[expr("params.x == 1")])[0].passed);
+        let null = VapEvaluator::builder().params(serde_json::Value::Null).build();
+        assert!(null.evaluate(&[expr("params == null")])[0].passed);
+    }
+
+    /// An explicit `false` wins over `params`, in either order: `params` is
+    /// not declared and the parameter object is not bound.
+    #[test]
+    fn explicit_no_param_kind_wins_over_params() {
+        for evaluator in [
+            VapEvaluator::builder()
+                .has_param_kind(false)
+                .params(json!({"x": 1}))
+                .build(),
+            VapEvaluator::builder()
+                .params(json!({"x": 1}))
+                .has_param_kind(false)
+                .build(),
+        ] {
+            assert!(evaluator.compile_expressions(&[expr("true || params.x == 1")])[0].is_err());
+            assert!(evaluator.evaluate(&[expr("object == null")])[0].passed);
+        }
+    }
+
+    /// Compiled with a paramKind, evaluated on an evaluator with no
+    /// parameter object: `params` is null, as the compiled policy declared it.
+    #[test]
+    fn compiled_declaration_binds_params_on_any_evaluator() {
+        let exprs = [expr("params == null || params.x == 1")];
+        let compiled = VapEvaluator::builder()
+            .has_param_kind(true)
+            .build()
+            .compile_expressions(&exprs);
+        for evaluator in [
+            VapEvaluator::builder().build(),
+            VapEvaluator::builder().has_param_kind(false).build(),
+            VapEvaluator::builder().params(json!({"x": 1})).build(),
+        ] {
+            assert!(evaluator.evaluate_compiled(&compiled)[0].passed);
+        }
+        let other = VapEvaluator::builder().params(json!({"x": 2})).build();
+        assert!(!other.evaluate_compiled(&compiled)[0].passed);
+    }
+
+    /// `namespaceObject` is declared for every policy and null when not set.
+    #[test]
+    fn namespace_object_defaults_to_null() {
+        let evaluator = VapEvaluator::builder().object(json!({})).build();
+        assert!(evaluator.evaluate(&[expr("namespaceObject == null")])[0].passed);
+        let namespaced = VapEvaluator::builder()
+            .namespace_object(json!({"metadata": {"name": "ns"}}))
+            .build();
+        assert!(namespaced.evaluate(&[expr("namespaceObject.metadata.name == 'ns'")])[0].passed);
+    }
+
+    /// `variables` comes with `spec.variables`, which kube-cel does not model.
+    #[test]
+    fn variables_do_not_compile() {
+        let compiled = VapEvaluator::builder().build().compile_expressions(&[
+            expr("true || variables.foo == 1"),
+            expr("[1].all(variables, variables > 0)"),
+        ]);
+        assert!(compiled[0].is_err());
+        assert!(compiled[1].is_ok());
     }
 
     #[test]

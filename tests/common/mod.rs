@@ -1750,6 +1750,12 @@ pub fn cases() -> Vec<ParityCase> {
             expect: Expect::RegistrationRejectedFailOpen,
             note: "non-string messageExpression → rejected at registration; kube-cel accepts",
         },
+        // ── Undeclared identifiers ───────────────────────────────────────
+        // The apiserver rejects an identifier not declared where it appears,
+        // even in a branch evaluation never reaches; kube-cel's compile-time
+        // walk refuses it too (before 0.9 these passed client-side). The
+        // `Pident*` Accept rows guard against false rejection: a macro's
+        // variables in scope, type names, function namespaces.
         ParityCase {
             kind: "PundeclaredIdent",
             plural: "pundeclaredidents",
@@ -1759,8 +1765,8 @@ pub fn cases() -> Vec<ParityCase> {
                 "x-kubernetes-validations": [{ "rule": "true || undeclared == 1", "message": "ident" }]
             }),
             object: json!({}),
-            expect: Expect::RegistrationRejectedFailOpen,
-            note: "undeclared identifier in an unevaluated branch → rejected at registration; kube-cel accepts",
+            expect: Expect::RegistrationRejected,
+            note: "undeclared identifier in an unevaluated branch → rejected at registration",
         },
         ParityCase {
             kind: "PauthzVarShort",
@@ -1774,8 +1780,237 @@ pub fn cases() -> Vec<ParityCase> {
                 }]
             }),
             object: json!({}),
-            expect: Expect::RegistrationRejectedFailOpen,
-            note: "`authorizer` is a policy variable, undeclared in a CRD rule → rejected at registration; kube-cel accepts",
+            expect: Expect::RegistrationRejected,
+            note: "`authorizer` is a policy variable, undeclared in a CRD rule → rejected at registration",
+        },
+        ParityCase {
+            kind: "PidentObject",
+            plural: "pidentobjects",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "true || object.x == 1", "message": "object" }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "`object` is a policy variable, undeclared in a CRD rule → rejected at registration",
+        },
+        ParityCase {
+            kind: "PidentTypo",
+            plural: "pidenttypos",
+            schema: json!({
+                "type": "object",
+                "properties": { "replicas": { "type": "integer" } },
+                "x-kubernetes-validations": [{ "rule": "self.replicas > 0 || slef.x == 1", "message": "typo" }]
+            }),
+            object: json!({ "replicas": 1 }),
+            expect: Expect::RegistrationRejected,
+            note: "a typo behind a branch that holds → rejected at registration",
+        },
+        ParityCase {
+            kind: "PidentMsgTypo",
+            plural: "pidentmsgtypos",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "replicas": { "type": "integer" },
+                    "name": { "type": "string", "maxLength": 8 }
+                },
+                "x-kubernetes-validations": [{
+                    "rule": "self.replicas > 0",
+                    "messageExpression": "'name: ' + slef.name"
+                }]
+            }),
+            object: json!({ "replicas": 1 }),
+            expect: Expect::RegistrationRejected,
+            note: "a typo in the messageExpression of a rule that holds → rejected at registration",
+        },
+        ParityCase {
+            kind: "PidentMacroVar",
+            plural: "pidentmacrovars",
+            schema: json!({
+                "type": "object",
+                "properties": { "l": { "type": "array", "maxItems": 4, "items": { "type": "string", "maxLength": 8 } } },
+                "x-kubernetes-validations": [{ "rule": "self.l.all(x, x != '') && (true || x == '')", "message": "scope" }]
+            }),
+            object: json!({ "l": ["a"] }),
+            expect: Expect::RegistrationRejected,
+            note: "a macro's variable outside the macro → rejected at registration",
+        },
+        ParityCase {
+            kind: "PidentSortByVar",
+            plural: "pidentsortbyvars",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "[2, 1].sortBy(x, x)[0] == 1 || x == 1", "message": "scope" }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "sortBy's variable outside the macro → rejected at registration",
+        },
+        ParityCase {
+            kind: "PidentDyn",
+            plural: "pidentdyns",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "true || [dyn].size() == 1", "message": "dyn" }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "`dyn` is a function, not a type name → rejected at registration",
+        },
+        ParityCase {
+            kind: "PidentDuration",
+            plural: "pidentdurations",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "true || [duration].size() == 1", "message": "duration" }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "`duration` as a type value: the planner refuses it → rejected at registration",
+        },
+        ParityCase {
+            kind: "PidentStruct",
+            plural: "pidentstructs",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "true || Foo{a: 1} == 1", "message": "struct" }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "constructing an undeclared message type → rejected at registration",
+        },
+        ParityCase {
+            kind: "PidentMacroScopes",
+            plural: "pidentmacroscopes",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "l": { "type": "array", "maxItems": 4, "items": { "type": "string", "maxLength": 8 } },
+                    "m": { "type": "object", "maxProperties": 4, "additionalProperties": { "type": "string", "maxLength": 8 } },
+                    "n": { "type": "integer" }
+                },
+                "x-kubernetes-validations": [
+                    { "rule": "self.l.all(x, self.l.exists(y, x == y))" },
+                    { "rule": "self.l.exists(i, v, i >= 0 && v != '')" },
+                    { "rule": "self.m.transformMap(k, v, v + k).size() >= 0" },
+                    { "rule": "self.l.map(x, x).filter(y, y != '').size() >= 0" },
+                    { "rule": "[1].all(self, self > 0) && [1].all(int, int > 0)" },
+                    { "rule": "[3, 1, 2].sortBy(x, -x) == [3, 2, 1]" },
+                    { "rule": "self.?n.optMap(v, v + 1).orValue(1) > 0" },
+                    { "rule": "true || self.l.all(x, .x != '')" }
+                ]
+            }),
+            object: json!({ "l": ["a", "b"], "m": { "a": "b" }, "n": 1 }),
+            expect: Expect::Accept,
+            note: "macro variables in scope, nested, shadowing `self` and `int`, and as `.x` → accepted",
+        },
+        ParityCase {
+            kind: "PidentMsgScope",
+            plural: "pidentmsgscopes",
+            schema: json!({
+                "type": "object",
+                "properties": { "l": { "type": "array", "maxItems": 4, "items": { "type": "string", "maxLength": 8 } } },
+                "x-kubernetes-validations": [
+                    { "rule": "true", "messageExpression": "self.l.exists(x, x == 'a') ? 'has a' : 'no a'" },
+                    { "rule": "true", "messageExpression": "self.l.all(i, v, v != '') ? 'ok' : 'empty'" },
+                    { "rule": "true", "messageExpression": "self.?l.optMap(l, l.size() > 0).orValue(false) ? 'a' : 'b'" }
+                ]
+            }),
+            object: json!({ "l": ["a"] }),
+            expect: Expect::Accept,
+            note: "macro variables in scope in a messageExpression → accepted",
+        },
+        ParityCase {
+            kind: "PidentTypes",
+            plural: "pidenttypes",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [
+                    { "rule": "type(1) == int && type('a') == string && type(true) == bool && type(1u) == uint && type(1.0) == double" },
+                    { "rule": "type(b'a') == bytes && type([1]) == list && type({1: 1}) == map && type(null) == null_type && type(int) == type" },
+                    { "rule": "type(optional.of(1)) == optional_type && type(duration('1s')) == google.protobuf.Duration && type(timestamp('2024-01-01T00:00:00Z')) == google.protobuf.Timestamp" },
+                    { "rule": "true || [net.IP].size() == 1 && [net.CIDR].size() == 1 && [google.protobuf.Empty].size() == 1 && [.int].size() == 1 && google.protobuf.NullValue.NULL_VALUE == 0" },
+                    { "rule": "true || google.protobuf.Duration{seconds: 1} == duration('1s')" }
+                ]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "type names as values, and a declared message type → accepted",
+        },
+        ParityCase {
+            kind: "PidentQualifiedFns",
+            plural: "pidentqualifiedfns",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "!format.dns1123Label().validate('abc').hasValue() && optional.of(1).hasValue() && lists.range(3).size() == 3 && strings.quote('a') == '\"a\"' && sets.contains([1], [1]) && ip.isCanonical('1.2.3.4') && .optional.none().orValue(1) == 1"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "namespaced functions (format., optional., lists., strings., sets., ip.) are no identifiers → accepted",
+        },
+        ParityCase {
+            kind: "PidentNestedTypes",
+            plural: "pidentnestedtypes",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [
+                    { "rule": "true || [google.protobuf.Struct.FieldsEntry].size() == 1" },
+                    { "rule": "true || [google.protobuf.Struct.FieldsEntry{}].size() == 1 && [duration{}].size() == 1 && [timestamp{}].size() == 1 && [null_type{}].size() == 1" }
+                ]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "Struct's entry type as a value and a message, and the duration/timestamp/null_type constructors → accepted",
+        },
+        ParityCase {
+            kind: "PidentBinderEdges",
+            plural: "pidentbinderedges",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [
+                    { "rule": "[1].all(.x, true) && (true || [1].all(x, .x > 0))" },
+                    { "rule": "optional.of(1).optMap(__result__, __result__ + 1).value() == 2" }
+                ]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "a variable bound as `.x` but unread, `.x` naming `x`, and optMap binding `__result__` → accepted",
+        },
+        ParityCase {
+            kind: "PidentDottedBinder",
+            plural: "pidentdottedbinders",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "true || [1].all(.x, x > 0)", "message": "binder" }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "a variable bound as `.x` does not declare `x` → rejected at registration",
+        },
+        ParityCase {
+            kind: "PidentLegacyAccu",
+            plural: "pidentlegacyaccus",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "[1].all(__result__, true)", "message": "accumulator" }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "`__result__` as a standard macro's variable overwrites the accumulator → rejected at registration",
         },
         // No cost model in `cel` (cel-rust discussion #230): the other
         // documented fail-open class. The apiserver estimates each rule's cost
@@ -1955,6 +2190,187 @@ pub fn cases() -> Vec<ParityCase> {
             object: json!({}),
             expect: Expect::Accept,
             note: "a rule naming oldSelf is a transition rule, skipped on create → ACCEPT",
+        },
+    ]
+}
+
+/// One policy-registration case: a ValidatingAdmissionPolicy validation the
+/// apiserver either registers or rejects, and kube-cel's `VapEvaluator` must
+/// compile or refuse alike. The runner wraps it in a policy with no
+/// `spec.variables` (kube-cel does not model them) and, with `param_kind`, a
+/// `paramKind`, which kube-cel gets as `.has_param_kind(true)`.
+pub struct VapCase {
+    /// The policy name; unique across the table.
+    pub name: &'static str,
+    pub expression: &'static str,
+    pub message_expression: Option<&'static str>,
+    pub param_kind: bool,
+    pub registers: bool,
+    pub note: &'static str,
+}
+
+/// Policy-registration cases: the variables a policy expression declares, a
+/// macro's variables, type names.
+pub fn vap_cases() -> Vec<VapCase> {
+    let case = |name, expression, message_expression, registers, note| VapCase {
+        name,
+        expression,
+        message_expression,
+        param_kind: true,
+        registers,
+        note,
+    };
+    vec![
+        case(
+            "vap-variables",
+            "object.metadata.name != '' || oldObject == null || request.name == '' || params == null || namespaceObject == null",
+            None,
+            true,
+            "the policy variables → registered",
+        ),
+        case(
+            "vap-authorizer",
+            "true || authorizer.group('').resource('pods').check('get').allowed() || authorizer.requestResource.check('get').allowed()",
+            None,
+            true,
+            "`authorizer` and `authorizer.requestResource` → registered",
+        ),
+        case(
+            "vap-composition",
+            "true || variables.foo == 1",
+            None,
+            false,
+            "`variables` in a policy without spec.variables → rejected",
+        ),
+        case(
+            "vap-composition-root",
+            "true || variables == null",
+            None,
+            false,
+            "the `variables` root without spec.variables → rejected",
+        ),
+        case(
+            "vap-request",
+            "true || request.kind.group == '' && request.userInfo.username == ''",
+            None,
+            true,
+            "fields of `request` → registered",
+        ),
+        case(
+            "vap-macro-scope",
+            "true || [object].all(o, o != null) && [1].all(object, object > 0)",
+            None,
+            true,
+            "a macro variable, one shadowing `object` → registered",
+        ),
+        case(
+            "vap-types",
+            "type(1) == int && (true || [net.IP].size() == 1 && [kubernetes.AdmissionRequest{}].size() == 1)",
+            None,
+            true,
+            "type names, and a message type a policy declares → registered",
+        ),
+        case(
+            "vap-message",
+            "true",
+            Some(
+                "object.metadata.name + ' ' + string(params == null) + ' ' + string(namespaceObject == null)",
+            ),
+            true,
+            "a messageExpression reading policy variables → registered",
+        ),
+        case(
+            "vap-self",
+            "true || self.x == 1",
+            None,
+            false,
+            "`self` is a CRD variable, undeclared in a policy → rejected",
+        ),
+        case(
+            "vap-oldself",
+            "true || oldSelf.x == 1",
+            None,
+            false,
+            "`oldSelf` is a CRD variable, undeclared in a policy → rejected",
+        ),
+        case(
+            "vap-typo",
+            "true || slef.x == 1",
+            None,
+            false,
+            "a typo in an unevaluated branch → rejected",
+        ),
+        case(
+            "vap-macro-var",
+            "[1].all(x, x > 0) && (true || x == 1)",
+            None,
+            false,
+            "a macro's variable outside the macro → rejected",
+        ),
+        case(
+            "vap-struct",
+            "true || [kubernetes.Quantity{}].size() == 1",
+            None,
+            false,
+            "constructing a type the policy does not declare → rejected",
+        ),
+        case(
+            "vap-message-typo",
+            "true",
+            Some("'bad: ' + string(slef)"),
+            false,
+            "a typo in the messageExpression → rejected",
+        ),
+        case(
+            "vap-params",
+            "true || params.data.max == '1'",
+            None,
+            true,
+            "`params` in a policy with a paramKind → registered",
+        ),
+        VapCase {
+            name: "vap-params-no-paramkind",
+            expression: "true || params.data.max == '1'",
+            message_expression: None,
+            param_kind: false,
+            registers: false,
+            note: "`params` in a policy without a paramKind → rejected",
+        },
+        case(
+            "vap-message-authorizer",
+            "true",
+            Some("true ? 'ok' : (authorizer.requestResource.check('get').allowed() ? 'yes' : 'no')"),
+            false,
+            "`authorizer` in a messageExpression, which has none → rejected",
+        ),
+        case(
+            "vap-message-authorizer-macro",
+            "true",
+            Some("[1].all(authorizer, authorizer > 0) ? 'yes' : 'no'"),
+            true,
+            "a macro binding `authorizer` in a messageExpression → registered",
+        ),
+        case(
+            "vap-legacy-accu",
+            "[1].all(__result__, true)",
+            None,
+            false,
+            "`__result__` as a standard macro's variable → rejected",
+        ),
+        case(
+            "vap-nested-types",
+            "true || [google.protobuf.Struct.FieldsEntry{}].size() == 1 && [duration{}].size() == 1",
+            None,
+            true,
+            "Struct's entry type and the duration constructor → registered",
+        ),
+        VapCase {
+            name: "vap-no-paramkind",
+            expression: "object.metadata.name != '' || [1].all(params, params > 0)",
+            message_expression: None,
+            param_kind: false,
+            registers: true,
+            note: "no `params` read in a policy without a paramKind, a macro's `params` → registered",
         },
     ]
 }

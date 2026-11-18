@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use cel::Program;
 
-use crate::validation::values::SchemaFormat;
+use crate::validation::{Scope, values::SchemaFormat};
 
 /// A single CRD `x-kubernetes-validations` rule.
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -140,10 +140,11 @@ impl std::error::Error for CompilationError {
 /// Returns [`CompilationError::Parse`] if the rule expression is invalid, or
 /// [`CompilationError::MessageExpressionParse`] if its `messageExpression` is.
 pub(crate) fn compile_rule(rule: &Rule) -> Result<CompilationResult, CompilationError> {
-    let program = crate::validation::compile(&rule.rule).map_err(|source| CompilationError::Parse {
-        rule: rule.rule.clone(),
-        source,
-    })?;
+    let program =
+        crate::validation::compile(&rule.rule, Scope::Crd).map_err(|source| CompilationError::Parse {
+            rule: rule.rule.clone(),
+            source,
+        })?;
     // Any `oldSelf` identifier, as the apiserver counts it (`UsesOldSelf`).
     let is_transition_rule = crate::validation::references::references_ident(program.expression(), "oldSelf");
 
@@ -152,7 +153,7 @@ pub(crate) fn compile_rule(rule: &Rule) -> Result<CompilationResult, Compilation
     // than silently dropping the dynamic message.
     // An empty one is unset: the apiserver compiles it only when non-empty.
     let message_program = match rule.message_expression.as_deref().filter(|e| !e.is_empty()) {
-        Some(expr) => Some(crate::validation::compile(expr).map_err(|source| {
+        Some(expr) => Some(crate::validation::compile(expr, Scope::Crd).map_err(|source| {
             CompilationError::MessageExpressionParse {
                 rule: rule.rule.clone(),
                 message_expression: expr.to_string(),
