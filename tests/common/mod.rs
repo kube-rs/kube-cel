@@ -1902,13 +1902,12 @@ pub fn cases() -> Vec<ParityCase> {
                     { "rule": "self.l.map(x, x).filter(y, y != '').size() >= 0" },
                     { "rule": "[1].all(self, self > 0) && [1].all(int, int > 0)" },
                     { "rule": "[3, 1, 2].sortBy(x, -x) == [3, 2, 1]" },
-                    { "rule": "self.?n.optMap(v, v + 1).orValue(1) > 0" },
-                    { "rule": "true || self.l.all(x, .x != '')" }
+                    { "rule": "self.?n.optMap(v, v + 1).orValue(1) > 0" }
                 ]
             }),
             object: json!({ "l": ["a", "b"], "m": { "a": "b" }, "n": 1 }),
             expect: Expect::Accept,
-            note: "macro variables in scope, nested, shadowing `self` and `int`, and as `.x` → accepted",
+            note: "macro variables in scope, nested, shadowing `self` and `int` → accepted",
         },
         ParityCase {
             kind: "PidentMsgScope",
@@ -2030,13 +2029,13 @@ pub fn cases() -> Vec<ParityCase> {
                 "type": "object",
                 "properties": {},
                 "x-kubernetes-validations": [
-                    { "rule": "[1].all(.x, true) && (true || [1].all(x, .x > 0))" },
+                    { "rule": "[1].all(.x, true)" },
                     { "rule": "optional.of(1).optMap(__result__, __result__ + 1).value() == 2" }
                 ]
             }),
             object: json!({}),
             expect: Expect::Accept,
-            note: "a variable bound as `.x` but unread, `.x` naming `x`, and optMap binding `__result__` → accepted",
+            note: "a variable bound as `.x` but unread, and optMap binding `__result__` → accepted",
         },
         ParityCase {
             kind: "PidentDottedBinder",
@@ -2076,6 +2075,86 @@ pub fn cases() -> Vec<ParityCase> {
             object: json!({"l": ["a", "b"]}),
             expect: Expect::RegistrationRejectedFailOpen,
             note: "a list with no maxItems iterated twice exceeds the estimated cost budget → rejected at registration; kube-cel accepts",
+        },
+        // ── Rules under schema combinators ───────────────────────────────
+        // The apiserver refuses `x-kubernetes-validations` anywhere under
+        // `allOf`/`anyOf`/`oneOf`/`not` ("must be empty to be structural");
+        // kube-cel used to evaluate those under the first three and ignore
+        // those under `not`.
+        ParityCase {
+            kind: "PcombAllOf",
+            plural: "pcomballofs",
+            schema: json!({
+                "type": "object",
+                "properties": { "a": { "type": "integer" } },
+                "allOf": [{ "x-kubernetes-validations": [{ "rule": "self.a > 0", "message": "a" }] }]
+            }),
+            object: json!({ "a": 1 }),
+            expect: Expect::RegistrationRejected,
+            note: "a rule under allOf (the object satisfies it) → rejected at registration as not structural",
+        },
+        ParityCase {
+            kind: "PcombAnyOf",
+            plural: "pcombanyofs",
+            schema: json!({
+                "type": "object",
+                "properties": { "a": { "type": "integer" } },
+                "anyOf": [{ "x-kubernetes-validations": [{ "rule": "self.a > 0", "message": "a" }] }]
+            }),
+            object: json!({ "a": 1 }),
+            expect: Expect::RegistrationRejected,
+            note: "a rule under anyOf (the object satisfies it) → rejected at registration as not structural",
+        },
+        ParityCase {
+            kind: "PcombOneOf",
+            plural: "pcomboneofs",
+            schema: json!({
+                "type": "object",
+                "properties": { "a": { "type": "integer" } },
+                "oneOf": [{ "x-kubernetes-validations": [{ "rule": "self.a > 0", "message": "a" }] }]
+            }),
+            object: json!({ "a": 1 }),
+            expect: Expect::RegistrationRejected,
+            note: "a rule under oneOf (the object satisfies it) → rejected at registration as not structural",
+        },
+        ParityCase {
+            kind: "PcombNot",
+            plural: "pcombnots",
+            schema: json!({
+                "type": "object",
+                "properties": { "a": { "type": "integer" } },
+                "not": { "x-kubernetes-validations": [{ "rule": "self.a > 0", "message": "a" }] }
+            }),
+            object: json!({ "a": 1 }),
+            expect: Expect::RegistrationRejected,
+            note: "a rule under not (the object satisfies it) → rejected at registration as not structural",
+        },
+        ParityCase {
+            kind: "PcombNested",
+            plural: "pcombnesteds",
+            schema: json!({
+                "type": "object",
+                "properties": { "a": { "type": "integer" } },
+                "allOf": [{ "properties": { "a": { "x-kubernetes-validations": [{ "rule": "self > 0", "message": "a" }] } } }]
+            }),
+            object: json!({ "a": 1 }),
+            expect: Expect::RegistrationRejected,
+            note: "a rule on a property inside allOf (the object satisfies it) → rejected at registration as not structural",
+        },
+        ParityCase {
+            kind: "PcombNoRules",
+            plural: "pcombnorules",
+            schema: json!({
+                "type": "object",
+                "properties": { "a": { "type": "integer" } },
+                "anyOf": [{ "required": ["a"] }],
+                "allOf": [{ "x-kubernetes-validations": [] }],
+                "not": { "properties": { "a": { "maximum": 0 } } },
+                "x-kubernetes-validations": [{ "rule": "self.a > 0", "message": "a" }]
+            }),
+            object: json!({ "a": 1 }),
+            expect: Expect::Accept,
+            note: "combinators without rules (or with an empty list) beside a root rule → accepted",
         },
         // ── Schema nodes the object does not reach (kube-rs/kube-cel#14) ─────
         // The apiserver compiles every rule, and checks the nesting depth, when

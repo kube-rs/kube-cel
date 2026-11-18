@@ -363,6 +363,14 @@ fn compilation_error(err: &CompilationError, path: &str) -> ValidationError {
             source: None,
         },
         CompilationError::SchemaTooDeep { .. } => schema_too_deep_error(path),
+        CompilationError::RuleInCombinator { rule, .. } => ValidationError {
+            rule: rule.clone(),
+            message: err.to_string(),
+            field_path: path.to_string(),
+            reason: None,
+            kind: ErrorKind::CompilationFailure,
+            source: None,
+        },
     }
 }
 
@@ -386,6 +394,12 @@ fn schema_child_path(path: &str, child: ChildSchema<'_>) -> String {
 fn registration_errors(schema: &serde_json::Value) -> Vec<ValidationError> {
     let mut errors = Vec::new();
     registration_errors_from(schema, String::new(), None, &mut errors);
+    // Reported at the root, where `compile_schema` keeps them too.
+    errors.extend(
+        crate::validation::compilation::combinator_rule_errors(schema)
+            .iter()
+            .map(|e| compilation_error(e, "")),
+    );
     errors
 }
 
@@ -2142,87 +2156,94 @@ mod tests {
         assert_eq!(errors[0].kind, ErrorKind::EvaluationError);
     }
 
-    // ── allOf/oneOf/anyOf tests ──────────────────────────────────────
+    // ── allOf/oneOf/anyOf/not tests ──────────────────────────────────
 
+    /// The apiserver refuses `x-kubernetes-validations` anywhere under a
+    /// combinator ("must be empty to be structural", checked on v1.36.1), so
+    /// every entry point rejects the object with one root error per node,
+    /// however the object fares against the rules.
     #[test]
-    fn all_of_validations_evaluated() {
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "x": {"type": "integer"},
-                "y": {"type": "integer"}
-            },
-            "allOf": [
-                {
-                    "x-kubernetes-validations": [
-                        {"rule": "self.x >= 0", "message": "x must be non-negative"}
-                    ]
-                },
-                {
-                    "x-kubernetes-validations": [
-                        {"rule": "self.y >= 0", "message": "y must be non-negative"}
-                    ]
+    fn rules_under_combinators_are_refused() {
+        let rule = |r: &str| json!([{"rule": r}]);
+        let a = json!({"a": {"type": "integer"}});
+        for (schema, location) in [
+            (
+                json!({"type": "object", "properties": a, "allOf": [{"x-kubernetes-validations": rule("self.a > 0")}]}),
+                "allOf[0]",
+            ),
+            (
+                json!({"type": "object", "properties": a, "anyOf": [{}, {"x-kubernetes-validations": rule("self.a > 0")}]}),
+                "anyOf[1]",
+            ),
+            (
+                json!({"type": "object", "properties": a, "oneOf": [{"x-kubernetes-validations": rule("self.a > 0")}]}),
+                "oneOf[0]",
+            ),
+            (
+                json!({"type": "object", "properties": a, "not": {"x-kubernetes-validations": rule("self.a > 0")}}),
+                "not",
+            ),
+            (
+                json!({"type": "object", "properties": a, "not": {"allOf": [{"x-kubernetes-validations": rule("self.a > 0")}]}}),
+                "not.allOf[0]",
+            ),
+            (
+                json!({"type": "object", "properties": a, "allOf": [{"properties": {"a": {"x-kubernetes-validations": rule("self > 0")}}}]}),
+                "allOf[0].properties[a]",
+            ),
+            (
+                json!({"type": "object", "properties": {"s": {"type": "object", "properties": a, "allOf": [{"x-kubernetes-validations": rule("self.a > 0")}]}}}),
+                "properties[s].allOf[0]",
+            ),
+            (
+                json!({"type": "object", "properties": {"l": {"type": "array", "items": {"type": "integer"}, "allOf": [{"items": {"x-kubernetes-validations": rule("self > 0")}}]}}}),
+                "properties[l].allOf[0].items",
+            ),
+        ] {
+            for object in [
+                json!({"a": 1, "s": {"a": 1}, "l": [1]}),
+                json!({"a": 0, "s": {"a": 0}, "l": [0]}),
+            ] {
+                let compiled = compile_schema(&schema);
+                for errors in [
+                    validate(&schema, &object, None).unwrap_err(),
+                    validate_compiled(&compiled, &object, None).unwrap_err(),
+                ] {
+                    assert_eq!(errors.len(), 1, "{location}: {errors:?}");
+                    assert_eq!(errors[0].kind, ErrorKind::CompilationFailure, "{location}");
+                    assert_eq!(errors[0].field_path, "", "{location}");
+                    assert!(
+                        errors[0]
+                            .message
+                            .starts_with(&format!("{location}.x-kubernetes-validations must be empty")),
+                        "{location}: {}",
+                        errors[0].message
+                    );
                 }
-            ]
-        });
-        let obj = json!({"x": -1, "y": -1});
-        let errors = validate(&schema, &obj, None).unwrap_err();
-        assert_eq!(errors.len(), 2);
+                assert!(
+                    compiled
+                        .compilation_errors()
+                        .iter()
+                        .any(|e| matches!(e, CompilationError::RuleInCombinator { .. }))
+                );
+            }
+        }
     }
 
+    /// Combinators without rules, or with an empty rule list, are fine.
     #[test]
-    fn one_of_validations_evaluated() {
+    fn combinators_without_rules_are_accepted() {
         let schema = json!({
             "type": "object",
-            "properties": {"x": {"type": "integer"}},
-            "oneOf": [{
-                "x-kubernetes-validations": [
-                    {"rule": "self.x != 0", "message": "x must not be zero"}
-                ]
-            }]
+            "properties": {"a": {"type": "integer"}},
+            "anyOf": [{"required": ["a"]}],
+            "allOf": [{"x-kubernetes-validations": []}],
+            "not": {"properties": {"a": {"maximum": 0}}},
+            "x-kubernetes-validations": [{"rule": "self.a > 0"}]
         });
-        let obj = json!({"x": 0});
-        let errors = validate(&schema, &obj, None).unwrap_err();
-        assert_eq!(errors.len(), 1);
-    }
-
-    #[test]
-    fn nested_all_of_properties_walked() {
-        let schema = json!({
-            "type": "object",
-            "allOf": [{
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "x-kubernetes-validations": [
-                            {"rule": "self.size() > 0", "message": "name required"}
-                        ]
-                    }
-                }
-            }]
-        });
-        let obj = json!({"name": ""});
-        let errors = validate(&schema, &obj, None).unwrap_err();
-        assert_eq!(errors.len(), 1);
-    }
-
-    #[test]
-    fn all_of_compiled_matches_schema() {
-        let schema = json!({
-            "type": "object",
-            "properties": {"x": {"type": "integer"}},
-            "allOf": [{
-                "x-kubernetes-validations": [
-                    {"rule": "self.x >= 0", "message": "x must be non-negative"}
-                ]
-            }]
-        });
-        let obj = json!({"x": -1});
-        let errors_schema = validate(&schema, &obj, None).unwrap_err();
-        let compiled = compile_schema(&schema);
-        let errors_compiled = validate_compiled(&compiled, &obj, None).unwrap_err();
-        assert_eq!(errors_schema.len(), errors_compiled.len());
-        assert_eq!(errors_schema[0].message, errors_compiled[0].message);
+        let object = json!({"a": 1});
+        assert!(validate(&schema, &object, None).is_ok());
+        assert!(validate_compiled(&compile_schema(&schema), &object, None).is_ok());
     }
 
     // ── x-kubernetes-preserve-unknown-fields tests ──────────────────

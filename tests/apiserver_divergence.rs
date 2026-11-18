@@ -233,6 +233,31 @@ fn undeclared_identifiers_fail_closed() {
     );
 }
 
+/// `.x` naming a macro's variable `x`: cel-go resolves it to the macro's
+/// variable, `cel` looks it up outside the macros, where it may be another
+/// value altogether: `[dyn(1)].all(namespaceObject, .namespaceObject == null)`
+/// is false on v1.36.1 (the macro's `1`), while kube-cel's policy
+/// `namespaceObject` is null. kube-cel refuses such a reference at compile
+/// time, so a rule the apiserver registers and evaluates is rejected.
+#[test]
+fn dotted_macro_variable_fails_closed() {
+    assert_rule_refused("self.items.all(x, .x > 0)");
+    assert_rule_refused("true || [1].all(self, .self > 0)");
+    assert_policy_refused("[dyn(1)].all(namespaceObject, .namespaceObject == null)");
+    let compiled = VapEvaluator::builder()
+        .has_param_kind(true)
+        .build()
+        .compile_expressions(&[VapExpression {
+            expression: "[dyn(1)].all(params, .params == null)".into(),
+            message: None,
+            message_expression: None,
+        }]);
+    assert!(
+        compiled[0].is_err(),
+        "`.params` naming a macro's variable must not compile"
+    );
+}
+
 /// `variables` is declared for a policy with `spec.variables` only
 /// (`undeclared reference to 'variables'` without, checked on v1.36.1).
 /// kube-cel does not model `spec.variables`, so it refuses every expression
@@ -246,11 +271,9 @@ fn policy_variables_fail_closed() {
 
 /// Names the apiserver declares and evaluates but `cel` cannot: type names
 /// with no `cel` value (`net.IP`, `google.protobuf.Empty`), the protobuf
-/// `NullValue` constant, a message construction, and `.x` for a macro's `x`
-/// (cel-go resolves it to the macro's variable; `cel` looks only outside the
-/// comprehension). Each evaluates to true on the apiserver (Go oracle,
-/// v0.36.1). They compile in kube-cel, as the apiserver registers them, and
-/// fail closed when evaluation reaches them.
+/// `NullValue` constant and a message construction. Each evaluates to true on
+/// the apiserver (Go oracle, v0.36.1). They compile in kube-cel, as the
+/// apiserver registers them, and fail closed when evaluation reaches them.
 #[test]
 #[cfg(feature = "ip")]
 fn names_cel_cannot_evaluate_fail_closed() {
@@ -268,7 +291,6 @@ fn names_cel_cannot_evaluate_fail_closed() {
             "google.protobuf.NullValue.NULL_VALUE == 0",
             ErrorKind::UnsupportedReference,
         ),
-        ("self.items.all(x, .x > 0)", ErrorKind::UnsupportedReference),
         (
             "google.protobuf.Duration{seconds: 1} == duration('1s')",
             ErrorKind::EvaluationError,
@@ -280,6 +302,41 @@ fn names_cel_cannot_evaluate_fail_closed() {
             "{rule}: expected fail-closed {want:?}, got {errors:?}"
         );
     }
+}
+
+/// `x-kubernetes-validations` under `allOf`, `anyOf`, `oneOf` or `not`, at any
+/// depth below one: the apiserver refuses the CRD as not structural ("must be
+/// empty to be structural", parity rows `Pcomb*`). kube-cel rejects every
+/// object with a root `CompilationFailure`; before 0.9 it evaluated the rules
+/// under the first three and ignored those under `not`, so an object
+/// satisfying them passed (fail-open).
+#[test]
+fn rules_under_combinators_fail_closed() {
+    for keyword in ["allOf", "anyOf", "oneOf"] {
+        let schema = json!({
+            "type": "object",
+            "properties": { "items": { "type": "array", "items": {"type": "integer"} } },
+            keyword: [{ "x-kubernetes-validations": [{ "rule": "self.items.size() > 0" }] }]
+        });
+        let errors = Validator::new()
+            .validate(&schema, &json!({"items": [3, 1, 2]}), None)
+            .unwrap_err();
+        assert!(
+            errors.iter().all(|e| e.kind == ErrorKind::CompilationFailure),
+            "{keyword}: {errors:?}"
+        );
+    }
+    let schema = json!({
+        "type": "object",
+        "not": { "properties": { "items": { "x-kubernetes-validations": [{ "rule": "true" }] } } }
+    });
+    let errors = Validator::new()
+        .validate_compiled(&compile_schema(&schema), &json!({}), None)
+        .unwrap_err();
+    assert!(
+        errors.iter().all(|e| e.kind == ErrorKind::CompilationFailure),
+        "not: {errors:?}"
+    );
 }
 
 /// The apiserver has no string `reverse()` (its `reverse` is the list one):
@@ -442,6 +499,12 @@ fn no_type_checker_fails_open() {
         assert_fails_open("'%s'.format([1, 2]) == '1'");
         assert_fails_open("true || '%d'.format(['a']) == ''");
     }
+    // Call shape: `cel` has a one-variable `existsOne(x, p)` macro; the
+    // apiserver has only `existsOne(i, v, p)`, so it reads the one-variable
+    // form as a call to an undeclared function ("undeclared reference to
+    // 'existsOne'"). It passes even when evaluated.
+    assert_fails_open("true || [1].existsOne(x, x > 0)");
+    assert_fails_open("[1].existsOne(x, x > 0)");
     // A field the schema does not declare ("undefined field 'undeclared'").
     assert_fails_open("true || self.undeclared == 1");
 

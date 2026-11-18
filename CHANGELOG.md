@@ -270,7 +270,10 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   v1.36.1); they used to pass client-side unless evaluation reached them: a
   **fail-open** divergence, now closed and gone from the README "no type
   checker" row. Field names are not checked (`self.undeclared` on a schema
-  without it still needs a type checker). The declared type names and message types were
+  without it still needs a type checker). `.x` naming a macro's variable `x`
+  is refused too, though the apiserver reads the macro's `x`: `cel` looks a
+  leading-dot name up outside the macros, so it cannot evaluate it alike
+  (README "apiserver divergence", fail-closed). The declared type names and message types were
   measured one by one, as values and as constructions, so a name the
   apiserver accepts (`google.protobuf.Struct.FieldsEntry`, `duration{}`)
   compiles.
@@ -315,6 +318,18 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     the part of `self.apiVersion` before the `/`). `RootContext` and the
     `*_with_context` methods are deprecated (below).
 
+- **CEL rules under `allOf`, `anyOf`, `oneOf` or `not` fail to compile.**
+  The apiserver refuses `x-kubernetes-validations` anywhere under a schema
+  combinator, at any depth (in its `properties`, `items`, nested
+  combinators), as not structural ("must be empty to be structural",
+  checked on v1.36.1). kube-cel evaluated the rules under `allOf` / `anyOf`
+  / `oneOf` as if they were on the node and ignored those under `not`, so an
+  object satisfying them passed: a **fail-open** divergence, now closed.
+  Every entry point rejects the object with one root `CompilationFailure`
+  per node holding rules (`CompilationError::RuleInCombinator`, also listed
+  by `CompiledSchema::compilation_errors()`); an empty rule list is fine.
+  - Migration: move the rules onto the node the combinator sits on.
+
 ### Added
 - `new_env() -> cel::Env`: kube-cel's environment, the apiserver's base CEL
   environment as far as kube-cel models it: the `cel` standard library,
@@ -358,7 +373,11 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
 - Static analysis (`check_rule_scope`, `analyze_rule`) follows the apiserver's
   declarations: `ScopeContext::CrdValidation` takes `self` and `oldSelf`
   only (no `apiVersion`, `apiGroup`, `kind`), and
-  `ScopeContext::AdmissionPolicy` no longer takes `self` and `oldSelf`.
+  `ScopeContext::AdmissionPolicy` no longer takes `self` and `oldSelf`. It
+  resolves names as the compile-time check does, so a type name (`int`,
+  `net.IP`), a function namespace (`optional.of`, `format.dns1123Label()`) or
+  a macro's variable inside the macro is no longer reported as a variable
+  outside its scope, while a macro's variable outside the macro is.
 
 ### Fixed
 - Schema defaults fill in under a parent that was itself just defaulted

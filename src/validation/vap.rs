@@ -394,10 +394,12 @@ impl VapEvaluator {
         let scope = Scope::Vap {
             params,
             authorizer: true,
+            variables: false,
         };
         let message_scope = Scope::Vap {
             params,
             authorizer: false,
+            variables: false,
         };
         expressions
             .iter()

@@ -93,6 +93,17 @@ pub enum CompilationError {
         /// The nesting depth at which the limit was exceeded.
         depth: usize,
     },
+    /// `x-kubernetes-validations` under `allOf`, `anyOf`, `oneOf` or `not`,
+    /// at any depth below one. The apiserver refuses such a CRD as not
+    /// structural ("must be empty to be structural"); kube-cel reports it
+    /// once, at the schema root.
+    RuleInCombinator {
+        /// Where the rules sit, as a schema path from the root:
+        /// `properties[spec].allOf[0]`.
+        location: String,
+        /// The first rule there, as written.
+        rule: String,
+    },
 }
 
 impl std::fmt::Display for CompilationError {
@@ -120,6 +131,11 @@ impl std::fmt::Display for CompilationError {
                     "schema nesting depth {depth} exceeds the maximum of {MAX_SCHEMA_DEPTH}"
                 )
             }
+            CompilationError::RuleInCombinator { location, rule } => write!(
+                f,
+                "{location}.x-kubernetes-validations must be empty to be structural: the apiserver \
+                 refuses CEL rules inside allOf, anyOf, oneOf and not (rule \"{rule}\")"
+            ),
         }
     }
 }
@@ -130,7 +146,7 @@ impl std::error::Error for CompilationError {
             CompilationError::Parse { source, .. } => Some(source.as_ref()),
             CompilationError::MessageExpressionParse { source, .. } => Some(source.as_ref()),
             CompilationError::InvalidRule(err) => Some(err),
-            CompilationError::SchemaTooDeep { .. } => None,
+            CompilationError::SchemaTooDeep { .. } | CompilationError::RuleInCombinator { .. } => None,
         }
     }
 }
@@ -333,7 +349,79 @@ pub(crate) fn child_schemas(schema: &serde_json::Value) -> Vec<(ChildSchema<'_>,
 /// calls, avoiding repeated compilation.
 #[must_use]
 pub fn compile_schema(schema: &serde_json::Value) -> CompiledSchema {
-    compile_schema_inner(schema, 0)
+    let mut compiled = compile_schema_inner(schema, 0);
+    compiled
+        .validations
+        .extend(combinator_rule_errors(schema).into_iter().map(Err));
+    compiled
+}
+
+/// The `x-kubernetes-validations` under `allOf`, `anyOf`, `oneOf` and `not`
+/// anywhere in `schema`, which the apiserver refuses as not structural
+/// (apiextensions `validateValueValidation`: "must be empty to be
+/// structural"), at any depth below a combinator: in its `properties`,
+/// `items`, `additionalProperties` and nested combinators too. An empty list
+/// is fine. One error per schema node, in schema order. Iterative, as the
+/// apiserver has no nesting limit.
+pub(crate) fn combinator_rule_errors(schema: &serde_json::Value) -> Vec<CompilationError> {
+    let mut errors = Vec::new();
+    // (node, its schema path, whether it sits under a combinator)
+    let mut stack = vec![(schema, String::new(), false)];
+    while let Some((node, location, under_combinator)) = stack.pop() {
+        if under_combinator
+            && let Some(rules) = node
+                .get("x-kubernetes-validations")
+                .and_then(|r| r.as_array())
+                .filter(|r| !r.is_empty())
+        {
+            errors.push(CompilationError::RuleInCombinator {
+                location: location.clone(),
+                rule: rules[0]
+                    .get("rule")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or_default()
+                    .to_owned(),
+            });
+        }
+        let at = |step: String| {
+            if location.is_empty() {
+                step
+            } else {
+                format!("{location}.{step}")
+            }
+        };
+        let mut children = Vec::new();
+        if let Some(properties) = node.get("properties").and_then(|p| p.as_object()) {
+            for (name, sub) in properties {
+                children.push((sub, at(format!("properties[{name}]")), under_combinator));
+            }
+        }
+        match node.get("items") {
+            Some(serde_json::Value::Array(items)) => {
+                for (i, sub) in items.iter().enumerate() {
+                    children.push((sub, at(format!("items[{i}]")), under_combinator));
+                }
+            }
+            Some(sub) => children.push((sub, at("items".to_owned()), under_combinator)),
+            None => {}
+        }
+        if let Some(sub) = node.get("additionalProperties").filter(|a| a.is_object()) {
+            children.push((sub, at("additionalProperties".to_owned()), under_combinator));
+        }
+        for keyword in ["allOf", "anyOf", "oneOf"] {
+            if let Some(branches) = node.get(keyword).and_then(|b| b.as_array()) {
+                for (i, sub) in branches.iter().enumerate() {
+                    children.push((sub, at(format!("{keyword}[{i}]")), true));
+                }
+            }
+        }
+        if let Some(sub) = node.get("not") {
+            children.push((sub, at("not".to_owned()), true));
+        }
+        // Reversed, so the stack pops them in schema order.
+        stack.extend(children.into_iter().rev());
+    }
+    errors
 }
 
 fn compile_schema_inner(schema: &serde_json::Value, depth: usize) -> CompiledSchema {

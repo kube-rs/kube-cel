@@ -133,9 +133,14 @@ pub(crate) enum Scope {
     /// (`k8s.io/apiserver` `admission/plugin/cel`, `createEnvForOpts`), with
     /// the apiserver's optional declarations: `params` only for a policy with
     /// a `paramKind`, `authorizer` for a validation but not its
-    /// `messageExpression`. `variables` is declared only for a policy with
-    /// `spec.variables`, which kube-cel does not model, so never.
-    Vap { params: bool, authorizer: bool },
+    /// `messageExpression`, `variables` only for a policy with
+    /// `spec.variables` (which the validation engine does not model, so it
+    /// never declares them).
+    Vap {
+        params: bool,
+        authorizer: bool,
+        variables: bool,
+    },
 }
 
 impl Scope {
@@ -143,10 +148,15 @@ impl Scope {
     fn declares_variable(self, name: &str) -> bool {
         match self {
             Scope::Crd => matches!(name, "self" | "oldSelf"),
-            Scope::Vap { params, authorizer } => match name {
+            Scope::Vap {
+                params,
+                authorizer,
+                variables,
+            } => match name {
                 "object" | "oldObject" | "request" | "namespaceObject" => true,
                 "params" => params,
                 "authorizer" | "authorizer.requestResource" => authorizer,
+                "variables" => variables,
                 _ => false,
             },
         }
@@ -156,6 +166,13 @@ impl Scope {
     /// types of a policy's `request` and `namespaceObject` (`variables`' type,
     /// `kubernetes.variables`, comes with `spec.variables`). A CRD rule's own
     /// are `self`'s, under names generated per CRD.
+    /// Whether `T{..}` can construct `name` in this context.
+    fn declares_message_type(self, name: &str) -> bool {
+        MESSAGE_TYPES.contains(&name)
+            || self.message_types().contains(&name)
+            || matches!(self, Scope::Vap { variables: true, .. }) && name == "kubernetes.variables"
+    }
+
     fn message_types(self) -> &'static [&'static str] {
         match self {
             Scope::Crd => &[],
@@ -177,7 +194,11 @@ impl Scope {
     fn readable(self) -> String {
         match self {
             Scope::Crd => "a CRD rule declares `self` and `oldSelf`".to_owned(),
-            Scope::Vap { params, authorizer } => {
+            Scope::Vap {
+                params,
+                authorizer,
+                variables,
+            } => {
                 let mut names = vec!["`object`", "`oldObject`", "`request`"];
                 if params {
                     names.push("`params`");
@@ -185,6 +206,9 @@ impl Scope {
                 names.push("`namespaceObject`");
                 if authorizer {
                     names.push("`authorizer`");
+                }
+                if variables {
+                    names.push("`variables`");
                 }
                 let last = names.pop().expect("a policy declares variables");
                 let kind = if authorizer {
@@ -196,8 +220,11 @@ impl Scope {
                 if !params {
                     readable.push_str(", `params` when the policy has a `paramKind`");
                 }
-                readable
-                    .push_str(" (`variables` comes with `spec.variables`, which kube-cel does not model)");
+                if !variables {
+                    readable.push_str(
+                        " (`variables` comes with `spec.variables`, which kube-cel does not model)",
+                    );
+                }
                 readable
             }
         }
@@ -230,6 +257,9 @@ pub(crate) enum UndeclaredReference {
     MessageType(String),
     /// `__result__` as the iteration variable of a standard macro.
     AccumulatorOverwrite,
+    /// `.x` naming a macro's variable `x`, as written: the apiserver reads the
+    /// macro's `x`, `cel` a name outside the macros.
+    DottedMacroVariable(String),
 }
 
 impl std::fmt::Display for UndeclaredReference {
@@ -257,6 +287,11 @@ impl std::fmt::Display for UndeclaredReference {
                     "undeclared reference to '{name}': no such message type in the Kubernetes CEL environment"
                 )
             }
+            UndeclaredReference::DottedMacroVariable(name) => write!(
+                f,
+                "'{name}' names a macro's variable, which kube-cel cannot evaluate as the apiserver does \
+                 (it looks a leading-dot name up outside the macros); write it without the dot"
+            ),
             UndeclaredReference::AccumulatorOverwrite => write!(
                 f,
                 "iteration variable overwrites accumulator variable: a macro's variable cannot be named \
@@ -275,8 +310,23 @@ pub(crate) fn check(expr: &IdedExpr, scope: Scope) -> Result<(), UndeclaredRefer
         declared: apiserver_functions(),
         scope,
         bound: Vec::new(),
+        collected: None,
     }
     .walk(expr)
+}
+
+/// The identifiers in `expr` not declared where they appear in `scope`, each
+/// once, as written: what [`check`] refuses first, collected over the whole
+/// expression for static analysis' scope warnings.
+pub(crate) fn undeclared_identifiers(expr: &IdedExpr, scope: Scope) -> Vec<String> {
+    let mut checker = Checker {
+        declared: apiserver_functions(),
+        scope,
+        bound: Vec::new(),
+        collected: Some(Vec::new()),
+    };
+    checker.walk(expr).expect("a collecting walk refuses nothing");
+    checker.collected.unwrap_or_default()
 }
 
 struct Checker<'e> {
@@ -284,6 +334,9 @@ struct Checker<'e> {
     scope: Scope,
     /// The variables the enclosing comprehensions bind, innermost last.
     bound: Vec<&'e str>,
+    /// When set, undeclared identifiers are collected here instead of
+    /// refused, and other refusals are skipped.
+    collected: Option<Vec<String>>,
 }
 
 impl<'e> Checker<'e> {
@@ -301,18 +354,45 @@ impl<'e> Checker<'e> {
         self.scope.declares_variable(name) || TYPE_IDENTIFIERS.contains(&name)
     }
 
-    fn ident(&self, name: &str) -> Result<(), UndeclaredReference> {
+    fn ident(&mut self, name: &str) -> Result<(), UndeclaredReference> {
         let bare = without_leading_dot(name);
         // A name starting with `@` is one a macro binds (`@result`); no source
-        // can spell it. cel-go resolves `.x` to a comprehension's `x` too
-        // (while a variable bound as `.x` is never found).
-        if bare.starts_with('@') || self.bound.contains(&bare) || self.declared_global(bare) {
+        // can spell it. A variable bound as `.x` is never found.
+        if bare.starts_with('@') {
+            return Ok(());
+        }
+        if self.bound.contains(&bare) {
+            // cel-go resolves `.x` to the macro's `x`, while `cel` looks it up
+            // outside the macros, where it may be another value altogether (a
+            // policy's null `params`): refused rather than evaluated wrong.
+            return if bare.len() < name.len() {
+                self.refuse(UndeclaredReference::DottedMacroVariable(name.to_owned()))
+            } else {
+                Ok(())
+            };
+        }
+        if self.declared_global(bare) {
             Ok(())
         } else {
-            Err(UndeclaredReference::Identifier {
+            self.refuse(UndeclaredReference::Identifier {
                 name: name.to_owned(),
                 scope: self.scope,
             })
+        }
+    }
+
+    /// Refuses the expression, or, when collecting undeclared identifiers,
+    /// records one and goes on (anything else is not a scope warning).
+    fn refuse(&mut self, reason: UndeclaredReference) -> Result<(), UndeclaredReference> {
+        match (&mut self.collected, reason) {
+            (Some(names), UndeclaredReference::Identifier { name, .. }) => {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+                Ok(())
+            }
+            (Some(_), _) => Ok(()),
+            (None, reason) => Err(reason),
         }
     }
 
@@ -332,9 +412,11 @@ impl<'e> Checker<'e> {
             Expr::List(list) => list.elements.iter().try_for_each(|e| self.walk(e)),
             Expr::Map(map) => map.entries.iter().try_for_each(|e| self.walk_entry(&e.expr)),
             Expr::Struct(s) => {
-                let name = without_leading_dot(&s.type_name);
-                if !MESSAGE_TYPES.contains(&name) && !self.scope.message_types().contains(&name) {
-                    return Err(UndeclaredReference::MessageType(s.type_name.clone()));
+                if !self
+                    .scope
+                    .declares_message_type(without_leading_dot(&s.type_name))
+                {
+                    self.refuse(UndeclaredReference::MessageType(s.type_name.clone()))?;
                 }
                 s.entries.iter().try_for_each(|e| self.walk_entry(&e.expr))
             }
@@ -348,7 +430,7 @@ impl<'e> Checker<'e> {
                     && (c.iter_var == LEGACY_ACCUMULATOR
                         || c.iter_var2.as_deref() == Some(LEGACY_ACCUMULATOR))
                 {
-                    return Err(UndeclaredReference::AccumulatorOverwrite);
+                    self.refuse(UndeclaredReference::AccumulatorOverwrite)?;
                 }
                 self.walk(&c.iter_range)?;
                 self.walk(&c.accu_init)?;
@@ -374,10 +456,9 @@ impl<'e> Checker<'e> {
                         None => {
                             let bare = without_leading_dot(name);
                             if let Some(member_only) = MEMBER_ONLY.iter().find(|n| **n == bare) {
-                                return Err(UndeclaredReference::GlobalForm(member_only));
-                            }
-                            if !self.known(name) {
-                                return Err(UndeclaredReference::Function(name.to_owned()));
+                                self.refuse(UndeclaredReference::GlobalForm(member_only))?;
+                            } else if !self.known(name) {
+                                self.refuse(UndeclaredReference::Function(name.to_owned()))?;
                             }
                         }
                         // As `cel` resolves it: `a.b.f(..)` calls the function
@@ -387,9 +468,9 @@ impl<'e> Checker<'e> {
                             match qualified {
                                 Some(qualified) if self.known(&qualified) => {}
                                 qualified if !self.known(name) => {
-                                    return Err(UndeclaredReference::Function(
+                                    self.refuse(UndeclaredReference::Function(
                                         qualified.unwrap_or_else(|| name.to_owned()),
-                                    ));
+                                    ))?;
                                 }
                                 _ => self.walk(target)?,
                             }
@@ -581,6 +662,7 @@ mod tests {
             Scope::Vap {
                 params: false,
                 authorizer: true,
+                variables: false,
             },
             &[
                 "true || authorizer.group('').resource('pods').check('get').allowed()",
@@ -625,7 +707,8 @@ mod tests {
                 Err(
                     UndeclaredReference::Identifier { .. }
                     | UndeclaredReference::MessageType(_)
-                    | UndeclaredReference::AccumulatorOverwrite,
+                    | UndeclaredReference::AccumulatorOverwrite
+                    | UndeclaredReference::DottedMacroVariable(_),
                 ) => {}
                 other => panic!("{expr}: expected an undeclared identifier or type, got {other:?}"),
             }
@@ -657,8 +740,7 @@ mod tests {
             "true || [1].all(x, x == 1) == [2].exists(x, x == 2)",
             // A macro variable may shadow a variable or a type name.
             "[1].all(self, self > 0) && [1].all(int, int > 0)",
-            // cel-go resolves `.x` to the comprehension's `x`.
-            "self.items.all(x, .x != '')",
+            // Outside any macro, `.self` is `self`.
             ".self.replicas >= 0 && (true || self.replicas == .oldSelf.replicas)",
         ]);
     }
@@ -680,6 +762,7 @@ mod tests {
         for scope in [Scope::Crd, Scope::Vap {
             params: false,
             authorizer: true,
+            variables: false,
         }] {
             assert_accepted_in(scope, &[
                 "type(1) == int && type('a') == string && type(true) == bool && type(1u) == uint && type(1.0) == double",
@@ -700,6 +783,7 @@ mod tests {
         let vap = Scope::Vap {
             params: false,
             authorizer: true,
+            variables: false,
         };
         for message in vap.message_types() {
             assert_accepted_in(vap, &[&format!("true || [{message}{{}}].size() == 1")]);
@@ -712,6 +796,7 @@ mod tests {
             Scope::Vap {
                 params: true,
                 authorizer: true,
+                variables: false,
             },
             &[
                 "object.x == 1 || oldObject == null || request.name == '' || params == null || namespaceObject == null",
@@ -788,6 +873,7 @@ mod tests {
             Scope::Vap {
                 params: true,
                 authorizer: true,
+                variables: false,
             },
             &[
                 "true || self.x == 1",
@@ -812,6 +898,7 @@ mod tests {
         for scope in [Scope::Crd, Scope::Vap {
             params: false,
             authorizer: true,
+            variables: false,
         }] {
             for name in TYPE_IDENTIFIERS {
                 assert_accepted_in(scope, &[&format!("true || [{name}].size() == 1")]);
@@ -833,6 +920,7 @@ mod tests {
         let message = Scope::Vap {
             params: true,
             authorizer: false,
+            variables: false,
         };
         assert_refused_in(message, &[
             "true ? 'ok' : (authorizer.group('').resource('pods').check('get').allowed() ? 'yes' : 'no')",
@@ -845,7 +933,7 @@ mod tests {
     }
 
     /// A variable bound as `.x` is bound under that name, which no reference
-    /// resolves to; a reference `.x` resolves to a variable bound as `x`.
+    /// resolves to.
     #[test]
     fn dotted_binders_bind_no_plain_name() {
         assert_refused_in(Scope::Crd, &[
@@ -857,7 +945,36 @@ mod tests {
             "true || [1].all(.i, v, i == 0)",
             "true || [1].all(i, .v, v > 0)",
         ]);
-        assert_accepted(&["[1].all(.x, true)", "[1].all(x, .x > 0)"]);
+        assert_accepted(&["[1].all(.x, true)"]);
+    }
+
+    /// `.x` naming a macro's variable `x` is refused: the apiserver reads the
+    /// macro's `x` (`[dyn(1)].all(namespaceObject, .namespaceObject == null)`
+    /// is false on v1.36.1), `cel` a name outside the macros, such as a
+    /// policy's null `namespaceObject`.
+    #[test]
+    fn dotted_reference_to_a_macro_variable_is_refused() {
+        assert_refused_in(Scope::Crd, &[
+            "[1].all(x, .x > 0)",
+            "self.items.all(x, .x != '')",
+            "true || [1].all(self, .self > 0)",
+            "true || [1].all(x, [2].all(y, .x == y))",
+            "true || optional.of(1).optMap(v, .v + 1).value() == 2",
+        ]);
+        let policy = Scope::Vap {
+            params: true,
+            authorizer: true,
+            variables: false,
+        };
+        assert_refused_in(policy, &[
+            "[dyn(1)].all(namespaceObject, .namespaceObject == null)",
+            "[dyn(1)].all(params, .params == null)",
+        ]);
+        // A leading dot outside the macro binding the name is the global one.
+        assert_accepted_in(policy, &[
+            "[1].all(x, x > 0) && .namespaceObject == null",
+            "[1].all(params, params > 0) && .params == null",
+        ]);
     }
 
     /// cel-go's standard macros refuse `__result__` as their variable;
@@ -897,6 +1014,7 @@ mod tests {
             Scope::Vap {
                 params: true,
                 authorizer: true,
+                variables: false,
             },
             &[expr],
         );
@@ -904,6 +1022,7 @@ mod tests {
             Scope::Vap {
                 params: false,
                 authorizer: true,
+                variables: false,
             },
             &[expr, "params == null"],
         );
@@ -911,6 +1030,7 @@ mod tests {
             Scope::Vap {
                 params: false,
                 authorizer: true,
+                variables: false,
             },
             &["[1].all(params, params > 0)"],
         );

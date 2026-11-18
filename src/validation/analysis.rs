@@ -5,7 +5,7 @@
 
 use cel::common::ast::Expr;
 
-use crate::validation::compilation::CompiledSchema;
+use crate::validation::{Scope, compilation::CompiledSchema, references::undeclared_identifiers};
 
 /// The context in which a CEL rule is evaluated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,31 +64,47 @@ fn valid_variables(scope: ScopeContext) -> &'static [&'static str] {
     }
 }
 
+/// The compile-time check's scope for `context`: a policy's `params` and
+/// `variables` depend on its spec, which static analysis does not see, so
+/// both are taken.
+fn scope_of(context: ScopeContext) -> Scope {
+    match context {
+        ScopeContext::CrdValidation => Scope::Crd,
+        ScopeContext::AdmissionPolicy => Scope::Vap {
+            params: true,
+            authorizer: true,
+            variables: true,
+        },
+    }
+}
+
+/// A [`WarningKind::WrongScope`] warning for each identifier `program` reads
+/// that is not declared where it appears, by the compile-time check's name
+/// resolution: a macro's variables are declared inside the macro, and type
+/// names (`int`, `net.IP`) and function namespaces (`optional.of`,
+/// `format.dns1123Label`) are no variables.
+fn scope_warnings(rule: &str, program: &cel::Program, scope: ScopeContext) -> Vec<AnalysisWarning> {
+    let valid = valid_variables(scope);
+    undeclared_identifiers(program.expression(), scope_of(scope))
+        .into_iter()
+        .map(|var| AnalysisWarning {
+            rule: rule.to_string(),
+            message: format!(
+                "variable '{}' is not available in {:?} context; valid variables: {:?}",
+                var, scope, valid
+            ),
+            kind: WarningKind::WrongScope,
+        })
+        .collect()
+}
+
 /// Check a CEL expression for variable scope violations.
 #[must_use]
 pub fn check_rule_scope(rule: &str, scope: ScopeContext) -> Vec<AnalysisWarning> {
-    let program = match crate::validation::validation_env().compile(rule) {
-        Ok(p) => p,
-        Err(_) => return vec![],
-    };
-
-    let valid = valid_variables(scope);
-    let mut warnings = Vec::new();
-
-    for var in program.references().variables() {
-        if !valid.contains(&var) {
-            warnings.push(AnalysisWarning {
-                rule: rule.to_string(),
-                message: format!(
-                    "variable '{}' is not available in {:?} context; valid variables: {:?}",
-                    var, scope, valid
-                ),
-                kind: WarningKind::WrongScope,
-            });
-        }
+    match crate::validation::validation_env().compile(rule) {
+        Ok(program) => scope_warnings(rule, &program, scope),
+        Err(_) => vec![],
     }
-
-    warnings
 }
 
 const DEFAULT_MAX_ITEMS: u64 = 1000;
@@ -137,22 +153,8 @@ pub fn analyze_rule(rule: &str, schema: &CompiledSchema, scope: ScopeContext) ->
         Err(_) => return vec![],
     };
 
-    let mut warnings = Vec::new();
-
     // Scope validation
-    let valid = valid_variables(scope);
-    for var in program.references().variables() {
-        if !valid.contains(&var) {
-            warnings.push(AnalysisWarning {
-                rule: rule.to_string(),
-                message: format!(
-                    "variable '{}' is not available in {:?} context; valid variables: {:?}",
-                    var, scope, valid
-                ),
-                kind: WarningKind::WrongScope,
-            });
-        }
-    }
+    let mut warnings = scope_warnings(rule, &program, scope);
 
     // Cost estimation
     let expr = program.expression();
@@ -299,6 +301,40 @@ mod tests {
             ScopeContext::AdmissionPolicy,
         );
         assert!(warnings.is_empty());
+    }
+
+    /// Type names, function namespaces and a macro's variables are no
+    /// variables (they used to be flagged), while a macro's variable outside
+    /// the macro is.
+    #[test]
+    fn scope_check_resolves_names_as_the_compiler_does() {
+        for rule in [
+            "type(self.x) == int",
+            "optional.of(1).hasValue() && self.x > 0",
+            "format.dns1123Label().validate(self.n).hasValue()",
+            "type(ip('1.2.3.4')) == net.IP",
+            "self.items.all(item, item.size() > 0) && self.items.map(x, x).exists(y, y == '')",
+        ] {
+            let warnings = check_rule_scope(rule, ScopeContext::CrdValidation);
+            assert!(warnings.is_empty(), "{rule}: {warnings:?}");
+        }
+        let warnings = check_rule_scope(
+            "self.items.all(x, x != '') && x == ''",
+            ScopeContext::CrdValidation,
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].message.contains("'x'"));
+    }
+
+    /// A policy's `params` and `variables` depend on its spec, so both are
+    /// taken.
+    #[test]
+    fn admission_policy_scope_takes_params_and_variables() {
+        let warnings = check_rule_scope(
+            "params.max >= object.spec.replicas && variables.foo == 1 && type(1) == int",
+            ScopeContext::AdmissionPolicy,
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     #[test]
