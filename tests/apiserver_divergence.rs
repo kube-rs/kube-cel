@@ -513,7 +513,9 @@ fn runtime_error_chains_its_cause() {
 //            holds (k8s.io/apiserver v0.36.1 `MustBaseEnvSet(1.36)`).
 // kube-cel:  a quantity is an i128 mantissa and a scale; `add` / `sub` whose
 //            result does not fit is an EvaluationError instead of a panic or
-//            a wrapped value.
+//            a wrapped value, even where CEL absorbs the error (`|| true`):
+//            the apiserver has written the result into a receiver holding an
+//            inf.Dec, which kube-cel left as it was.
 
 #[test]
 #[cfg(feature = "quantity")]
@@ -521,6 +523,8 @@ fn quantity_arithmetic_past_i128_fails_closed() {
     for rule in [
         "quantity('2e38').add(quantity('1')).isGreaterThan(quantity('2e38'))",
         "quantity('2e38').sub(quantity('-1')).isGreaterThan(quantity('2e38'))",
+        "quantity('2e38').add(quantity('1')).isGreaterThan(quantity('2e38')) || true",
+        "[quantity('-170141183460469231731687303715884105728')].all(q, (q.sub(1).isInteger() || true) && q.compareTo(quantity('-170141183460469231731687303715884105728')) == 0)",
     ] {
         let errors = run_rule(rule).unwrap_err();
         assert!(
@@ -542,7 +546,8 @@ fn quantity_arithmetic_past_i128_fails_closed() {
 //            them fails with an EvaluationError, even where CEL absorbs the
 //            function's error (`|| true`, `exists`, an optional); one that
 //            never calls it (`true || ..`) is unaffected, and a malformed
-//            string is still not a quantity (`isQuantity` false).
+//            string is still not a quantity (`isQuantity` false), as is a
+//            number without digits on the apiserver's inf.Dec path (`e-1001`).
 
 #[test]
 #[cfg(feature = "quantity")]
@@ -555,6 +560,7 @@ fn quantity_past_supported_range_fails_closed() {
         "quantity('1e4294967296') == quantity('1')",
         "isQuantity('12345678901234567890123456789012345678901')",
         "isQuantity('1e1001') || true",
+        "isQuantity('e1001')",
         "[1].exists(x, quantity('1e1001') == quantity('1')) || true",
         "optional.of(quantity('1e1001')).hasValue() || true",
     ] {
@@ -569,6 +575,7 @@ fn quantity_past_supported_range_fails_closed() {
         "isQuantity('1e1000') && isQuantity('1e-1000')",
         "!isQuantity('1e9223372036854775808')",
         "!isQuantity('99999999999999999999999999999999999999999999999999+-1')",
+        "!isQuantity('e-1001') && !isQuantity('.e-1001')",
     ] {
         assert!(run_rule(rule).is_ok(), "{rule}");
     }

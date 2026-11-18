@@ -60,8 +60,9 @@ pub(crate) fn execute_supported(program: &Program, ctx: &Context<'_, '_>) -> cel
         (Ok(_), true) => Err(cel::ExecutionError::function_error(
             "quantity",
             "evaluation reached a quantity kube-cel cannot treat as the apiserver does (an \
-             exponent or scale outside ±1000, more significant digits than an i128 holds, or \
-             == / != with an add() / sub() result on the right)",
+             exponent or scale outside ±1000, more significant digits than an i128 holds, in a \
+             quantity or an add() / sub() result, or == / != with an add() / sub() result on \
+             the right)",
         )),
         (result, _) => result,
     }

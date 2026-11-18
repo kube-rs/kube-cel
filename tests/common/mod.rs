@@ -1041,6 +1041,56 @@ pub fn cases() -> Vec<ParityCase> {
             expect: Expect::Accept,
             note: "quantities follow apimachinery's resource.Quantity → ACCEPT",
         },
+        // add / sub copy the receiver (`copy := *q`); a receiver holding an
+        // inf.Dec shares it with the copy, which the sum is written into.
+        ParityCase {
+            kind: "PquantSharedDec",
+            plural: "pquantshareddecs",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "![quantity('1.5Gi')].all(q, !q.add(1).isInteger() && q.compareTo(quantity('1.5Gi')) == 0) && [quantity('1.5Gi')].all(q, q.add(1).compareTo(q) == 0 && q.compareTo(quantity('1610612737')) == 0) && [quantity('1.5Gi')].all(q, q.add(q).compareTo(quantity('3Gi')) == 0 && q.compareTo(quantity('3Gi')) == 0) && [quantity('1.5Gi')].all(q, q.sub(1).add(1).compareTo(q) == 0 && q.compareTo(quantity('1.5Gi')) == 0) && [quantity('1')].all(q, q.add(1).compareTo(quantity('2')) == 0 && q.compareTo(quantity('1')) == 0) && [quantity('1.5Gi')].all(q, !(q.add(1) != q))",
+                    "message": "shared"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "add/sub on an inf.Dec quantity update it in place, as Go's shared *inf.Dec → ACCEPT",
+        },
+        // compareTo / isGreaterThan / isLessThan call `q.Cmp(y)`, whose
+        // `q.AsDec()` turns an int64Amount receiver into an inf.Dec for good
+        // when `y` holds one; `==` compares copies.
+        ParityCase {
+            kind: "PquantCmpPromotes",
+            plural: "pquantcmppromotes",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "[quantity('1')].all(q, q.compareTo(quantity('1.5Gi')) < 0 && !q.isInteger()) && [quantity('1')].all(q, q.isLessThan(quantity('1.5Gi')) && q.add(1).compareTo(q) == 0 && q.compareTo(quantity('2')) == 0) && [quantity('1')].all(q, quantity('1.5Gi').compareTo(q) > 0 && q.isInteger()) && [quantity('1')].all(q, q == quantity('1.5Gi') || q.isInteger()) && [quantity('1')].all(q, q.compareTo(quantity('2')) < 0 && q.isInteger())",
+                    "message": "promote"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "comparing with an inf.Dec makes the receiver one, as Go's Cmp → ACCEPT",
+        },
+        ParityCase {
+            kind: "PquantCmpAsInteger",
+            plural: "pquantcmpasintegers",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "[quantity('1')].all(q, q.isLessThan(quantity('0.5Gi')) && q.asInteger() == 1)",
+                    "message": "asInteger"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Reject,
+            note: "asInteger after isLessThan(<inf.Dec>) is an error → REJECT",
+        },
         ParityCase {
             kind: "PquantNaN",
             plural: "pquantnans",

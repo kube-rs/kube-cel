@@ -174,8 +174,9 @@ pub(crate) fn register_all(ctx: &mut cel::Context<'_, '_>) -> Result<Vec<String>
 
 thread_local! {
     /// Set when an evaluation reaches a quantity kube-cel cannot treat as the
-    /// apiserver does: past its supported range, or the right side of an
-    /// equality being an `add`/`sub` result (an error there).
+    /// apiserver does: past its supported range (an `add`/`sub` result past
+    /// `i128` included), or the right side of an equality being an `add`/`sub`
+    /// result (an error there).
     static UNSUPPORTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 

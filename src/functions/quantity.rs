@@ -15,7 +15,11 @@ use cel::{
     extractors::{Arguments, This},
     objects::{Opaque, Value},
 };
-use std::{cmp::Ordering, fmt, sync::Arc};
+use std::{
+    cmp::Ordering,
+    fmt,
+    sync::{Arc, Mutex},
+};
 
 use crate::functions::Registrar;
 
@@ -23,46 +27,153 @@ use crate::functions::Registrar;
 // Internal representation
 // ---------------------------------------------------------------------------
 
-/// A Kubernetes resource quantity, as Go's `resource.Quantity` holds it.
-#[derive(Debug, Clone, Eq)]
+/// A Kubernetes resource quantity: what the apiserver's quantity values point
+/// to, a Go `resource.Quantity`.
+///
+/// The apiserver passes quantities by pointer and `resource.Quantity` keeps its
+/// `inf.Dec` behind one too, so a quantity's state is shared and changes:
+/// `add` / `sub` copy the receiver (`copy := *q`), and when it holds an
+/// `inf.Dec` the copy points to the same one, which `copy.Add(..)` updates in
+/// place; the receiver, and every result sharing that `inf.Dec`, take the new
+/// value (`q.add(1).compareTo(q) == 0`). A CEL value here is an `Arc` of this
+/// type, shared as the apiserver's pointer is, and the `inf.Dec` an
+/// `Arc<Mutex<..>>` shared as Go's.
+#[derive(Debug)]
 pub struct KubeQuantity {
-    amount: Amount,
+    repr: Mutex<Repr>,
     /// The value of an `add` / `sub`, which the apiserver returns as a pointer
     /// (`*apiservercel.Quantity`); its `Equal` refuses a pointer on the right.
     from_arithmetic: bool,
 }
 
+/// What a `resource.Quantity` holds: an `int64Amount`, or a pointer to an
+/// `inf.Dec`.
+#[derive(Debug, Clone)]
+enum Repr {
+    Int { value: i64, scale: i32 },
+    Dec(Arc<Mutex<Dec>>),
+}
+
+/// An `inf.Dec`: `mantissa × 10^zeros × 10^-scale` (its unscaled value is
+/// `mantissa × 10^zeros`, kept apart so that rounding to nano units does not
+/// overflow).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Dec {
+    mantissa: i128,
+    zeros: u32,
+    scale: i32,
+}
+
+/// A quantity's value as it stands, in the representation it has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Amount {
     /// Go's `int64Amount`: `value × 10^scale`.
     Int { value: i64, scale: i32 },
-    /// Go's `inf.Dec`: `mantissa × 10^zeros × 10^-scale` (its unscaled value is
-    /// `mantissa × 10^zeros`, kept apart so that rounding to nano units does not
-    /// overflow).
-    Dec { mantissa: i128, zeros: u32, scale: i32 },
+    /// Go's `inf.Dec`.
+    Dec(Dec),
+}
+
+/// Locks `m`; a poisoned lock still holds a whole value (no update panics
+/// half-way).
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+impl Repr {
+    fn new(amount: Amount) -> Self {
+        match amount {
+            Amount::Int { value, scale } => Repr::Int { value, scale },
+            Amount::Dec(dec) => Repr::Dec(Arc::new(Mutex::new(dec))),
+        }
+    }
+
+    fn amount(&self) -> Amount {
+        match self {
+            Repr::Int { value, scale } => Amount::Int {
+                value: *value,
+                scale: *scale,
+            },
+            Repr::Dec(dec) => Amount::Dec(*lock(dec)),
+        }
+    }
 }
 
 impl KubeQuantity {
     fn new(amount: Amount) -> Self {
         KubeQuantity {
-            amount,
+            repr: Mutex::new(Repr::new(amount)),
             from_arithmetic: false,
         }
     }
 
+    /// The value as it stands now.
+    fn amount(&self) -> Amount {
+        lock(&self.repr).amount()
+    }
+
+    /// Go's `quantityAdd` / `quantitySub` with this receiver: `copy := *q`,
+    /// then `copy.Add(y)` / `copy.Sub(y)`, whose `inf.Dec` path writes into the
+    /// copy's `inf.Dec`, the receiver's own when it has one. `y` is a value
+    /// read before (Go passes a copy). `None` when the result leaves `i128`
+    /// (an `inf.Dec` has no such bound: a documented fail-closed limit), and
+    /// then nothing is written.
+    fn add_or_sub(&self, y: Amount, subtract: bool) -> Option<Repr> {
+        let copy = lock(&self.repr).clone();
+        match copy {
+            Repr::Int { value, scale } => {
+                // The int64Amount path when both are one and the sum fits; the
+                // `Sub` side negates `y`, wrapping as Go does for MinInt64.
+                if let Amount::Int { value: yv, scale: ys } = y {
+                    let yv = if subtract { yv.wrapping_neg() } else { yv };
+                    if let Some(sum) = int64_amount_add((value, scale), (yv, ys)) {
+                        return Some(Repr::new(sum));
+                    }
+                }
+                // `ToDec` gives the copy an `inf.Dec` of its own.
+                let x = Amount::Int { value, scale }.as_dec();
+                Some(Repr::new(Amount::Dec(dec_add(x, y.as_dec(), subtract)?)))
+            }
+            Repr::Dec(shared) => {
+                let mut dec = lock(&shared);
+                *dec = dec_add(*dec, y.as_dec(), subtract)?;
+                drop(dec);
+                Some(Repr::Dec(shared))
+            }
+        }
+    }
+}
+
+impl KubeQuantity {
+    /// Go's `q.Cmp(y)` with this receiver, behind `compareTo`, `isGreaterThan`
+    /// and `isLessThan`: when either side holds an `inf.Dec`, `q.AsDec()` turns
+    /// an int64Amount receiver into an `inf.Dec` for good, so a later
+    /// `isInteger()` is false and a later `add` shares it. `y` is a value read
+    /// before (Go passes a copy), and stays as it is.
+    fn compare(&self, y: Amount) -> Ordering {
+        let mut repr = lock(&self.repr);
+        if let (&Repr::Int { value, scale }, Amount::Dec(_)) = (&*repr, y) {
+            *repr = Repr::new(Amount::Dec(Amount::Int { value, scale }.as_dec()));
+        }
+        let x = repr.amount();
+        drop(repr);
+        cmp_values(x.value(), y.value())
+    }
+}
+
+impl Amount {
     /// The value as `(m, e)` with value `m × 10^e`.
-    fn value(&self) -> (i128, i64) {
-        match self.amount {
+    fn value(self) -> (i128, i64) {
+        match self {
             Amount::Int { value, scale } => (i128::from(value), i64::from(scale)),
-            Amount::Dec {
+            Amount::Dec(Dec {
                 mantissa,
                 zeros,
                 scale,
-            } => (mantissa, i64::from(zeros) - i64::from(scale)),
+            }) => (mantissa, i64::from(zeros) - i64::from(scale)),
         }
     }
 
-    fn sign(&self) -> i64 {
+    fn sign(self) -> i64 {
         match self.value().0.cmp(&0) {
             Ordering::Less => -1,
             Ordering::Equal => 0,
@@ -72,27 +183,27 @@ impl KubeQuantity {
 
     /// Go's `Quantity.AsInt64()`: only an `int64Amount` of a non-negative scale
     /// whose value fits; an `inf.Dec` never.
-    fn as_int64(&self) -> Option<i64> {
-        match self.amount {
+    fn as_int64(self) -> Option<i64> {
+        match self {
             Amount::Int { value, scale } => match scale.cmp(&0) {
                 Ordering::Equal => Some(value),
                 Ordering::Less => None,
                 Ordering::Greater => (0..scale).try_fold(value, |v, _| v.checked_mul(10)),
             },
-            Amount::Dec { .. } => None,
+            Amount::Dec(_) => None,
         }
     }
 
     /// Go's `Quantity.AsApproximateFloat64()`: the unscaled value as a float
     /// times `math.Pow10` of the exponent (unless it is 0).
-    fn as_approximate_float(&self) -> f64 {
-        let (base, exponent) = match self.amount {
+    fn as_approximate_float(self) -> f64 {
+        let (base, exponent) = match self {
             Amount::Int { value, scale } => (value as f64, i64::from(scale)),
-            Amount::Dec {
+            Amount::Dec(Dec {
                 mantissa,
                 zeros,
                 scale,
-            } => {
+            }) => {
                 // big.Float's conversion of the unscaled value, correctly rounded.
                 let base = format!("{mantissa}e{zeros}").parse::<f64>().unwrap_or(f64::NAN);
                 (base, -i64::from(scale))
@@ -105,50 +216,15 @@ impl KubeQuantity {
     }
 
     /// The amount as Go's `AsDec()`.
-    fn as_dec(&self) -> (i128, u32, i32) {
-        match self.amount {
-            Amount::Int { value, scale } => (i128::from(value), 0, -scale),
-            Amount::Dec {
-                mantissa,
-                zeros,
-                scale,
-            } => (mantissa, zeros, scale),
-        }
-    }
-
-    /// Go's `Quantity.Add`: an `int64Amount` sum when both are and it fits, else
-    /// an `inf.Dec` sum. `None` when the sum leaves `i128` (an `inf.Dec` has no
-    /// such bound: a documented fail-closed limit).
-    fn add(&self, y: &KubeQuantity) -> Option<Amount> {
-        if let (
-            Amount::Int {
-                value: av,
-                scale: as_,
+    fn as_dec(self) -> Dec {
+        match self {
+            Amount::Int { value, scale } => Dec {
+                mantissa: i128::from(value),
+                zeros: 0,
+                scale: -scale,
             },
-            Amount::Int { value: bv, scale: bs },
-        ) = (self.amount, y.amount)
-            && let Some(sum) = int64_amount_add((av, as_), (bv, bs))
-        {
-            return Some(sum);
+            Amount::Dec(dec) => dec,
         }
-        dec_add(self.as_dec(), y.as_dec(), false)
-    }
-
-    /// Go's `Quantity.Sub`, as `add` (the int64 path negates the right side,
-    /// wrapping as Go does for `math.MinInt64`).
-    fn sub(&self, y: &KubeQuantity) -> Option<Amount> {
-        if let (
-            Amount::Int {
-                value: av,
-                scale: as_,
-            },
-            Amount::Int { value: bv, scale: bs },
-        ) = (self.amount, y.amount)
-            && let Some(diff) = int64_amount_add((av, as_), (bv.wrapping_neg(), bs))
-        {
-            return Some(diff);
-        }
-        dec_add(self.as_dec(), y.as_dec(), true)
     }
 }
 
@@ -174,11 +250,17 @@ fn positive_scale_int64(base: i64, scale: i32) -> Option<i64> {
 }
 
 /// `inf.Dec` addition (or subtraction): both at the greater scale, then summed.
-fn dec_add(
-    (am, az, as_): (i128, u32, i32),
-    (bm, bz, bs): (i128, u32, i32),
-    subtract: bool,
-) -> Option<Amount> {
+fn dec_add(a: Dec, b: Dec, subtract: bool) -> Option<Dec> {
+    let Dec {
+        mantissa: am,
+        zeros: az,
+        scale: as_,
+    } = a;
+    let Dec {
+        mantissa: bm,
+        zeros: bz,
+        scale: bs,
+    } = b;
     let scale = as_.max(bs);
     // Rescaling up multiplies the unscaled value by a power of ten.
     let az = az.checked_add(u32::try_from(scale - as_).ok()?)?;
@@ -190,14 +272,23 @@ fn dec_add(
         _ => az.min(bz),
     };
     let (az, bz) = (az.max(zeros), bz.max(zeros));
-    let a = am.checked_mul(10i128.checked_pow(az - zeros)?)?;
-    let b = bm.checked_mul(10i128.checked_pow(bz - zeros)?)?;
+    // A zero stays zero at any scale: no power of ten to compute (`0` plus
+    // `0e-1000` would need 10^1000).
+    let align = |m: i128, n: u32| {
+        if m == 0 {
+            Some(0)
+        } else {
+            m.checked_mul(10i128.checked_pow(n)?)
+        }
+    };
+    let a = align(am, az - zeros)?;
+    let b = align(bm, bz - zeros)?;
     let mantissa = if subtract {
         a.checked_sub(b)?
     } else {
         a.checked_add(b)?
     };
-    Some(Amount::Dec {
+    Some(Dec {
         mantissa,
         zeros,
         scale,
@@ -236,23 +327,12 @@ impl PartialEq for KubeQuantity {
             crate::functions::note_unsupported();
             return false;
         }
-        self.cmp(other) == Ordering::Equal
+        // `Equal` has a value receiver: it compares copies and changes neither.
+        cmp_values(self.amount().value(), other.amount().value()) == Ordering::Equal
     }
 }
 
-/// Exact comparison, as Go's `Cmp` (an `int64Amount` comparison and an
-/// `inf.Dec` one are both exact).
-impl Ord for KubeQuantity {
-    fn cmp(&self, other: &Self) -> Ordering {
-        cmp_values(self.value(), other.value())
-    }
-}
-
-impl PartialOrd for KubeQuantity {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
+impl Eq for KubeQuantity {}
 
 /// Exact comparison of `a.0 × 10^a.1` and `b.0 × 10^b.1`: by sign, then by the
 /// magnitudes' decimal digits, never scaling into a wider integer.
@@ -283,7 +363,7 @@ fn cmp_values(a: (i128, i64), b: (i128, i64)) -> Ordering {
 /// The exact decimal value (for tests and debugging).
 impl fmt::Display for KubeQuantity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (m, e) = self.value();
+        let (m, e) = self.amount().value();
         if m == 0 {
             return write!(f, "0");
         }
@@ -374,7 +454,7 @@ fn check_scale(scale: i64, s: &str) -> Result<(), ParseError> {
 /// Whether a value's exponent is within [`SUPPORTED_SCALE`], as held and with
 /// its mantissa's trailing zeros moved into it (`10e1000` is 1e1001).
 fn in_range(amount: &Amount) -> bool {
-    let (m, e) = KubeQuantity::new(*amount).value();
+    let (m, e) = amount.value();
     if m == 0 {
         return true;
     }
@@ -403,7 +483,17 @@ fn parse_quantity(s: &str) -> Result<KubeQuantity, ParseError> {
         return Ok(KubeQuantity::new(Amount::Int { value: 0, scale: 0 }));
     }
     let parts = parse_quantity_string(s).ok_or_else(|| ParseError::Invalid(INVALID.into()))?;
-    let (base, exponent, binary) = interpret_suffix(parts.suffix, s)?;
+    let (base, exponent, binary) = interpret_suffix(parts.suffix)?;
+    // A number without digits (`e5`, `.`, `-e-3`): Go's int64Amount path reads
+    // it as 0, while its inf.Dec path parses it and finds no digit, so it is
+    // not a quantity. Go takes the inf.Dec path for a decimal exponent, narrowed
+    // to int32, below -9, and that decides even past the supported range
+    // (`e-1001` is not a quantity; `e1001` is a 0 kube-cel does not support).
+    // Binary suffixes are within range and take the paths below.
+    if !binary && !parts.value.bytes().any(|b| b.is_ascii_digit()) && (exponent as i32) < -9 {
+        return Err(ParseError::Invalid(INVALID.into()));
+    }
+    check_scale(exponent, s)?;
 
     let (mut scale, precision, mantissa) = if binary {
         if exponent >= 0 && parts.denom.is_empty() {
@@ -469,20 +559,22 @@ fn parse_quantity(s: &str) -> Result<KubeQuantity, ParseError> {
     }
     let kept = unscaled.trim_end_matches('0');
     let zeros = u32::try_from(unscaled.len() - kept.len()).map_err(|_| out_of_range(s))?;
+    // Parsed with its sign: i128::MIN has no positive counterpart.
     let mantissa: i128 = if kept.is_empty() {
         0
     } else {
-        kept.parse().map_err(|_| {
+        let sign = if negative { "-" } else { "" };
+        format!("{sign}{kept}").parse().map_err(|_| {
             ParseError::Unsupported(format!(
                 "'{s}' has more significant digits than kube-cel supports"
             ))
         })?
     };
-    let amount = Amount::Dec {
-        mantissa: if negative { -mantissa } else { mantissa },
+    let amount = Amount::Dec(Dec {
+        mantissa,
         zeros: if mantissa == 0 { 0 } else { zeros },
         scale: dec_scale as i32,
-    };
+    });
     if in_range(&amount) {
         Ok(KubeQuantity::new(amount))
     } else {
@@ -677,9 +769,9 @@ fn parse_quantity_string(s: &str) -> Option<QuantityParts<'_>> {
 }
 
 /// Go's suffix interpretation: `(base, exponent, binary)`. A decimal exponent
-/// (`e3`, `E-2`) is read as an int64; past that it is not a quantity, within it
-/// but outside [`SUPPORTED_SCALE`] unsupported.
-fn interpret_suffix(suffix: &str, s: &str) -> Result<(i64, i64, bool), ParseError> {
+/// (`e3`, `E-2`) is read as an int64; past that it is not a quantity (the
+/// caller checks it against [`SUPPORTED_SCALE`]).
+fn interpret_suffix(suffix: &str) -> Result<(i64, i64, bool), ParseError> {
     let dec = |e| Ok((10, e, false));
     let bin = |e| Ok((2, e, true));
     match suffix {
@@ -703,7 +795,6 @@ fn interpret_suffix(suffix: &str, s: &str) -> Result<(i64, i64, bool), ParseErro
             let exponent: i64 = suffix[1..]
                 .parse()
                 .map_err(|_| ParseError::Invalid("unable to parse quantity's suffix".into()))?;
-            check_scale(exponent, s)?;
             dec(exponent)
         }
         _ => Err(ParseError::Invalid("unable to parse quantity's suffix".into())),
@@ -760,13 +851,14 @@ fn cel_is_quantity(s: Arc<String>) -> ResolveResult {
 /// `<Quantity>.isInteger() -> bool`: whether Go's `AsInt64` succeeds.
 fn cel_is_integer(This(this): This<Value>) -> ResolveResult {
     let q = extract_quantity(&this)?;
-    Ok(Value::Bool(q.as_int64().is_some()))
+    Ok(Value::Bool(q.amount().as_int64().is_some()))
 }
 
 /// `<Quantity>.asInteger() -> int`: Go's `AsInt64`, an error where it fails.
 fn cel_as_integer(This(this): This<Value>) -> ResolveResult {
     let q = extract_quantity(&this)?;
-    q.as_int64()
+    q.amount()
+        .as_int64()
         .map(Value::Int)
         .ok_or_else(|| ExecutionError::function_error("asInteger", "cannot convert value to integer"))
 }
@@ -774,7 +866,7 @@ fn cel_as_integer(This(this): This<Value>) -> ResolveResult {
 /// `<Quantity>.asApproximateFloat() -> float`
 fn cel_as_approximate_float(This(this): This<Value>) -> ResolveResult {
     let q = extract_quantity(&this)?;
-    Ok(Value::Float(q.as_approximate_float()))
+    Ok(Value::Float(q.amount().as_approximate_float()))
 }
 
 /// `sign(<Quantity>) -> int`. The apiserver declares only the global form
@@ -789,7 +881,7 @@ fn cel_sign(ftx: &FunctionContext, This(this): This<Value>) -> ResolveResult {
         ));
     }
     let q = extract_quantity(&this)?;
-    Ok(Value::Int(q.sign()))
+    Ok(Value::Int(q.amount().sign()))
 }
 
 /// `<Quantity>.add(<Quantity | int>) -> Quantity`
@@ -799,10 +891,8 @@ pub(crate) fn cel_add(This(this): This<Value>, Arguments(args): Arguments) -> Re
         return Err(ExecutionError::function_error("add", "missing argument"));
     }
     let other = quantity_or_int(&args[0], "add")?;
-    let amount = q
-        .add(&other)
-        .ok_or_else(|| ExecutionError::function_error("add", "quantity overflow"))?;
-    arithmetic_result(amount)
+    let repr = q.add_or_sub(other, false).ok_or_else(|| overflow("add"))?;
+    arithmetic_result(repr)
 }
 
 /// `<Quantity>.sub(<Quantity | int>) -> Quantity`
@@ -812,22 +902,31 @@ pub(crate) fn cel_sub(This(this): This<Value>, Arguments(args): Arguments) -> Re
         return Err(ExecutionError::function_error("sub", "missing argument"));
     }
     let other = quantity_or_int(&args[0], "sub")?;
-    let amount = q
-        .sub(&other)
-        .ok_or_else(|| ExecutionError::function_error("sub", "quantity overflow"))?;
-    arithmetic_result(amount)
+    let repr = q.add_or_sub(other, true).ok_or_else(|| overflow("sub"))?;
+    arithmetic_result(repr)
+}
+
+/// An `add` / `sub` whose result needs more than an `i128` mantissa: the
+/// apiserver's `inf.Dec` is exact, and has also written the result into a
+/// shared receiver, so the error is noted for the validation engine, which
+/// refuses the rule even where CEL absorbs it (`|| true`).
+fn overflow(op: &str) -> ExecutionError {
+    unsupported(format!(
+        "quantity overflow: the {op}() result needs more significant digits than an i128 holds, \
+         which kube-cel does not support"
+    ))
 }
 
 /// A sum or difference: its value must stay within [`SUPPORTED_SCALE`]
 /// (`5e1000 + 5e1000` is 1e1001), and it is the apiserver's pointer result.
-fn arithmetic_result(amount: Amount) -> ResolveResult {
-    if !in_range(&amount) {
+fn arithmetic_result(repr: Repr) -> ResolveResult {
+    if !in_range(&repr.amount()) {
         return Err(unsupported(
             "the result has a scale outside ±1000, which kube-cel does not support".to_owned(),
         ));
     }
     Ok(Value::Opaque(Arc::new(KubeQuantity {
-        amount,
+        repr: Mutex::new(repr),
         from_arithmetic: true,
     })))
 }
@@ -835,22 +934,22 @@ fn arithmetic_result(amount: Amount) -> ResolveResult {
 /// `<Quantity>.isGreaterThan(<Quantity>) -> bool`
 pub(crate) fn cel_is_greater_than(This(this): This<Value>, other: Value) -> ResolveResult {
     let a = extract_quantity(&this)?;
-    let b = extract_quantity(&other)?;
-    Ok(Value::Bool(a > b))
+    let b = extract_quantity(&other)?.amount();
+    Ok(Value::Bool(a.compare(b) == Ordering::Greater))
 }
 
 /// `<Quantity>.isLessThan(<Quantity>) -> bool`
 pub(crate) fn cel_is_less_than(This(this): This<Value>, other: Value) -> ResolveResult {
     let a = extract_quantity(&this)?;
-    let b = extract_quantity(&other)?;
-    Ok(Value::Bool(a < b))
+    let b = extract_quantity(&other)?.amount();
+    Ok(Value::Bool(a.compare(b) == Ordering::Less))
 }
 
 /// `<Quantity>.compareTo(<Quantity>) -> int`
 pub(crate) fn cel_compare_to(This(this): This<Value>, other: Value) -> ResolveResult {
     let a = extract_quantity(&this)?;
-    let b = extract_quantity(&other)?;
-    let result = match a.cmp(b) {
+    let b = extract_quantity(&other)?.amount();
+    let result = match a.compare(b) {
         Ordering::Less => -1,
         Ordering::Equal => 0,
         Ordering::Greater => 1,
@@ -858,24 +957,25 @@ pub(crate) fn cel_compare_to(This(this): This<Value>, other: Value) -> ResolveRe
     Ok(Value::Int(result))
 }
 
-/// A quantity, or an int as Go's `NewQuantity(n, DecimalExponent)`.
-fn quantity_or_int(val: &Value, func: &str) -> Result<KubeQuantity, ExecutionError> {
+/// A quantity's value as it stands (Go passes it by value), or an int as Go's
+/// `NewQuantity(n, DecimalExponent)`.
+fn quantity_or_int(val: &Value, func: &str) -> Result<Amount, ExecutionError> {
     match val {
         Value::Opaque(o) => {
             let q = o
                 .downcast_ref::<KubeQuantity>()
                 .ok_or_else(|| ExecutionError::function_error(func, "expected Quantity or int"))?;
-            Ok(q.clone())
+            Ok(q.amount())
         }
-        Value::Int(n) => Ok(KubeQuantity::new(Amount::Int { value: *n, scale: 0 })),
-        Value::UInt(n) => Ok(KubeQuantity::new(match i64::try_from(*n) {
+        Value::Int(n) => Ok(Amount::Int { value: *n, scale: 0 }),
+        Value::UInt(n) => Ok(match i64::try_from(*n) {
             Ok(value) => Amount::Int { value, scale: 0 },
-            Err(_) => Amount::Dec {
+            Err(_) => Amount::Dec(Dec {
                 mantissa: i128::from(*n),
                 zeros: 0,
                 scale: 0,
-            },
-        })),
+            }),
+        }),
         _ => Err(ExecutionError::function_error(
             func,
             format!("expected Quantity or int, got {:?}", val.type_of()),
@@ -1281,6 +1381,137 @@ mod tests {
 
         let q = parse_quantity("-1500").unwrap();
         assert_eq!(q.to_string(), "-1500");
+    }
+
+    /// Go's `copy := *q` shares the receiver's `inf.Dec`, which `copy.Add`
+    /// updates in place (each checked against the apiserver).
+    #[test]
+    fn add_and_sub_share_the_receivers_dec() {
+        let holds = |expr: &str| assert_eq!(eval(expr), Value::Bool(true), "{expr}");
+        // 1.5Gi has a fraction: an inf.Dec, which the sum is written into.
+        holds("[quantity('1.5Gi')].all(q, q.add(1).compareTo(q) == 0)");
+        holds(
+            "[quantity('1.5Gi')].all(q, !q.add(1).isInteger() && q.compareTo(quantity('1610612737')) == 0)",
+        );
+        holds(
+            "[quantity('1.5Gi')].all(q, q.add(1).add(1) == quantity('1610612738') && q == quantity('1610612738'))",
+        );
+        holds(
+            "[quantity('1.5Gi')].all(q, q.sub(1).compareTo(quantity('1610612735')) == 0 && q.compareTo(quantity('1610612735')) == 0)",
+        );
+        // Its own inf.Dec on both sides: read before it is written.
+        holds(
+            "[quantity('1.5Gi')].all(q, q.add(q).compareTo(quantity('3Gi')) == 0 && q.compareTo(quantity('3Gi')) == 0)",
+        );
+        holds("[quantity('1.5Gi')].all(q, q.sub(q).compareTo(quantity('0')) == 0 && sign(q) == 0)");
+        // An int64Amount receiver: the copy is separate.
+        holds(
+            "[quantity('1')].all(q, q.add(1).compareTo(quantity('2')) == 0 && q.compareTo(quantity('1')) == 0)",
+        );
+        holds("[quantity('1')].all(q, q.add(quantity('1.5Gi')).isGreaterThan(q) && q.isInteger())");
+        // The argument is passed by value.
+        holds(
+            "[quantity('1.5Gi')].all(q, quantity('1').add(q).compareTo(quantity('1610612737')) == 0 && q.compareTo(quantity('1.5Gi')) == 0)",
+        );
+        // Separate quantities do not share.
+        holds(
+            "[quantity('1.5Gi'), quantity('1.5Gi')].all(q, q.add(1).compareTo(quantity('1610612737')) == 0)",
+        );
+    }
+
+    /// Go's `Cmp` converts an int64Amount receiver with `AsDec()` when the
+    /// other side holds an `inf.Dec` (each checked against the apiserver).
+    #[test]
+    fn comparing_with_a_dec_promotes_the_receiver() {
+        let holds = |expr: &str| assert_eq!(eval(expr), Value::Bool(true), "{expr}");
+        for cmp in [
+            "q.compareTo(quantity('1.5Gi')) < 0",
+            "q.isLessThan(quantity('1.5Gi'))",
+            "!q.isGreaterThan(quantity('1.5Gi'))",
+        ] {
+            holds(&format!("[quantity('1')].all(q, {cmp} && !q.isInteger())"));
+        }
+        // Once an inf.Dec, the receiver shares it with an add result.
+        holds("[quantity('1')].all(q, q.isLessThan(quantity('1.5Gi')) && q.add(1).compareTo(q) == 0)");
+        assert!(
+            crate::functions::eval(
+                "[quantity('1')].all(q, q.isLessThan(quantity('0.5Gi')) && q.asInteger() == 1)"
+            )
+            .is_err()
+        );
+        // Two int64Amounts, the argument, and `==` change nothing.
+        holds("[quantity('1')].all(q, q.compareTo(quantity('2')) < 0 && q.isInteger())");
+        holds("[quantity('1')].all(q, quantity('1.5Gi').compareTo(q) > 0 && q.isInteger())");
+        holds("[quantity('1')].all(q, q == quantity('1.5Gi') || q.isInteger())");
+    }
+
+    /// A zero term needs no alignment, however far apart the scales (each
+    /// checked against the apiserver).
+    #[test]
+    fn zero_terms_align_without_a_power_of_ten() {
+        for expr in [
+            "quantity('0').add(quantity('0e-1000')).compareTo(quantity('0')) == 0",
+            "quantity('0').sub(quantity('0e-1000')).compareTo(quantity('0')) == 0",
+            "quantity('0e1000').add(quantity('0e-1000')).compareTo(quantity('0')) == 0",
+            "quantity('5').add(quantity('0e-1000')).compareTo(quantity('5')) == 0",
+            "quantity('0e-1000').sub(quantity('5')).compareTo(quantity('-5')) == 0",
+            "quantity('0').add(quantity('0e-39')).asApproximateFloat() == 0.0",
+        ] {
+            assert_eq!(eval(expr), Value::Bool(true), "{expr}");
+        }
+    }
+
+    /// A number without digits is 0 on Go's int64Amount path and not a
+    /// quantity on its inf.Dec path, whatever the range (each checked against
+    /// the apiserver).
+    #[test]
+    fn digitless_numbers_follow_gos_path() {
+        for (s, quantity) in [
+            ("e-1001", false),
+            (".e-1001", false),
+            ("+.e-1001", false),
+            ("-e-1001", false),
+            ("e-10", false),
+            (".Pi", false),
+            ("e-9", true),
+            (".", true),
+            ("-", true),
+            ("+e5", true),
+            (".Ti", true),
+            ("e-4294967296", true),
+        ] {
+            match crate::functions::eval(&format!("isQuantity('{s}')")) {
+                Ok(v) => assert_eq!(v, Value::Bool(quantity), "{s}"),
+                // Past the supported range: a 0 kube-cel does not support.
+                Err(_) => assert!(quantity, "{s}"),
+            }
+        }
+        assert!(crate::functions::eval("isQuantity('e1001')").is_err());
+    }
+
+    /// The mantissa range is i128's, both ends (each checked against the
+    /// apiserver where it parses).
+    #[test]
+    fn mantissa_spans_i128() {
+        let min = i128::MIN;
+        let max = i128::MAX;
+        assert_eq!(eval(&format!("isQuantity('{min}')")), Value::Bool(true));
+        assert_eq!(eval(&format!("isQuantity('{max}')")), Value::Bool(true));
+        assert_eq!(
+            eval(&format!(
+                "sign(quantity('{min}')) == -1 && quantity('{min}').isLessThan(quantity('{max}'))"
+            )),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            eval(&format!(
+                "quantity('{min}').add(quantity('{max}')).compareTo(quantity('-1')) == 0"
+            )),
+            Value::Bool(true)
+        );
+        // One past either end is past what kube-cel supports.
+        assert!(crate::functions::eval("isQuantity('-170141183460469231731687303715884105729')").is_err());
+        assert!(crate::functions::eval("isQuantity('170141183460469231731687303715884105728')").is_err());
     }
 
     #[test]

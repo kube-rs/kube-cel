@@ -310,7 +310,9 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   the fraction digits, with an SI or binary suffix) within ±1000, and a mantissa
   within `i128`. The exponent is read as an int64, as in the apiserver,
   so one past that range is not a quantity (`isQuantity` false), as is a
-  malformed string however many digits it has. One within it but past ±1000,
+  malformed string however many digits it has, and a number without digits
+  that the apiserver parses on its `inf.Dec` path (`e-1001`; on its int64
+  path, `e1001` is a 0 past the range). One within it but past ±1000,
   before or after trailing zeros move into the scale (`1e1001`, `10e1000`,
   `0e2147483648`, a sum such as `5e1000 + 5e1000`), or a mantissa past `i128`, is
   an error from `quantity()` and `isQuantity()` alike, and a rule or VAP
@@ -354,6 +356,27 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   invalid (was valid: **fail-open**). `format.uuid()` is strfmt's `IsUUID`,
   whose dashes are each optional (`550e8400e29b41d4a716446655440000` is
   valid, was refused), with the apiserver's message.
+- A quantity's state is shared and updated as in the apiserver, which keeps
+  quantities behind pointers: `add` / `sub` copy the receiver, and a receiver
+  held as an `inf.Dec` shares it with the copy, which the result is written
+  into, so the receiver takes the new value
+  (`[quantity('1.5Gi')].all(q, q.add(1).compareTo(q) == 0)` is true). Before,
+  the receiver kept its value, and a rule reading it after `add` could pass
+  where the apiserver rejects (**fail-open**).
+- A quantity `add` / `sub` past `i128` fails the rule even where CEL absorbs
+  its error (`… || true`), as a quantity past the supported range does: the
+  apiserver has written the exact result into a receiver holding an
+  `inf.Dec`, which kube-cel cannot, so a later read of it could pass
+  (**fail-open**).
+- Quantity `add` / `sub` with a zero term no longer fails with `quantity
+  overflow` when the scales are far apart (`quantity('0').add(quantity('0e-1000'))`):
+  a zero needs no power of ten to align.
+- `compareTo`, `isGreaterThan` and `isLessThan` turn an `int64Amount`
+  receiver into an `inf.Dec` when the other side holds one, as Go's `Cmp`
+  does with `AsDec()`: `[quantity('1')].all(q, q.isLessThan(quantity('1.5Gi'))
+  && q.isInteger())` is false, and a later `asInteger()` an error. Before,
+  the receiver stayed an integer (**fail-open**). `==` compares copies and
+  changes neither side, as in the apiserver.
 - `format.datetime()` follows kube-openapi's `strfmt.IsDateTime`, which the
   apiserver calls, instead of RFC 3339: the offset is not range-checked
   (`+99:99`), any character may stand before the fraction digits
