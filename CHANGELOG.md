@@ -175,9 +175,21 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   - Validity in `isURL`, `url()` and `format.uri()` follows Go's
     `url.ParseRequestURI`: a bad `%` escape, a control character, a leading
     space or, for http/https, a second colon in the host is refused; an
-    absolute path (`/foo`) is accepted by `format.uri()`. Only validity: the
-    `url()` accessors (`getPort()`, ...) still read a WHATWG parse, and
-    `url('*')`, which Go accepts, still fails.
+    absolute path (`/foo`) is accepted by `format.uri()`.
+  - The `url()` accessors return what Go's `url.URL` holds, as in the
+    apiserver, which checks the string with `url.ParseRequestURI` and parses
+    it with `url.Parse`: `getHost()` / `getPort()` keep a default port
+    (`url('http://h:80/').getPort()` is `80`, it was empty), `getHost()` of a
+    path is empty (it was `localhost`), the host is unescaped but not
+    lowercased, a `#fragment` is split off, `//host/p` has a host,
+    `getEscapedPath()` keeps the path's own escaping, `getQuery()` skips a
+    pair with a `;` or a bad escape, `==` compares Go's `String()` (so
+    `url('http://H:80/') != url('http://h/')`), and `url('*')` converts. The
+    accessors read a WHATWG parse before, which differed in each of these: a
+    **fail-open**, now closed. A component that is not UTF-8 once unescaped
+    (`url('http://h%80x/').getHost()`) is an error (fail-closed), as a CEL
+    string here must be UTF-8. The `urls` feature no longer depends on the
+    `url` crate.
   - `format.byte()` requires standard, padded base64 and refuses the empty
     string; `format.date()` / `format.datetime()` refuse a `+`-signed
     component and a leap second.
@@ -297,8 +309,10 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
 - Quantities have a supported range: exponents and scales (the exponent less
   the fraction digits, with an SI or binary suffix) within ±1000, and a mantissa
   within `i128`. The exponent is read as an int64, as in the apiserver,
-  so one past that range is not a quantity (`isQuantity` false). One within it
-  but past ±1000 (`1e1001`, `0e2147483648`), or a mantissa past `i128`, is
+  so one past that range is not a quantity (`isQuantity` false), as is a
+  malformed string however many digits it has. One within it but past ±1000,
+  before or after trailing zeros move into the scale (`1e1001`, `10e1000`,
+  `0e2147483648`, a sum such as `5e1000 + 5e1000`), or a mantissa past `i128`, is
   an error from `quantity()` and `isQuantity()` alike, and a rule or VAP
   expression that reaches one fails with an `EvaluationError`, even where CEL
   absorbs the error (`… || true`). The apiserver parses these, narrowing the
@@ -308,6 +322,39 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   int32 range or a mantissa past `i128`, so `!isQuantity(s)` passed (a
   **fail-open**), and an exponent near the int32 bounds overflowed the scale
   arithmetic (a panic in debug builds, a wrapped scale in release).
+- Quantities follow k8s.io/apimachinery's `resource.Quantity`, which the
+  apiserver's library calls, representation included. Parsing is
+  `ParseQuantity`: no trimming (`isQuantity(' 1 ')` is false), `-` or `+`
+  alone is 0, a non-zero value finer than nano units rounds up to them
+  (`quantity('1e-10') == quantity('1n')`), and a binary quantity is capped at
+  the largest int64 (`10Ei`). `isInteger()` / `asInteger()` are `AsInt64()`:
+  only a quantity kept as an int64 times a non-negative power of ten
+  converts, so `1000m`, `1.0`, `1e40`, `1.5Gi` and `1Pi` are not integers
+  (D10: `asInteger()` returned a value where the apiserver errors).
+  `asApproximateFloat()` multiplies by Go's `math.Pow10` table (`0e1000` is
+  NaN). `add` / `sub` keep Go's representation, and `==` with an `add` / `sub`
+  result on the right is an error in the apiserver; here it is false, and a
+  rule reaching it is refused. `sign()` is a global function only, as in the
+  apiserver (`quantity(..).sign()` is an error). Each of these differed, most
+  of them **fail-open**.
+- `format.datetime()` follows kube-openapi's `strfmt.IsDateTime`, which the
+  apiserver calls, instead of RFC 3339: the offset is not range-checked
+  (`+99:99`), any character may stand before the fraction digits
+  (`10:30:00,5Z`, `10:30:0012Z`), and only the first two `t`-separated pieces
+  are read (`2024-01-15T10:30:00ZtXYZ`). `format.date()` / `format.datetime()`
+  report the apiserver's messages (`invalid date`, `invalid datetime`). Each
+  of these was refused here (fail-closed).
+- Semver follows blang/semver v4, which the apiserver calls: a numeric
+  pre-release identifier past a uint64 is not a version
+  (`isSemver('1.0.0-18446744073709551616')` is false, was true:
+  **fail-open**), and `==`, `compareTo`, `isGreaterThan` and `isLessThan`
+  ignore build metadata (`semver('1.0.0+a') == semver('1.0.0+b')`).
+- `isSorted()`, `min()` and `max()` compare as the apiserver's lists library
+  does: bytes order (a `format: byte` list, `[b'c', b'a'].min()`, was an
+  error), a pair cel-go cannot compare, such as one with a NaN, replaces or
+  unsorts nothing (`[1.0, double('NaN'), 0.5].min()` is 0.5, was an error),
+  and an element that is not comparable is an error even alone
+  (`[null].min()` and `[null, null].isSorted()` passed: **fail-open**).
 - `replace(old, new, n)` with a negative `n` replaces every match, as Go's
   `strings.Replace` does (it replaced nothing, a **fail-open**:
   `'aaa'.replace('a', 'b', -1) == 'aaa'` held). `replace`, `findAll`,
@@ -321,6 +368,13 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   rule reading where `sort()` put a `-0.0` among equal zeros. `lists.range(-1)`
   is `[]`, and a list holding a NaN sorts (no comparison with it is "less"),
   as in cel-go; both used to be errors (fail-closed).
+- A map literal that repeats a key keeps the last entry (`{'k': 1, 'k':
+  2}['k']` is 2), and `1` and `1u` are two keys, as in cel-go: `new_env()`
+  turns off `cel`'s duplicate-key error, which refused both (fail-closed).
+- README "apiserver divergence" table: a fail-closed row for what `cel`'s
+  standard `timestamp(string)` / `duration(string)` refuse and Go parses (an
+  offset of hour 24 or minute 60, a `,` fraction separator, a one-digit hour,
+  the units `µs` / `μs`).
 - A schema `format: duration` parses as the apiserver's
   `strfmt.ParseDuration`: Go's `time.ParseDuration` exactly (`µs` / `μs`, a
   `+` sign, every overflow refused), then strfmt's word units (`1d`,

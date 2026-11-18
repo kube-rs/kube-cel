@@ -1,31 +1,38 @@
 //! Shared value comparison and arithmetic helpers.
 //!
-//! Equality and ordering delegate to `cel::Value`'s own `PartialEq` and
-//! `PartialOrd`. Those upstream impls provide cross-type numeric coercion
-//! (Int/UInt/Float) and recurse structurally through List/Map, matching
-//! cel-go's standard equality/ordering semantics used by
-//! `traits.Lister.Contains()` and the `==` / `<` operators.
+//! Equality delegates to `cel::Value`'s own `PartialEq`, which provides
+//! cross-type numeric coercion (Int/UInt/Float) and recurses structurally
+//! through List/Map, matching cel-go's equality used by
+//! `traits.Lister.Contains()` and `==`. Ordering is cel-go's `Compare`
+//! ([`go_compare`]), which errors where `cel`'s `PartialOrd` has no answer and
+//! orders bytes, which it does not.
 
 #![allow(dead_code)]
 
 use cel::{ExecutionError, objects::Value};
 use std::cmp::Ordering;
 
-pub(crate) fn compare_values(a: &Value, b: &Value) -> Result<Ordering, ExecutionError> {
-    a.partial_cmp(b)
-        .ok_or_else(|| ExecutionError::function_error("compare", "cannot compare values of different types"))
+/// cel-go's `Compare` (`traits.Comparer`) of `a` with `b`, `None` where it
+/// returns an error: a NaN on either side, or types it does not order together.
+/// Int, uint and double compare with each other by value, bytes byte-wise.
+pub(crate) fn go_compare(a: &Value, b: &Value) -> Option<Ordering> {
+    match (a, b) {
+        (Value::Float(x), _) | (_, Value::Float(x)) if x.is_nan() => None,
+        (Value::Bytes(x), Value::Bytes(y)) => Some(x.cmp(y)),
+        (
+            Value::Int(_) | Value::UInt(_) | Value::Float(_),
+            Value::Int(_) | Value::UInt(_) | Value::Float(_),
+        )
+        | (Value::String(_), Value::String(_))
+        | (Value::Bool(_), Value::Bool(_))
+        | (Value::Timestamp(_), Value::Timestamp(_))
+        | (Value::Duration(_), Value::Duration(_)) => a.partial_cmp(b),
+        _ => None,
+    }
 }
 
 pub(crate) fn val_eq(a: &Value, b: &Value) -> bool {
     a == b
-}
-
-pub(crate) fn val_lt(a: &Value, b: &Value) -> Result<bool, ExecutionError> {
-    Ok(compare_values(a, b)? == Ordering::Less)
-}
-
-pub(crate) fn val_le(a: &Value, b: &Value) -> Result<bool, ExecutionError> {
-    Ok(compare_values(a, b)? != Ordering::Greater)
 }
 
 pub(crate) fn val_add(a: &Value, b: &Value) -> Result<Value, ExecutionError> {

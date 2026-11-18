@@ -4,22 +4,23 @@
 //! matching `k8s.io/apiserver/pkg/cel/library/urls.go`.
 
 use cel::{
-    ResolveResult,
+    ExecutionError, ResolveResult,
     extractors::This,
     objects::{Key, Map, Opaque, Value},
 };
-use std::{collections::HashMap, sync::Arc};
-use url::Url;
+use std::sync::Arc;
 
-use crate::functions::Registrar;
+use crate::functions::{Registrar, go_url::GoUrl};
 
-/// A Kubernetes CEL URL value wrapping `url::Url`.
+/// A Kubernetes CEL URL value: what Go's `url.ParseRequestURI` returns, as the
+/// apiserver keeps it.
 #[derive(Debug, Clone)]
-pub struct KubeUrl(Url);
+pub struct KubeUrl(GoUrl);
 
+/// The apiserver compares two URLs by their `String()`.
 impl PartialEq for KubeUrl {
     fn eq(&self, other: &Self) -> bool {
-        self.0.as_str() == other.0.as_str()
+        self.0.go_string() == other.0.go_string()
     }
 }
 
@@ -43,33 +44,19 @@ pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
     r.add("getQuery", get_query);
 }
 
-/// Validates and parses a URL string.
-/// Validity is Go's `url.ParseRequestURI`, as in the apiserver; the accessors
-/// then read a WHATWG parse, which refuses a few strings Go accepts (`*`).
-fn validate_and_parse(s: &str) -> Result<Url, String> {
-    crate::functions::go_url::parse_request_uri(s).map_err(|e| format!("invalid URL: {e}"))?;
-    // Accept absolute paths by prepending a dummy scheme
-    if s.starts_with('/') {
-        let full = format!("http://localhost{s}");
-        let parsed = Url::parse(&full).map_err(|e| format!("invalid URL: {e}"))?;
-        return Ok(parsed);
-    }
-
-    let parsed = Url::parse(s).map_err(|e| format!("invalid URL: {e}"))?;
-    Ok(parsed)
-}
-
-/// `url(<string>) -> URL`
-///
-/// Parses a string into a URL. The string must be an absolute URI or an absolute path.
+/// `url(<string>) -> URL`: checked with Go's `url.ParseRequestURI` (an absolute
+/// URI or an absolute path), then parsed with `url.Parse`, which splits off a
+/// `#fragment`, as the apiserver does. A string the second refuses
+/// (`'//[::1/x'`, which the first takes as a path) is an error though `isURL`
+/// holds for it.
 fn parse_url(s: Arc<String>) -> ResolveResult {
-    let parsed = validate_and_parse(&s).map_err(|e| cel::ExecutionError::function_error("url", e))?;
+    let invalid = |e: String| ExecutionError::function_error("url", format!("invalid URL: {e}"));
+    crate::functions::go_url::parse_request_uri(&s).map_err(invalid)?;
+    let parsed = crate::functions::go_url::parse_reference(&s).map_err(invalid)?;
     Ok(Value::Opaque(Arc::new(KubeUrl(parsed))))
 }
 
-/// `isURL(<string>) -> bool`
-///
-/// Returns true if the string is a valid URL (absolute URI or absolute path).
+/// `isURL(<string>) -> bool`: whether `url(s)` converts.
 fn is_url(s: Arc<String>) -> ResolveResult {
     Ok(Value::Bool(
         crate::functions::go_url::parse_request_uri(&s).is_ok(),
@@ -77,87 +64,68 @@ fn is_url(s: Arc<String>) -> ResolveResult {
 }
 
 /// Helper to extract KubeUrl from an opaque Value.
-fn extract_url(val: &Value) -> Result<&KubeUrl, cel::ExecutionError> {
+fn extract_url(val: &Value) -> Result<&KubeUrl, ExecutionError> {
     match val {
         Value::Opaque(o) => o
             .downcast_ref::<KubeUrl>()
-            .ok_or_else(|| cel::ExecutionError::function_error("url", "expected URL type")),
-        _ => Err(cel::ExecutionError::function_error("url", "expected URL type")),
+            .ok_or_else(|| ExecutionError::function_error("url", "expected URL type")),
+        _ => Err(ExecutionError::function_error("url", "expected URL type")),
     }
 }
 
-/// `<URL>.getScheme() -> string`
+/// A component as a CEL string. Go's unescaped components are bytes: one that
+/// is not UTF-8 (`%FF` in a host) is an error rather than a different string.
+fn text(function: &str, bytes: &[u8]) -> Result<Value, ExecutionError> {
+    std::str::from_utf8(bytes)
+        .map(|s| Value::String(Arc::new(s.to_owned())))
+        .map_err(|_| ExecutionError::function_error(function, "the URL component is not valid UTF-8"))
+}
+
+/// `<URL>.getScheme() -> string`: Go's `URL.Scheme`, lowercased; empty for a
+/// path.
 fn get_scheme(This(this): This<Value>) -> ResolveResult {
     let url = extract_url(&this)?;
-    // For absolute paths, the scheme is empty
-    let scheme = if url.0.scheme() == "http" && url.0.host_str() == Some("localhost") {
-        // This was an absolute path, no real scheme
-        ""
-    } else {
-        url.0.scheme()
-    };
-    Ok(Value::String(Arc::new(scheme.to_string())))
+    Ok(Value::String(Arc::new(url.0.scheme.clone())))
 }
 
-/// `<URL>.getHost() -> string`
-///
-/// Returns host including port and IPv6 brackets.
+/// `<URL>.getHost() -> string`: Go's `URL.Host`, unescaped, with the port and
+/// an IPv6 literal's brackets; empty without an authority.
 fn get_host(This(this): This<Value>) -> ResolveResult {
-    let url = extract_url(&this)?;
-    let host = url.0.host_str().unwrap_or("");
-    let result = match url.0.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_string(),
-    };
-    Ok(Value::String(Arc::new(result)))
+    text("getHost", &extract_url(&this)?.0.host)
 }
 
-/// `<URL>.getHostname() -> string`
-///
-/// Returns hostname without port and without IPv6 brackets.
+/// `<URL>.getHostname() -> string`: Go's `URL.Hostname()`, without the port and
+/// brackets.
 fn get_hostname(This(this): This<Value>) -> ResolveResult {
-    let url = extract_url(&this)?;
-    let hostname = url.0.host_str().unwrap_or("");
-    // Strip IPv6 brackets if present
-    let hostname = hostname
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-        .unwrap_or(hostname);
-    Ok(Value::String(Arc::new(hostname.to_string())))
+    text("getHostname", extract_url(&this)?.0.hostname())
 }
 
-/// `<URL>.getPort() -> string`
-///
-/// Returns port as a string. Empty string if no port specified.
+/// `<URL>.getPort() -> string`: Go's `URL.Port()`, as written (a scheme's
+/// default port is kept), empty when there is none.
 fn get_port(This(this): This<Value>) -> ResolveResult {
-    let url = extract_url(&this)?;
-    let port = url.0.port().map(|p| p.to_string()).unwrap_or_default();
-    Ok(Value::String(Arc::new(port)))
+    text("getPort", extract_url(&this)?.0.port())
 }
 
-/// `<URL>.getEscapedPath() -> string`
-///
-/// Returns the percent-encoded path.
+/// `<URL>.getEscapedPath() -> string`: Go's `URL.EscapedPath()`.
 fn get_escaped_path(This(this): This<Value>) -> ResolveResult {
     let url = extract_url(&this)?;
-    Ok(Value::String(Arc::new(url.0.path().to_string())))
+    Ok(Value::String(Arc::new(url.0.escaped_path())))
 }
 
-/// `<URL>.getQuery() -> map<string, list<string>>`
-///
-/// Returns query parameters as a map of string keys to lists of string values.
+/// `<URL>.getQuery() -> map<string, list<string>>`: Go's `URL.Query()`.
 fn get_query(This(this): This<Value>) -> ResolveResult {
     let url = extract_url(&this)?;
-    let mut raw: HashMap<String, Vec<Value>> = HashMap::new();
-    for (key, value) in url.0.query_pairs() {
-        raw.entry(key.into_owned())
-            .or_default()
-            .push(Value::String(Arc::new(value.into_owned())));
+    let mut map = std::collections::HashMap::new();
+    for (key, values) in url.0.query() {
+        let Value::String(key) = text("getQuery", &key)? else {
+            unreachable!("text makes a string")
+        };
+        let values = values
+            .iter()
+            .map(|v| text("getQuery", v))
+            .collect::<Result<Vec<_>, _>>()?;
+        map.insert(Key::String(key), Value::List(Arc::new(values)));
     }
-    let map = raw
-        .into_iter()
-        .map(|(k, v)| (Key::String(Arc::new(k)), Value::List(Arc::new(v))))
-        .collect();
     Ok(Value::Map(Map { map: Arc::new(map) }))
 }
 
@@ -246,6 +214,57 @@ mod tests {
             eval("url('https://example.com/path').getHost()"),
             Value::String(Arc::new("example.com".into()))
         );
+    }
+
+    #[test]
+    fn test_accessors_follow_go_url() {
+        // Expected values from k8s.io/apiserver v0.36.1 (go1.26.2 net/url).
+        let s = |expr: &str| match eval(expr) {
+            Value::String(s) => (*s).clone(),
+            other => panic!("{expr}: {other:?}"),
+        };
+        assert_eq!(s("url('http://h:80/').getPort()"), "80");
+        assert_eq!(s("url('http://h:80/').getHost()"), "h:80");
+        assert_eq!(s("url('/p').getHost()"), "");
+        assert_eq!(s("url('*').getEscapedPath()"), "*");
+        assert_eq!(s("url('http://h/a#frag').getEscapedPath()"), "/a");
+        assert_eq!(s("url('//foo/bar').getHostname()"), "foo");
+        assert_eq!(s("url('HTTP://H/').getHostname()"), "H");
+        assert_eq!(
+            s("url('http://[fe80::1%25en0]:8080/p').getHost()"),
+            "[fe80::1%en0]:8080"
+        );
+        assert_eq!(
+            s("url('http://[fe80::1%25en0]:8080/p').getHostname()"),
+            "fe80::1%en0"
+        );
+        assert_eq!(s("url('/a/b%2fc').getEscapedPath()"), "/a/b%2fc");
+        assert_eq!(s("url('/a b').getEscapedPath()"), "/a%20b");
+        assert_eq!(s("url('/café').getEscapedPath()"), "/caf%C3%A9");
+        assert_eq!(
+            s("url('http://h/?q=a+b%20c&q=%2B').getQuery()['q'].join('|')"),
+            "a b c|+"
+        );
+        assert_eq!(s("url('mailto:user@example.com').getHost()"), "");
+        assert_eq!(s("url('http://h:/').getPort()"), "");
+        assert_eq!(
+            eval("url('/a?x=1;y=2&z=3').getQuery() == {'z': ['3']}"),
+            Value::Bool(true)
+        );
+        // `==` compares Go's `String()`.
+        assert_eq!(
+            eval("url('http://H:80/') == url('http://h/')"),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            eval("url('http://h/p#a%20b') == url('http://h/p#a b')"),
+            Value::Bool(true)
+        );
+        // isURL holds, but url.Parse refuses the authority it now sees.
+        assert_eq!(eval("isURL('//[::1/x')"), Value::Bool(true));
+        assert!(crate::functions::eval("url('//[::1/x')").is_err());
+        // A host that is not UTF-8 once unescaped is an error.
+        assert!(crate::functions::eval("url('http://h%80x/').getHost()").is_err());
     }
 
     #[test]

@@ -8,11 +8,11 @@ use cel::{
     extractors::{Arguments, This},
     objects::{OptionalValue, Value},
 };
-use std::sync::Arc;
+use std::{cmp::Ordering, sync::Arc};
 
 use crate::functions::{
     Registrar,
-    value_ops::{val_add, val_eq, val_le, val_lt},
+    value_ops::{go_compare, val_add, val_eq},
 };
 
 /// Register all list extension functions.
@@ -32,13 +32,59 @@ pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
 /// `<list>.isSorted() -> bool`
 ///
 /// Returns true if the list elements are in sorted (ascending) order.
+/// As the apiserver's `isSorted`: every element must be one of cel-go's
+/// comparable types (`traits.Comparer`), and only a pair that compares greater
+/// unsorts the list; a pair cel-go cannot compare (a NaN, or two types it does
+/// not order together) does not.
 fn is_sorted(This(this): This<Arc<Vec<Value>>>) -> ResolveResult {
-    for window in this.windows(2) {
-        if !val_le(&window[0], &window[1])? {
+    let mut prev: Option<&Value> = None;
+    for next in this.iter() {
+        comparable("isSorted", next)?;
+        if let Some(prev) = prev
+            && go_compare(prev, next) == Some(Ordering::Greater)
+        {
             return Ok(Value::Bool(false));
         }
+        prev = Some(next);
     }
     Ok(Value::Bool(true))
+}
+
+/// An element of `isSorted`, `min` or `max`: one of cel-go's comparable types
+/// (`traits.Comparer`), else an error, as the apiserver gives even for a list
+/// of one (`[null].min()`).
+fn comparable(func: &str, v: &Value) -> Result<(), ExecutionError> {
+    match v {
+        Value::Int(_)
+        | Value::UInt(_)
+        | Value::Float(_)
+        | Value::String(_)
+        | Value::Bytes(_)
+        | Value::Bool(_)
+        | Value::Timestamp(_)
+        | Value::Duration(_) => Ok(()),
+        _ => Err(ExecutionError::function_error(
+            func,
+            format!("no such overload: {func} on a list of {}", v.type_of()),
+        )),
+    }
+}
+
+/// The apiserver's `cmp` behind `min` and `max`: the first element, replaced by
+/// each later one that compares `prefer` against the current result. A pair
+/// cel-go cannot compare replaces nothing (`[double('NaN'), 1.0].min()` is NaN).
+fn extreme(func: &str, list: &[Value], prefer: Ordering) -> ResolveResult {
+    let mut result: Option<&Value> = None;
+    for next in list {
+        comparable(func, next)?;
+        result = match result {
+            Some(current) if go_compare(current, next) != Some(prefer) => Some(current),
+            _ => Some(next),
+        };
+    }
+    result
+        .cloned()
+        .ok_or_else(|| ExecutionError::function_error(func, format!("{func} called on empty list")))
 }
 
 /// `<list>.sum() -> T`
@@ -77,19 +123,7 @@ fn no_arguments(name: &str, args: &[Value]) -> Result<(), ExecutionError> {
 /// global `min(..)`, and neither has kube-cel.
 fn list_min(This(this): This<Arc<Vec<Value>>>, Arguments(args): Arguments) -> ResolveResult {
     no_arguments("min", &args)?;
-    if this.is_empty() {
-        return Err(cel::ExecutionError::function_error(
-            "min",
-            "cannot call min on empty list",
-        ));
-    }
-    let mut result = this[0].clone();
-    for item in this.iter().skip(1) {
-        if val_lt(item, &result)? {
-            result = item.clone();
-        }
-    }
-    Ok(result)
+    extreme("min", &this, Ordering::Greater)
 }
 
 /// `<list>.max() -> T`
@@ -98,19 +132,7 @@ fn list_min(This(this): This<Arc<Vec<Value>>>, Arguments(args): Arguments) -> Re
 /// global `max(..)`, and neither has kube-cel.
 fn list_max(This(this): This<Arc<Vec<Value>>>, Arguments(args): Arguments) -> ResolveResult {
     no_arguments("max", &args)?;
-    if this.is_empty() {
-        return Err(cel::ExecutionError::function_error(
-            "max",
-            "cannot call max on empty list",
-        ));
-    }
-    let mut result = this[0].clone();
-    for item in this.iter().skip(1) {
-        if val_lt(&result, item)? {
-            result = item.clone();
-        }
-    }
-    Ok(result)
+    extreme("max", &this, Ordering::Less)
 }
 
 /// `<list>.indexOf(T) -> int`
@@ -341,5 +363,27 @@ mod tests {
     #[test]
     fn test_max_cross_numeric() {
         assert_eq!(eval("[1, 2.0, 3u].max()"), Value::UInt(3));
+    }
+
+    /// The apiserver's `isSorted` / `min` / `max` (checked against it): a pair
+    /// cel-go's `Compare` refuses changes nothing, bytes order, and an element
+    /// that is not comparable is an error even alone.
+    #[test]
+    fn test_comparisons_follow_the_apiserver() {
+        let err = |expr: &str| crate::functions::eval(expr).is_err();
+        assert_eq!(eval("[1.0, double('NaN'), 0.5].min()"), Value::Float(0.5));
+        assert_eq!(eval("[1.0, double('NaN')].max()"), Value::Float(1.0));
+        assert!(matches!(eval("[double('NaN'), 1.0].min()"), Value::Float(x) if x.is_nan()));
+        assert_eq!(eval("[double('NaN'), 1.0].isSorted()"), Value::Bool(true));
+        assert_eq!(eval("[1.0, double('NaN'), 0.5].isSorted()"), Value::Bool(true));
+        assert_eq!(eval("[2.0, 1.0, double('NaN')].isSorted()"), Value::Bool(false));
+        assert_eq!(eval("[b'c', b'a', b'b'].min() == b'a'"), Value::Bool(true));
+        assert_eq!(eval("[b'c', b'a', b'b'].max() == b'c'"), Value::Bool(true));
+        assert_eq!(eval("[b'a', b'b'].isSorted()"), Value::Bool(true));
+        assert_eq!(eval("[b'b', b'a'].isSorted()"), Value::Bool(false));
+        assert!(err("[null].min()"));
+        assert!(err("[null, null].isSorted()"));
+        assert!(err("[[1]].max()"));
+        assert!(err("[].min()"));
     }
 }

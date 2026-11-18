@@ -51,16 +51,17 @@ pub(crate) fn base_context() -> Context<'static, 'static> {
     crate::new_context(Arc::clone(validation_env())).expect("kube-cel's functions register onto its Env")
 }
 
-/// Runs a rule or VAP expression. One that reached a value kube-cel does not
-/// support (a quantity past its supported range, which the apiserver parses)
-/// fails, even where CEL absorbed the function's error (`|| true`, `exists`,
-/// an optional).
+/// Runs a rule or VAP expression. One that reached a quantity kube-cel cannot
+/// treat as the apiserver does (past its supported range, or compared with an
+/// `add`/`sub` result on the right) fails, even where CEL absorbed the error
+/// (`|| true`, `exists`, an optional).
 pub(crate) fn execute_supported(program: &Program, ctx: &Context<'_, '_>) -> cel::ResolveResult {
     match crate::functions::tracking_unsupported(|| program.execute(ctx)) {
         (Ok(_), true) => Err(cel::ExecutionError::function_error(
             "quantity",
-            "evaluation reached a quantity kube-cel does not support (an exponent or scale \
-             outside ±1000, or more significant digits than an i128 holds)",
+            "evaluation reached a quantity kube-cel cannot treat as the apiserver does (an \
+             exponent or scale outside ±1000, more significant digits than an i128 holds, or \
+             == / != with an add() / sub() result on the right)",
         )),
         (result, _) => result,
     }

@@ -189,6 +189,9 @@ impl cel::Library for EnvLibrary {
 /// - `string(<IP>)` and `string(<CIDR>)` (feature `ip`). As in the apiserver,
 ///   only the global form exists: `ip('10.0.0.1').string()` is an error.
 ///
+/// A map literal that repeats a key keeps the last entry, and `1` and `1u` are
+/// two keys, as in cel-go ([`Env::set_error_on_duplicate_map_keys`] is off).
+///
 /// The functions that live on a context are registered by [`new_context`],
 /// which needs an environment from this function. The result is an owned
 /// [`Env`], so `cel`'s extensions or overloads of your own can be added before
@@ -232,6 +235,8 @@ impl cel::Library for EnvLibrary {
 #[must_use]
 pub fn new_env() -> Env {
     let mut env = Env::stdlib();
+    // cel-go keeps the last of repeated map keys, and both of `1` and `1u`.
+    env.set_error_on_duplicate_map_keys(false);
     env.add_library(EnvLibrary)
         .expect("kube-cel's Env part does not collide with the cel standard library");
     env
@@ -368,6 +373,14 @@ mod tests {
         holds("[3, 1, 2].sortBy(x, -x) == [3, 2, 1]");
         // Kubernetes' own list functions sit alongside.
         holds("[3, 1, 2].isSorted() == false && [3, 1, 2].sum() == 6 && [3, 1, 2].min() == 1");
+    }
+
+    /// A map literal that repeats a key keeps the last entry, and `1` and `1u`
+    /// are two keys, as in cel-go (`cel` errors on both by default).
+    #[test]
+    fn repeated_map_keys_follow_cel_go() {
+        holds("{'k': 1, 'k': 2}['k'] == 2 && {1: 'a', 1: 'b'}.size() == 1");
+        holds("{dyn(1): 'a', dyn(1u): 'b'}.size() == 2 && {dyn(1): 'a', dyn(1u): 'b'}[1u] == 'b'");
     }
 
     #[test]

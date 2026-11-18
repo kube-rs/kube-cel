@@ -25,7 +25,6 @@ rustdoc-args = ["--cfg", "docsrs"]
 # the major-coupling note in the versioning policy if this constraint changes.
 cel = "0.16"
 regex = { version = "1", optional = true }
-url = { version = "2", optional = true }
 ipnet = { version = "2", optional = true }
 semver = { version = "1", optional = true }
 base64 = { version = "0.23", optional = true }
@@ -47,7 +46,7 @@ strings = []
 lists = []
 sets = []
 regex_funcs = ["dep:regex"]
-urls = ["dep:url"]
+urls = []
 ip = ["dep:ipnet"]
 semver_funcs = ["dep:semver"]
 format = []

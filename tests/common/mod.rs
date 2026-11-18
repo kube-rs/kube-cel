@@ -865,6 +865,24 @@ pub fn cases() -> Vec<ParityCase> {
             expect: Expect::Accept,
             note: "format:duration 1d is 24h (strfmt fallback) → ACCEPT",
         },
+        // The URL accessors return Go's `url.URL` fields: the apiserver checks
+        // the string with `url.ParseRequestURI`, parses it with `url.Parse`
+        // (fragment split off, `//host/p` with a host), and compares `String()`.
+        ParityCase {
+            kind: "PurlAccessors",
+            plural: "purlaccessorses",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "url('http://h:80/').getPort() == '80' && url('http://h:80/').getHost() == 'h:80' && url('/p').getHost() == '' && url('*').getEscapedPath() == '*' && url('http://h/a#frag').getEscapedPath() == '/a' && url('//foo/bar').getHostname() == 'foo' && url('HTTP://H/').getHostname() == 'H' && url('http://H:80/') != url('http://h/') && url('/a?x=1;y=2&z=3').getQuery() == {'z': ['3']} && url('http://exa%C3%A9mple.com/').getHost() == 'exaémple.com'",
+                    "message": "url"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "url accessors return Go's url.URL fields → ACCEPT",
+        },
         // `format.named` returns `optional(Format)`; `format.byte()` is strict
         // standard base64 (govalidator.IsBase64): padding required, empty refused.
         ParityCase {
@@ -933,6 +951,24 @@ pub fn cases() -> Vec<ParityCase> {
             expect: Expect::Accept,
             note: "non-ASCII in a date-time time field is invalid, not a panic → ACCEPT",
         },
+        // format.datetime() is kube-openapi's strfmt.IsDateTime: split on every
+        // `t` (two pieces read), `.` before the fraction digits is any
+        // character, the offset is not range-checked; apiserver messages.
+        ParityCase {
+            kind: "PfmtDatetimeStrfmt",
+            plural: "pfmtdatetimestrfmts",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "!format.datetime().validate('2024-01-15T10:30:00+99:99').hasValue() && !format.datetime().validate('2024-01-15T10:30:00,5Z').hasValue() && !format.datetime().validate('2024-01-15T10:30:0012Z').hasValue() && !format.datetime().validate('2024-01-15T10:30:00ZtXYZ').hasValue() && !format.datetime().validate('2024-01-15T12:30:00é00Z').hasValue() && format.datetime().validate('2024-01-15T23:59:60Z').hasValue() && format.datetime().validate('2024-01-15tt10:30:00Z').hasValue() && format.datetime().validate('x').value() == ['invalid datetime'] && format.date().validate('x').value() == ['invalid date']",
+                    "message": "datetime"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "format.datetime() follows strfmt.IsDateTime → ACCEPT",
+        },
         // A quantity's exponent is an int64 (past it, not a quantity); within
         // kube-cel's supported ±1000 exponents and scales parse as on the
         // apiserver, `0e1000` included.
@@ -950,6 +986,164 @@ pub fn cases() -> Vec<ParityCase> {
             object: json!({}),
             expect: Expect::Accept,
             note: "quantity exponents within ±1000 parse, past int64 do not → ACCEPT",
+        },
+        // Quantities follow k8s.io/apimachinery's `resource.Quantity`: no
+        // trimming, sub-nano values rounded up to nano, binary quantities
+        // capped at MaxInt64, `isInteger`/`asInteger` as Go's `AsInt64` (an
+        // int64Amount of a non-negative scale only), `asApproximateFloat` with
+        // Go's `math.Pow10`, and `sign` a global function.
+        ParityCase {
+            kind: "PquantGo",
+            plural: "pquantgos",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "!isQuantity(' 1 ') && isQuantity('-') && quantity('1e-10') == quantity('1n') && quantity('-1e-10') == quantity('-1n') && !quantity('1000m').isInteger() && !quantity('1.0').isInteger() && !quantity('1e40').isInteger() && quantity('1Ti').asInteger() == 1099511627776 && !quantity('1Pi').isInteger() && quantity('10Ei').compareTo(quantity('9223372036854775807')) == 0 && sign(quantity('-1')) == -1 && quantity('100n').asApproximateFloat() == 1.0000000000000001e-7 && quantity('500m').add(quantity('500m')).compareTo(quantity('1')) == 0 && quantity('1.5Gi').compareTo(quantity('1610612736')) == 0",
+                    "message": "quantity"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "quantities follow apimachinery's resource.Quantity → ACCEPT",
+        },
+        ParityCase {
+            kind: "PquantNaN",
+            plural: "pquantnans",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "quantity('0e1000').asApproximateFloat() == quantity('0e1000').asApproximateFloat()",
+                    "message": "nan"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Reject,
+            note: "0e1000 is 0 × Pow10(1000), NaN, unequal to itself → REJECT",
+        },
+        ParityCase {
+            kind: "PquantAsInt64",
+            plural: "pquantasint64s",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "quantity('500m').add(quantity('500m')).asInteger() == 1",
+                    "message": "asInteger"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Reject,
+            note: "500m + 500m is 1000 × 10^-3, which AsInt64 refuses: an error → REJECT",
+        },
+        // The apiserver's `Equal` asserts a `Quantity` value on the right; the
+        // pointer an `add`/`sub` returns makes `==` an error there.
+        ParityCase {
+            kind: "PquantEqPointer",
+            plural: "pquanteqpointers",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "quantity('2') == quantity('1').add(1)", "message": "eq" }]
+            }),
+            object: json!({}),
+            expect: Expect::Reject,
+            note: "== with an add/sub result on the right is an error → REJECT",
+        },
+        ParityCase {
+            kind: "PquantSignMember",
+            plural: "pquantsignmembers",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "quantity('1').sign() == 1", "message": "sign" }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "sign is a global function only → rejected at registration",
+        },
+        // Semver follows blang/semver v4: a numeric pre-release identifier is
+        // a uint64, and comparison and `==` ignore build metadata.
+        ParityCase {
+            kind: "PsemverBlang",
+            plural: "psemverblangs",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "!isSemver('1.0.0-18446744073709551616') && !isSemver('1.0.0-99999999999999999999999', true) && isSemver('1.0.0-18446744073709551615') && semver('1.0.0+a') == semver('1.0.0+b') && semver('1.0.0-rc.1+build.2').compareTo(semver('1.0.0-rc.1')) == 0 && !semver('1.0.0+b').isGreaterThan(semver('1.0.0+a')) && !semver('1.0.0').isLessThan(semver('1.0.0+a'))",
+                    "message": "semver"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "semver follows blang/semver v4 → ACCEPT",
+        },
+        // isSorted / min / max as the apiserver's lists library: a pair
+        // cel-go cannot compare (a NaN) replaces or unsorts nothing, bytes
+        // order, and every element must be comparable, even alone. (On a
+        // bytes literal the apiserver's cost estimate refuses the rule, so
+        // bytes come from a bounded `format: byte` list.)
+        ParityCase {
+            kind: "PlistCompare",
+            plural: "plistcompares",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "[double('NaN'), 1.0].isSorted() && [1.0, double('NaN'), 0.5].min() == 0.5 && [1.0, double('NaN')].max() == 1.0 && [double('NaN'), 1.0].min() != 1.0",
+                    "message": "compare"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "NaN pairs are skipped in isSorted/min/max → ACCEPT",
+        },
+        ParityCase {
+            kind: "PlistBytesMin",
+            plural: "plistbytesmins",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "l": {
+                        "type": "array",
+                        "maxItems": 3,
+                        "items": { "type": "string", "format": "byte", "maxLength": 8 }
+                    }
+                },
+                "x-kubernetes-validations": [{
+                    "rule": "self.l.min().size() == 1 && self.l.max() == b'c' && !self.l.isSorted()",
+                    "message": "bytes"
+                }]
+            }),
+            object: json!({ "l": ["Yw==", "YQ==", "Yg=="] }),
+            expect: Expect::Accept,
+            note: "format: byte list elements are bytes, which min/max/isSorted order → ACCEPT",
+        },
+        ParityCase {
+            kind: "PlistNullMin",
+            plural: "plistnullmins",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "[null].min() == null", "message": "null" }]
+            }),
+            object: json!({}),
+            expect: Expect::Reject,
+            note: "null is not comparable, even as the only element → REJECT",
+        },
+        ParityCase {
+            kind: "PlistNullSorted",
+            plural: "plistnullsorteds",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "[null, null].isSorted()", "message": "null" }]
+            }),
+            object: json!({}),
+            expect: Expect::Reject,
+            note: "isSorted on nulls is an error → REJECT",
         },
         // ── strings / format vs cel-go v0.26 ──────────────────────────────────
         // kube-cel keeps its own strings and format libraries; the apiserver's
@@ -1162,6 +1356,25 @@ pub fn cases() -> Vec<ParityCase> {
             object: json!({ "l": [1, 3, 2] }),
             expect: Expect::Accept,
             note: "lists sort/reverse/slice/range evaluate → ACCEPT",
+        },
+        // A map literal that repeats a key keeps the last entry, and `1` and
+        // `1u` are two keys, as in cel-go; `cel` refuses both by default. (Both
+        // keys print as `1`, so their order in `%s` follows map iteration, on
+        // the apiserver too: only the size is checked.)
+        ParityCase {
+            kind: "PmapDupKeys",
+            plural: "pmapdupkeyses",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "{'k': 1, 'k': 2}['k'] == 2 && {1: 'a', 1: 'b'}.size() == 1 && '%s'.format([{1: 'a', 1u: 'b'}]).size() == 14",
+                    "message": "keys"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "repeated map keys keep the last entry, 1 and 1u stay apart → ACCEPT",
         },
         // `sort()` and `sortBy()` order equal keys as Go's `sort.Slice` does
         // (go1.26.2): kept in order up to 12 elements, reordered from 13.

@@ -13,8 +13,27 @@ use std::{cmp::Ordering, sync::Arc};
 use crate::functions::Registrar;
 
 /// A Kubernetes CEL Semver value wrapping `semver::Version`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct KubeSemver(semver::Version);
+
+impl KubeSemver {
+    /// blang/semver v4's `Version.Compare`, which the apiserver calls: build
+    /// metadata takes no part (`1.0.0+a` and `1.0.0+b` compare equal), unlike
+    /// `semver::Version`'s `Ord`.
+    fn compare(&self, other: &Self) -> Ordering {
+        let (a, b) = (&self.0, &other.0);
+        (a.major, a.minor, a.patch, &a.pre).cmp(&(b.major, b.minor, b.patch, &b.pre))
+    }
+}
+
+/// The apiserver's `Equal` is blang's `EQ`, `Compare(..) == 0`.
+impl PartialEq for KubeSemver {
+    fn eq(&self, other: &Self) -> bool {
+        self.compare(other) == Ordering::Equal
+    }
+}
+
+impl Eq for KubeSemver {}
 
 impl Opaque for KubeSemver {
     fn runtime_type_name(&self) -> &str {
@@ -80,12 +99,26 @@ fn is_lenient(args: &[Value]) -> bool {
 }
 
 /// Parse a semver string, using strict or lenient mode.
-fn do_parse(s: &str, lenient: bool) -> Result<semver::Version, semver::Error> {
-    if lenient {
+fn do_parse(s: &str, lenient: bool) -> Result<semver::Version, String> {
+    let version = if lenient {
         semver::Version::parse(&normalize(s))
     } else {
         semver::Version::parse(s)
     }
+    .map_err(|e| e.to_string())?;
+    // blang/semver reads a numeric pre-release identifier as a uint64;
+    // `semver` takes any length.
+    if !version.pre.is_empty()
+        && let Some(id) = version
+            .pre
+            .split('.')
+            .find(|id| id.bytes().all(|b| b.is_ascii_digit()) && id.parse::<u64>().is_err())
+    {
+        return Err(format!(
+            "numeric pre-release identifier {id} is larger than a uint64"
+        ));
+    }
+    Ok(version)
 }
 
 /// `semver(<string>) -> Semver`
@@ -140,14 +173,14 @@ fn semver_patch(This(this): This<Value>) -> ResolveResult {
 pub(crate) fn semver_is_greater_than(This(this): This<Value>, other: Value) -> ResolveResult {
     let a = extract_semver(&this)?;
     let b = extract_semver(&other)?;
-    Ok(Value::Bool(a.0 > b.0))
+    Ok(Value::Bool(a.compare(b) == Ordering::Greater))
 }
 
 /// `<Semver>.isLessThan(<Semver>) -> bool`
 pub(crate) fn semver_is_less_than(This(this): This<Value>, other: Value) -> ResolveResult {
     let a = extract_semver(&this)?;
     let b = extract_semver(&other)?;
-    Ok(Value::Bool(a.0 < b.0))
+    Ok(Value::Bool(a.compare(b) == Ordering::Less))
 }
 
 /// `<Semver>.compareTo(<Semver>) -> int`
@@ -156,7 +189,7 @@ pub(crate) fn semver_is_less_than(This(this): This<Value>, other: Value) -> Reso
 pub(crate) fn semver_compare_to(This(this): This<Value>, other: Value) -> ResolveResult {
     let a = extract_semver(&this)?;
     let b = extract_semver(&other)?;
-    let result = match a.0.cmp(&b.0) {
+    let result = match a.compare(b) {
         Ordering::Less => -1,
         Ordering::Equal => 0,
         Ordering::Greater => 1,
@@ -188,6 +221,36 @@ mod tests {
         assert_eq!(eval("isSemver('01.01.01')"), Value::Bool(false));
         assert_eq!(eval("isSemver(' 1.0.0')"), Value::Bool(false));
         assert_eq!(eval("isSemver('1.0.0 ')"), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_follows_blang_semver() {
+        // A numeric pre-release identifier must fit a uint64 (F6).
+        assert_eq!(eval("isSemver('1.0.0-18446744073709551615')"), Value::Bool(true));
+        assert_eq!(eval("isSemver('1.0.0-18446744073709551616')"), Value::Bool(false));
+        assert_eq!(
+            eval("isSemver('1.0.0-99999999999999999999999', true)"),
+            Value::Bool(false)
+        );
+        assert!(crate::functions::eval("semver('1.0.0-18446744073709551616')").is_err());
+        // Build metadata takes no part in comparison or equality.
+        assert_eq!(eval("semver('1.0.0+a') == semver('1.0.0+b')"), Value::Bool(true));
+        assert_eq!(
+            eval("semver('1.0.0+a').compareTo(semver('1.0.0'))"),
+            Value::Int(0)
+        );
+        assert_eq!(
+            eval("semver('1.0.0+b').isGreaterThan(semver('1.0.0+a'))"),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            eval("semver('1.0.0-rc.1').isLessThan(semver('1.0.0-rc.1+x'))"),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            eval("semver('1.0.0-rc.1') == semver('1.0.0-rc.2')"),
+            Value::Bool(false)
+        );
     }
 
     #[test]

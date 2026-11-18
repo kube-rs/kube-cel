@@ -322,6 +322,15 @@ fn no_type_checker_fails_open() {
         assert_fails_open("family(ip('1.2.3.4')) == 4");
         assert_fails_open("true || ip('1.2.3.4').string() == ''");
     }
+    // A literal `format()` call: the apiserver's string-format validator,
+    // which runs after the type check, refuses more arguments than clauses and
+    // an argument a clause cannot take. At runtime cel-go ignores the extra
+    // argument, as kube-cel does.
+    #[cfg(feature = "format")]
+    {
+        assert_fails_open("'%s'.format([1, 2]) == '1'");
+        assert_fails_open("true || '%d'.format(['a']) == ''");
+    }
     // An undeclared identifier in a branch that is never evaluated. A CRD rule
     // has no `authorizer` (a policy variable); the functions called on it are
     // declared for CRD rules too, so only the identifier is wrong.
@@ -540,6 +549,8 @@ fn quantity_arithmetic_past_i128_fails_closed() {
 fn quantity_past_supported_range_fails_closed() {
     for rule in [
         "isQuantity('1e1001')",
+        "isQuantity('10e1000')",
+        "quantity('5e1000').add(quantity('5e1000')).compareTo(quantity('1e1000')) > 0",
         "!isQuantity('1e4294967296')",
         "quantity('1e4294967296') == quantity('1')",
         "isQuantity('12345678901234567890123456789012345678901')",
@@ -557,6 +568,7 @@ fn quantity_past_supported_range_fails_closed() {
         "true || isQuantity('1e1001')",
         "isQuantity('1e1000') && isQuantity('1e-1000')",
         "!isQuantity('1e9223372036854775808')",
+        "!isQuantity('99999999999999999999999999999999999999999999999999+-1')",
     ] {
         assert!(run_rule(rule).is_ok(), "{rule}");
     }
@@ -576,6 +588,85 @@ fn quantity_past_supported_range_fails_closed() {
         .map(|r| r.passed)
         .collect();
     assert_eq!(passed, [false, true]);
+}
+
+// ── Standard timestamp() / duration() parsing — fails CLOSED ───────────────
+// apiserver: cel-go parses with Go's `time.Parse(time.RFC3339, ..)` and
+//            `time.ParseDuration`, which take an offset of hour 24 or minute
+//            60 (normalized: `+23:60` is `+24:00`), a `,` before the fraction,
+//            a one-digit hour, and the units `µs` / `μs` (k8s.io/apiserver
+//            v0.36.1 `MustBaseEnvSet(1.36)`).
+// kube-cel:  `cel`'s standard conversions refuse them: EvaluationError.
+
+#[test]
+fn stdlib_time_parsing_fails_closed() {
+    for rule in [
+        "timestamp('2024-01-15T10:30:00+24:00') == timestamp('2024-01-14T10:30:00Z')",
+        "timestamp('2024-01-15T10:30:00+23:60') == timestamp('2024-01-14T10:30:00Z')",
+        "timestamp('2024-01-15T10:30:00-24:00') == timestamp('2024-01-16T10:30:00Z')",
+        "timestamp('2024-01-15T10:30:00+00:60') == timestamp('2024-01-15T09:30:00Z')",
+        "'%s'.format([timestamp('2024-01-15T10:30:00+24:00')]) == '2024-01-15T10:30:00+24:00'",
+        "timestamp('2024-01-15T10:30:00,5Z') == timestamp('2024-01-15T10:30:00.5Z')",
+        "timestamp('2024-01-15T1:30:00Z') == timestamp('2024-01-15T01:30:00Z')",
+        "duration('1µs') == duration('1us')",
+        "duration('1μs') == duration('1us')",
+    ] {
+        let errors = run_rule(rule).unwrap_err();
+        assert!(
+            errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
+            "{rule}: {errors:?}"
+        );
+    }
+}
+
+// ── URL components that are not UTF-8 — fail CLOSED ────────────────────────
+// apiserver: `getHost()`, `getHostname()` and `getQuery()` return Go's unescaped
+//            bytes as a string, valid UTF-8 or not (`url('http://h%80x/')`
+//            has the host bytes `h\x80x`; k8s.io/apiserver v0.36.1).
+// kube-cel:  a CEL string must be UTF-8, so such a component is an
+//            EvaluationError rather than a different string.
+
+#[test]
+#[cfg(feature = "urls")]
+fn url_component_not_utf8_fails_closed() {
+    for rule in [
+        "url('http://h%80x/').getHost() != 'x'",
+        "url('http://h%80x/').getHostname() != 'x'",
+        "url('/p?k=%FF').getQuery().size() == 1",
+    ] {
+        let errors = run_rule(rule).unwrap_err();
+        assert!(
+            errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
+            "{rule}: {errors:?}"
+        );
+    }
+    // The other components are written escaped, so they are always UTF-8.
+    assert!(run_rule("url('http://h%80x/p%FF').getEscapedPath() == '/p%FF'").is_ok());
+}
+
+// ── Quantity `!=` with an add/sub result on the right — fails CLOSED ────────
+// apiserver: `add` / `sub` return a pointer, which the right side of `Equal`
+//            refuses: `quantity('2') == quantity('1').add(1)` is an error, while
+//            `!=` is true (k8s.io/apiserver v0.36.1 `MustBaseEnvSet(1.36)`).
+// kube-cel:  `cel`'s `==` and `!=` share one comparison that cannot fail or
+//            tell them apart, so the comparison is noted and the rule refused
+//            either way.
+
+#[test]
+#[cfg(feature = "quantity")]
+fn quantity_ne_with_arithmetic_on_the_right_fails_closed() {
+    for rule in [
+        "quantity('2') != quantity('1').add(1)",
+        "quantity('2') == quantity('1').add(1)",
+    ] {
+        let errors = run_rule(rule).unwrap_err();
+        assert!(
+            errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
+            "{rule}: {errors:?}"
+        );
+    }
+    // On the left it compares, as in the apiserver.
+    assert!(run_rule("quantity('1').add(1) == quantity('2')").is_ok());
 }
 
 // ── `oldSelf` registration rules — fail CLOSED since 0.9; used to fail OPEN ──

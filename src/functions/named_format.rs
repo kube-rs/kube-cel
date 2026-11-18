@@ -441,7 +441,7 @@ fn validate_uri(s: &str) -> Vec<String> {
     // apiserver `format.uri()` is Go's `url.ParseRequestURI` (absolute URI or
     // absolute path), reporting its error.
     match crate::functions::go_url::parse_request_uri(s) {
-        Ok(()) => Vec::new(),
+        Ok(_) => Vec::new(),
         Err(e) => vec![e],
     }
 }
@@ -523,50 +523,34 @@ fn all_ascii_digits(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// kube-openapi's `strfmt.IsDate`, Go's `time.Parse("2006-01-02", s)`, with the
+/// apiserver's message.
 fn validate_date(s: &str) -> Vec<String> {
-    let mut errors = Vec::new();
-    // YYYY-MM-DD format
-    if s.len() != 10 {
-        errors.push("must be a date in YYYY-MM-DD format".to_string());
-        return errors;
+    if is_date(s) {
+        Vec::new()
+    } else {
+        vec!["invalid date".to_string()]
     }
+}
+
+fn is_date(s: &str) -> bool {
+    // YYYY-MM-DD, digits only, and a day that exists in that month.
     let bytes = s.as_bytes();
-    if bytes[4] != b'-' || bytes[7] != b'-' {
-        errors.push("must be a date in YYYY-MM-DD format".to_string());
-        return errors;
+    if s.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
     }
-    let year_str = &s[0..4];
-    let month_str = &s[5..7];
-    let day_str = &s[8..10];
-
+    let (year_str, month_str, day_str) = (&s[0..4], &s[5..7], &s[8..10]);
     if !all_ascii_digits(year_str) || !all_ascii_digits(month_str) || !all_ascii_digits(day_str) {
-        errors.push("must be a date in YYYY-MM-DD format".to_string());
-        return errors;
+        return false;
     }
-
-    let Ok(year) = year_str.parse::<u32>() else {
-        errors.push("must be a date in YYYY-MM-DD format".to_string());
-        return errors;
+    let (Ok(year), Ok(month), Ok(day)) = (
+        year_str.parse::<u32>(),
+        month_str.parse::<u32>(),
+        day_str.parse::<u32>(),
+    ) else {
+        return false;
     };
-    let Ok(month) = month_str.parse::<u32>() else {
-        errors.push("must be a date in YYYY-MM-DD format".to_string());
-        return errors;
-    };
-    let Ok(day) = day_str.parse::<u32>() else {
-        errors.push("must be a date in YYYY-MM-DD format".to_string());
-        return errors;
-    };
-
-    if !(1..=12).contains(&month) {
-        errors.push("must be a valid date".to_string());
-        return errors;
-    }
-
-    let max_day = days_in_month(year, month);
-    if day < 1 || day > max_day {
-        errors.push("must be a valid date".to_string());
-    }
-    errors
+    (1..=12).contains(&month) && (1..=days_in_month(year, month)).contains(&day)
 }
 
 fn days_in_month(year: u32, month: u32) -> u32 {
@@ -588,143 +572,83 @@ fn is_leap_year(year: u32) -> bool {
     (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
-// -- DateTime (RFC 3339) --
+// -- DateTime --
 
+/// kube-openapi's `strfmt.IsDateTime`, with the apiserver's message. It is not
+/// RFC 3339: the string is lowercased and split on every `t`, and only the
+/// first two pieces are read (`2024-01-15T10:30:00ZtXYZ` passes); the time
+/// matches `^([0-9]{2}):([0-9]{2}):([0-9]{2})(.[0-9]+)?(z|([+-][0-9]{2}:[0-9]{2}))$`,
+/// whose `.` is any character but a newline (`10:30:00,5Z`, `10:30:0012Z`), and
+/// the offset is not range-checked (`+99:99`); only the hour, minute and second
+/// are (`<= "23"`, `<= "59"`, `<= "59"`).
 fn validate_datetime(s: &str) -> Vec<String> {
-    let mut errors = Vec::new();
-    if s.is_empty() {
-        errors.push("must be a valid RFC 3339 date-time".to_string());
-        return errors;
+    if is_date_time(s) {
+        Vec::new()
+    } else {
+        vec!["invalid datetime".to_string()]
     }
-
-    // Find the 'T' or 't' separator
-    let t_pos = s.find(['T', 't']);
-    let Some(t_pos) = t_pos else {
-        errors.push("must be a valid RFC 3339 date-time".to_string());
-        return errors;
-    };
-
-    // Validate date part
-    let date_part = &s[..t_pos];
-    let date_errors = validate_date(date_part);
-    if !date_errors.is_empty() {
-        errors.push("must be a valid RFC 3339 date-time".to_string());
-        return errors;
-    }
-
-    // Parse time part (after T)
-    let time_part = &s[t_pos + 1..];
-    if time_part.is_empty() {
-        errors.push("must be a valid RFC 3339 date-time".to_string());
-        return errors;
-    }
-
-    // Find timezone offset
-    let (time_str, tz_str) = find_timezone(time_part);
-
-    // Timezone is required
-    if tz_str.is_empty() {
-        errors.push("must have a timezone".to_string());
-        return errors;
-    }
-
-    // Validate time
-    if !validate_time_str(time_str) {
-        errors.push("must be a valid RFC 3339 date-time".to_string());
-        return errors;
-    }
-
-    // Validate timezone
-    if !validate_timezone(tz_str) {
-        errors.push("must be a valid RFC 3339 date-time".to_string());
-    }
-
-    errors
 }
 
-fn find_timezone(time_part: &str) -> (&str, &str) {
-    // Z or z
-    if let Some(pos) = time_part.rfind(['Z', 'z']) {
-        return (&time_part[..pos], &time_part[pos..]);
-    }
-    // +HH:MM or -HH:MM — search from end, skip fractional seconds
-    // Look for last '+' or '-' that is after the time digits
-    for (i, ch) in time_part.char_indices().rev() {
-        if (ch == '+' || ch == '-') && i >= 2 {
-            return (&time_part[..i], &time_part[i..]);
-        }
-    }
-    (time_part, "")
+fn is_date_time(s: &str) -> bool {
+    // Lowercasing only matters for `T` and `Z`: no other character lowercases
+    // to `t`, `z`, a digit, `:`, `+`, `-` or a newline, and Go's simple case
+    // mapping keeps one character per character.
+    let mut pieces = s.split(['T', 't']);
+    let date = pieces.next().unwrap_or_default();
+    let Some(time) = pieces.next() else {
+        return false;
+    };
+    is_date(date) && is_strfmt_time(time)
 }
 
-fn validate_time_str(s: &str) -> bool {
-    if s.len() < 8 {
+/// The time piece of [`is_date_time`].
+fn is_strfmt_time(t: &str) -> bool {
+    let b = t.as_bytes();
+    let two_digits = |i: usize| b.get(i..i + 2).is_some_and(|d| d.iter().all(u8::is_ascii_digit));
+    if !(two_digits(0)
+        && b.get(2) == Some(&b':')
+        && two_digits(3)
+        && b.get(5) == Some(&b':')
+        && two_digits(6))
+    {
         return false;
     }
-    let bytes = s.as_bytes();
-    if bytes[2] != b':' || bytes[5] != b':' {
+    // Two ASCII digits compare as strings the way they do as numbers.
+    if &t[0..2] > "23" || &t[3..5] > "59" || &t[6..8] > "59" {
         return false;
     }
-    // Check the digits as bytes: a multi-byte character can straddle byte 8,
-    // and slicing the `str` there would panic. Once they are ASCII digits the
-    // `str` slices below fall on character boundaries.
-    let digits = |r: std::ops::Range<usize>| bytes[r].iter().all(u8::is_ascii_digit);
-    if !digits(0..2) || !digits(3..5) || !digits(6..8) {
-        return false;
-    }
-    let Ok(hour) = s[0..2].parse::<u32>() else {
-        return false;
-    };
-    let Ok(min) = s[3..5].parse::<u32>() else {
-        return false;
-    };
-    let Ok(sec) = s[6..8].parse::<u32>() else {
-        return false;
-    };
-    // strfmt's datetime regex caps seconds at "59" (`m[3] <= "59"` in
-    // IsDateTime), so leap seconds (sec == 60) are rejected — matching the
-    // apiserver, not bare RFC 3339.
-    if hour > 23 || min > 59 || sec > 59 {
-        return false;
-    }
-    // Check fractional seconds if present
-    if s.len() > 8 {
-        if bytes[8] != b'.' {
-            return false;
+    let rest = &t[8..];
+    // The zone ends the string: `z` (or `Z`), else `[+-]dd:dd`.
+    let fraction = match rest.strip_suffix(['z', 'Z']) {
+        Some(fraction) => fraction,
+        None => {
+            let Some(at) = rest.len().checked_sub(6) else {
+                return false;
+            };
+            let zone = &rest.as_bytes()[at..];
+            let offset = matches!(zone[0], b'+' | b'-')
+                && zone[1].is_ascii_digit()
+                && zone[2].is_ascii_digit()
+                && zone[3] == b':'
+                && zone[4].is_ascii_digit()
+                && zone[5].is_ascii_digit();
+            if !offset {
+                return false;
+            }
+            // The zone is ASCII, so `at` is a character boundary.
+            &rest[..at]
         }
-        let frac = &s[9..];
-        if frac.is_empty() || !frac.chars().all(|c| c.is_ascii_digit()) {
-            return false;
+    };
+    // `(.[0-9]+)?`: nothing, or any character but a newline and then digits.
+    let mut chars = fraction.chars();
+    match chars.next() {
+        None => true,
+        Some('\n') => false,
+        Some(_) => {
+            let digits = chars.as_str();
+            !digits.is_empty() && digits.bytes().all(|d| d.is_ascii_digit())
         }
     }
-    true
-}
-
-fn validate_timezone(tz: &str) -> bool {
-    if tz == "Z" || tz == "z" {
-        return true;
-    }
-    // +HH:MM or -HH:MM
-    if tz.len() != 6 {
-        return false;
-    }
-    let bytes = tz.as_bytes();
-    if bytes[0] != b'+' && bytes[0] != b'-' {
-        return false;
-    }
-    if bytes[3] != b':' {
-        return false;
-    }
-    if !all_ascii_digits(&tz[1..3]) || !all_ascii_digits(&tz[4..6]) {
-        return false;
-    }
-    let Ok(hour) = tz[1..3].parse::<u32>() else {
-        return false;
-    };
-    let Ok(min) = tz[4..6].parse::<u32>() else {
-        return false;
-    };
-    hour <= 23 && min <= 59
 }
 
 // ---------------------------------------------------------------------------
@@ -999,7 +923,7 @@ mod tests {
         assert_invalid("format.date().validate('2024-01-+1')"); // '+' day
     }
 
-    // -- DateTime (RFC 3339) --
+    // -- DateTime --
 
     #[test]
     fn test_datetime_valid() {
@@ -1024,11 +948,48 @@ mod tests {
     }
 
     #[test]
-    fn test_datetime_non_ascii_time_is_invalid() {
+    fn test_datetime_non_ascii_time() {
         // 'é' straddles byte 8 of the time; slicing the str there panicked.
         assert_invalid("format.datetime().validate('2024-01-15T12:30:0é:00Z')");
-        assert_invalid("format.datetime().validate('2024-01-15T12:30:00é00Z')");
         assert_invalid("format.datetime().validate('2024-01-15T1é:30:00Z')");
+        // After the seconds, strfmt's `.` takes any character but a newline.
+        assert_valid("format.datetime().validate('2024-01-15T12:30:00é00Z')");
+        assert_invalid("format.datetime().validate('2024-01-15T12:30:00\\n00Z')");
+    }
+
+    #[test]
+    fn test_datetime_follows_strfmt() {
+        // kube-openapi's IsDateTime, not RFC 3339 (each checked against the
+        // apiserver).
+        for valid in [
+            "2024-01-15T10:30:00+99:99",
+            "2024-01-15T10:30:00,5Z",
+            "2024-01-15T10:30:0012Z",
+            "2024-01-15T10:30:00ZtXYZ",
+            "2024-01-15t10:30:00z",
+            "2024-01-15T10:30:00İ5Z",
+        ] {
+            assert_valid(&format!("format.datetime().validate('{valid}')"));
+        }
+        for invalid in [
+            "2024-01-15T10:30:00",
+            "2024-01-15T24:00:00Z",
+            "2024-01-15T23:59:60Z",
+            "2024-01-15T10:30:00.Z",
+            "2024-01-15T10:30:00+0530",
+            "2024-01-15tt10:30:00Z",
+            "2023-02-29T10:30:00Z",
+        ] {
+            assert_invalid(&format!("format.datetime().validate('{invalid}')"));
+        }
+        assert_eq!(
+            eval("format.datetime().validate('x').value()"),
+            eval("['invalid datetime']")
+        );
+        assert_eq!(
+            eval("format.date().validate('x').value()"),
+            eval("['invalid date']")
+        );
     }
 
     // -- format.named() --
