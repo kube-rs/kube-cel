@@ -208,7 +208,7 @@ pub(crate) fn parse_date(s: &str) -> Option<chrono::DateTime<chrono::FixedOffset
 /// `2024-01-15T10:30:00ZtXYZ`) is refused too, where the apiserver binds an
 /// error that only fails a rule reading the field. kube-cel cannot bind such an error (`==` on it would answer), so
 /// that, and an offset of 24 hours or more that `chrono` cannot hold, is
-/// fail-closed (README "apiserver divergence").
+/// fail-closed (`docs/apiserver-divergence.md`).
 pub(crate) fn binding_error(value: &serde_json::Value, format: &SchemaFormat) -> Option<String> {
     let s = value.as_str()?;
     match format {

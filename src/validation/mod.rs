@@ -157,7 +157,7 @@ pub enum ErrorKind {
     /// refuses. The apiserver rejects such a CRD at registration. Also a
     /// quantity update whose result depends on evaluation order, which the
     /// apiserver accepts and kube-cel cannot evaluate in its order
-    /// (fail-closed; see the README "apiserver divergence" table).
+    /// (fail-closed; see `docs/apiserver-divergence.md`).
     CompilationFailure,
     /// A malformed rule: JSON that is not a rule, or a field the apiserver
     /// refuses at registration beside the expressions (a blank or multi-line

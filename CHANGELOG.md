@@ -4,8 +4,8 @@
 
 Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14))
 and brings the validation engine's verdicts in line with kube-apiserver
-v1.36.1 (cel-go v0.26), failing closed where it cannot match them (README
-"apiserver divergence"): each verdict change below was checked against a live
+v1.36.1 (cel-go v0.26), failing closed where it cannot match them
+([`docs/apiserver-divergence.md`](docs/apiserver-divergence.md)): each verdict change below was checked against a live
 apiserver (`just parity`). "Breaking" lists what code and rules may need to
 change, with migrations. Most entries under "Fixed" close a
 **fail-open** divergence (kube-cel passed what the apiserver rejects) and need
@@ -219,7 +219,7 @@ no migration for rules the apiserver accepts.
         .evaluate_compiled(&compiled);
     ```
     A policy with `spec.variables` cannot be evaluated client-side until
-    kube-cel models them (README "apiserver divergence").
+    kube-cel models them (`docs/apiserver-divergence.md`).
 
 ### Added
 
@@ -335,12 +335,12 @@ Each group below follows kube-apiserver v1.36.1, checked live.
     `authorizer` in a VAP `messageExpression`, `params` in a VAP expression
     of a policy without a `paramKind`, `variables` in any VAP expression,
     `dyn` or `duration` used as a value, or the construction of an
-    undeclared message type (`Foo{a: 1}`) is refused; the README "no type
-    checker" row no longer covers them. Field names are not checked
+    undeclared message type (`Foo{a: 1}`) is refused; the "no type
+    checker" divergence row no longer covers them. Field names are not checked
     (`self.undeclared` on a schema without it still needs a type checker).
     `.x` naming a macro's variable `x` is refused too, though the apiserver
     reads the macro's `x`: `cel` looks a leading-dot name up outside the
-    macros, so it cannot evaluate it alike (README "apiserver divergence",
+    macros, so it cannot evaluate it alike (`docs/apiserver-divergence.md`,
     fail-closed). The declared type names and message types were measured
     one by one, as values and as constructions, so a name the apiserver
     accepts (`google.protobuf.Struct.FieldsEntry`, `duration{}`) compiles.
@@ -352,8 +352,8 @@ Each group below follows kube-apiserver v1.36.1, checked live.
     with those compilation errors alone; their `field_path` names the schema
     node (`spec.items[*]`, a map value as `*`). A valid rule past the depth
     cap still passes under a shallow object: the apiserver has no nesting
-    limit (v1.36.1 registers a 400-level CRD), so the README no longer
-    claims it rejects deep schemas.
+    limit (v1.36.1 registers a 400-level CRD), so the divergence table no
+    longer claims it rejects deep schemas.
   - A rule reading `oldSelf` in the items of a list that is not
     `x-kubernetes-list-type: map` (at any depth below it), and
     `optionalOldSelf` set on a rule that does not read `oldSelf`, are
@@ -383,7 +383,7 @@ Each group below follows kube-apiserver v1.36.1, checked live.
     at its field, as the apiserver refuses the object; it used to bind as a
     string that a rule could compare. One the check takes and the parse
     refuses, or with an offset of 24 hours or more, is refused too, where the
-    apiserver fails only a rule reading it (fail-closed, a README row). A
+    apiserver fails only a rule reading it (fail-closed, a divergence row). A
     schema `format: duration` parses as the apiserver's
     `strfmt.ParseDuration`: Go's `time.ParseDuration` exactly (`µs` / `μs`, a
     `+` sign, every overflow refused), then strfmt's word units (`1d`,
@@ -488,8 +488,8 @@ Each group below follows kube-apiserver v1.36.1, checked live.
     they were accepted, a **fail-open**, now closed. A `,` before the
     fraction, a one-digit hour, an offset minute of 60 and the units `µs` /
     `μs` convert; they were errors. A timestamp offset of 24 hours or more,
-    which Go takes, is still an error (fail-closed, a README "apiserver
-    divergence" row).
+    which Go takes, is still an error (fail-closed, a divergence
+    row).
   - A literal argument the conversion refuses fails to compile, reached or not
     (`true || duration('1e3s') > duration('0s')`), as the apiserver's
     literal validators refuse it at registration; so does `timestamp(n)` with
@@ -765,7 +765,9 @@ Each group below follows kube-apiserver v1.36.1, checked live.
   them to call, and they took those names from a user's own functions. Each
   pair now needs a feature that implements it (`strings` or `lists`;
   `semver_funcs` or `quantity`).
-- **README "apiserver divergence" table.** The apiserver does **not**
+- **"apiserver divergence" table**, moved from the README to
+  `docs/apiserver-divergence.md` (the README keeps a summary of the policy and
+  its two exception classes). The apiserver does **not**
   evaluate `cel.bind` (its base environment has no `ext.Bindings`); it
   rejects the CRD at registration. The `sortBy` and two-variable
   comprehension rows are gone (both now evaluate), and rows for `math.*`,

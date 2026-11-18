@@ -20,7 +20,7 @@
 //! The behaviour is the left operand's, as on the apiserver: `self.s == [..]`
 //! is a set comparison. `[..] == self.s` is a positional one there, but
 //! `cel`'s own lists and maps are unequal to any of another type until `cel`
-//! carries cel-rust#462 (see the README divergence table).
+//! carries cel-rust#462 (see `docs/apiserver-divergence.md`).
 //!
 //! Only `self` and `oldSelf` of a CRD rule are built so; a policy's values
 //! have no schema.

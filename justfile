@@ -213,7 +213,8 @@ release:
         exit 1
     fi
     # Work left for this release is marked "before X.Y.Z" where it lives (the
-    # README rows and tests that wait on cel-rust, the cel floor in Cargo.toml).
+    # divergence rows and tests that wait on cel-rust, the cel floor in
+    # Cargo.toml).
     # git grep exits 1 when nothing matches; anything else is an error.
     if markers=$(git grep -n -i -F "before ${version}" "${sha}" -- . ':!CHANGELOG.md'); then
         echo "⚠ notes marked \"before ${version}\" remain; finish them first:"

@@ -22,8 +22,8 @@
 //!   formatter.
 //!
 //! Each test locks the *current measured* behavior so a divergence cannot
-//! change silently. The human-readable summary lives in the README
-//! "apiserver divergence" table — keep the two in sync.
+//! change silently. The human-readable summary lives in
+//! `docs/apiserver-divergence.md`; keep the two in sync.
 //!
 //! Measured against `cel` 0.16, with ground truth from the apiserver's base
 //! CEL environment (`k8s.io/apiserver` v0.36.1,
@@ -497,8 +497,8 @@ fn map_list_four_keys_with_a_float_fail_closed() {
 /// `baseList.Contains` asks the searched value. cel-rust#462 fixes both (the
 /// `in` direction included). These assertions pin today's verdicts, each the
 /// apiserver's opposite (Go oracle, kind v1.36.1), so they fail once `cel`
-/// carries the fix: then drop this test and its README row, before 0.9.0.
-/// kube-cel builds no workaround.
+/// carries the fix: then drop this test and its row in `docs/apiserver-divergence.md`, before
+/// 0.9.0. kube-cel builds no workaround.
 ///
 /// One more waits on the same fix: `+` onto a plain list field binds what it
 /// adds under the list's items on the apiserver, while kube-cel binds a plain
@@ -552,14 +552,14 @@ fn cel_built_operand_until_cel_rust_462() {
         let kube_cel_accepts = Validator::new().validate(&schema(rule), &object, None).is_ok();
         assert_eq!(
             kube_cel_accepts, !apiserver_accepts,
-            "{rule}: no longer diverges; if `cel` now carries cel-rust#462, drop this test and its README row"
+            "{rule}: no longer diverges; if `cel` now carries cel-rust#462, drop this test and its row in docs/apiserver-divergence.md"
         );
     }
     // The added int is a double on the apiserver, an int in kube-cel today.
     let rule = "type((self.l + dyn([1]))[0]) == int";
     assert!(
         Validator::new().validate(&schema(rule), &object, None).is_ok(),
-        "{rule}: no longer diverges; if plain lists now bind as schema-aware lists, drop this assertion and its part of the README row"
+        "{rule}: no longer diverges; if plain lists now bind as schema-aware lists, drop this assertion and its part of the row in docs/apiserver-divergence.md"
     );
 }
 
@@ -1508,8 +1508,8 @@ fn double_of_a_decimal_go_reads_two_ways_fails_closed() {
 /// `cel` reads them in that offset, cel-go and the CEL spec in UTC.
 /// cel-rust#460 fixes it. These assertions pin today's verdicts, each the
 /// apiserver's opposite (Go oracle), so they fail once `cel` carries the fix:
-/// then drop this test and its README row, before 0.9.0. kube-cel builds no
-/// workaround.
+/// then drop this test and its row in `docs/apiserver-divergence.md`, before
+/// 0.9.0. kube-cel builds no workaround.
 #[test]
 fn timestamp_getters_without_a_zone_until_cel_rust_460() {
     // `2024-01-01T02:30:00+05:45` is `2023-12-31T20:45:00Z`.

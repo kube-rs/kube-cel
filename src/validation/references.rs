@@ -39,7 +39,7 @@
 //! It checks names only. Type, arity and call-shape errors (`[1, 2.0].isSorted()`,
 //! `'a'.lowerAscii(42)`, `family(ip(..))`), and a field a type does not have
 //! (`variables.undeclared` in a policy), still need a type checker: see the
-//! README "apiserver divergence" table. The one call shape it does refuse is a
+//! `docs/apiserver-divergence.md`. The one call shape it does refuse is a
 //! global `min(..)`/`max(..)`: the apiserver only has `<list>.min()`/
 //! `<list>.max()`, while `cel` evaluates any member function called as a
 //! global, so `min([1, 2])` would run.

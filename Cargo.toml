@@ -11,16 +11,17 @@ homepage = "https://kube.rs"
 keywords = ["kubernetes", "cel", "kube", "validation"]
 categories = ["api-bindings"]
 # What the crate ships: the library, its tests and examples (so `cargo test`
-# works from the package; the README points at tests/apiserver_divergence.rs),
-# and the docs. CI config, rustfmt.toml and the justfile stay in the repo, and
-# so does the sweep runner, which only reads candidate cases under the repo's
-# target/sweep. (`include` takes a `!` pattern; `exclude` beside it is ignored.)
+# works from the package; docs/apiserver-divergence.md points at
+# tests/apiserver_divergence.rs), and the docs. CI config, rustfmt.toml and the
+# justfile stay in the repo, and so does the sweep runner, which only reads
+# candidate cases under the repo's target/sweep. (`include` takes a `!` pattern; `exclude` beside it is ignored.)
 include = [
     "/src/**",
     "/tests/**",
     "!/tests/sweep_kind.rs",
     "/examples/**",
     "/README.md",
+    "/docs/apiserver-divergence.md",
     "/CHANGELOG.md",
     "/LICENSE",
 ]
