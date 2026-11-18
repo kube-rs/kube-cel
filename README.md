@@ -162,24 +162,28 @@ Or use the convenience method:
 let result = Validator::new().validate_with_defaults(&schema, &object, None);
 ```
 
-### Root-level variables
+### Root rules
 
-Bind CRD-level `apiVersion`, `apiGroup`, `kind` variables for root-level rules:
+A rule on the root schema reads the object's own `apiVersion`, `kind` and
+`metadata.name` through `self`, as on the apiserver, which declares no
+`apiVersion`, `apiGroup` or `kind` variable (a rule naming one does not
+compile). `RootContext` and the `*_with_context` methods, which bound them
+before 0.9, are deprecated and ignore it.
 
 ```rust
-use kube_cel::{Validator, RootContext};
-
-let root_ctx = RootContext {
-    api_version: "apps/v1".into(),
-    api_group: "apps".into(),
-    kind: "Deployment".into(),
-};
-let result = Validator::new().validate_with_context(&schema, &object, None, Some(&root_ctx));
+let schema = json!({
+    "type": "object",
+    "x-kubernetes-validations": [
+        {"rule": "self.apiVersion.startsWith('apps/') && self.kind == 'Deployment'"}
+    ]
+});
+let object = json!({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "web"}});
+let result = Validator::new().validate(&schema, &object, None);
 ```
 
 ## ValidatingAdmissionPolicy (VAP)
 
-Evaluate [ValidatingAdmissionPolicy](https://kubernetes.io/docs/reference/access-authn-authz/validating-admission-policy/) CEL expressions client-side — no API server required. Supports all VAP variables except `authorizer`.
+Evaluate [ValidatingAdmissionPolicy](https://kubernetes.io/docs/reference/access-authn-authz/validating-admission-policy/) CEL expressions client-side — no API server required. Binds every VAP variable but `authorizer` (it needs an API server) and `variables` (`spec.variables` is not modelled, so an expression naming it does not compile); `namespaceObject` is `null` when not set, and `params` is declared for a policy with a `paramKind` (`has_param_kind`, or a parameter object set) and `null` without an object.
 
 ```rust
 use kube_cel::{VapEvaluator, VapExpression, AdmissionRequest};
@@ -203,10 +207,14 @@ let results = evaluator.evaluate(&[VapExpression {
 assert!(results[0].passed);
 ```
 
-For repeated evaluation, pre-compile expressions:
+For repeated evaluation, pre-compile a policy's expressions once, stating
+whether it has a `paramKind`, then evaluate them per request:
 
 ```rust
-let compiled = evaluator.compile_expressions(&expressions);
+let compiled = VapEvaluator::builder()
+    .has_param_kind(true)
+    .build()
+    .compile_expressions(&expressions);
 let results = evaluator.evaluate_compiled(&compiled); // no re-parsing
 ```
 
@@ -378,7 +386,7 @@ divergences are pinned by
 | `math.*` (cel-go `ext.Math`) | rejects the CRD at registration (not in the base environment) | `CompilationFailure` | fail-closed |
 | `isIPv4`, `isIPv6`, `isCIDRv4`, `isCIDRv6` (kube-cel functions before 0.9) | rejects the CRD at registration (not in the base environment) | `CompilationFailure` | fail-closed |
 | `base64.*` (cel-go `ext.Encoders`), `jsonpatch.escapeKey` | rejects the CRD at registration (not in the base environment; `jsonpatch` is a MutatingAdmissionPolicy library) | `CompilationFailure` | fail-closed |
-| An undeclared identifier: a typo (`slef`), a macro's variable outside the macro (or bound as `.x` and read as `x`), a policy variable in a CRD rule (`authorizer`, `object`), `self` in a policy, `authorizer` in a policy's `messageExpression`, `params` in a policy without a `paramKind`, `variables` in a policy without `spec.variables`, a type name the apiserver does not declare (`dyn`, `duration`); and `__result__` as a standard macro's variable ("iteration variable overwrites accumulator variable") | rejects the CRD or policy at registration ("undeclared reference") | `CompilationFailure` | fail-closed |
+| An undeclared identifier: a typo (`slef`), a macro's variable outside the macro (or bound as `.x` and read as `x`), a policy variable in a CRD rule (`authorizer`, `object`), `apiVersion` / `apiGroup` / `kind` in a CRD rule (kube-cel's `RootContext` bound them before 0.9), `self` in a policy, `authorizer` in a policy's `messageExpression`, `params` in a policy without a `paramKind`, `variables` in a policy without `spec.variables`, a type name the apiserver does not declare (`dyn`, `duration`); and `__result__` as a standard macro's variable ("iteration variable overwrites accumulator variable") | rejects the CRD or policy at registration ("undeclared reference") | `CompilationFailure` | fail-closed |
 | Global `min(..)` / `max(..)` | rejects the CRD at registration (only `<list>.min()` / `<list>.max()`) | `CompilationFailure` | fail-closed |
 | `variables` in a VAP with `spec.variables` (`variables.foo == 1`) | evaluates the policy's variables | `VapError`: kube-cel does not model `spec.variables`, so `variables` is never declared | fail-closed |
 | Names `cel` cannot evaluate: type names with no `cel` value (`net.IP`, `net.CIDR`, `google.protobuf.Empty`), `google.protobuf.NullValue.NULL_VALUE`, a message construction (`google.protobuf.Duration{seconds: 1}`), and `.x` naming a macro's variable `x` | evaluates (`type(ip('1.2.3.4')) == net.IP` holds) | compiles; `UnsupportedReference` where evaluation reaches it (`EvaluationError` for the construction) | fail-closed |

@@ -11,9 +11,11 @@ use crate::validation::compilation::CompiledSchema;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ScopeContext {
-    /// CRD `x-kubernetes-validations` — only `self`, `oldSelf`, and root vars.
+    /// CRD `x-kubernetes-validations` — only `self` and `oldSelf`.
     CrdValidation,
-    /// ValidatingAdmissionPolicy — `object`, `oldObject`, `request`, `params`, etc.
+    /// ValidatingAdmissionPolicy — `object`, `oldObject`, `request`,
+    /// `namespaceObject` and `authorizer`, and `params` and `variables`, which
+    /// a policy has with a `paramKind` and `spec.variables`.
     AdmissionPolicy,
 }
 
@@ -46,10 +48,11 @@ pub enum WarningKind {
 
 fn valid_variables(scope: ScopeContext) -> &'static [&'static str] {
     match scope {
-        ScopeContext::CrdValidation => &["self", "oldSelf", "apiVersion", "apiGroup", "kind"],
+        // As the apiserver declares them (v1.36.1). A policy's `params` and
+        // `variables` depend on its spec, which this check does not see, so
+        // both are taken.
+        ScopeContext::CrdValidation => &["self", "oldSelf"],
         ScopeContext::AdmissionPolicy => &[
-            "self",
-            "oldSelf",
             "object",
             "oldObject",
             "request",
@@ -296,6 +299,21 @@ mod tests {
             ScopeContext::AdmissionPolicy,
         );
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn crd_scope_flags_root_context_names() {
+        let warnings = check_rule_scope(
+            "kind == 'Deployment' && apiGroup == 'apps'",
+            ScopeContext::CrdValidation,
+        );
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+    }
+
+    #[test]
+    fn admission_policy_scope_flags_self() {
+        let warnings = check_rule_scope("self.x == oldSelf.x", ScopeContext::AdmissionPolicy);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
     }
 
     #[test]

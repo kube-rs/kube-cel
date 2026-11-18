@@ -200,6 +200,11 @@ fn undeclared_identifiers_fail_closed() {
     assert_rule_refused("true || object.x == 1");
     assert_rule_refused("self.items.all(x, x > 0) && (true || x == 1)");
     assert_rule_refused("true || [].all(i, v, slef)");
+    // kube-cel's `RootContext` bound these before 0.9; the apiserver
+    // declares none of them.
+    assert_rule_refused("true || apiVersion == 'v1'");
+    assert_rule_refused("true || apiGroup == ''");
+    assert_rule_refused("true || kind == 'Probe'");
 
     // The `messageExpression` of a rule that holds is checked too.
     let schema = json!({

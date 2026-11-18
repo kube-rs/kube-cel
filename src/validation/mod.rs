@@ -83,10 +83,18 @@ pub(crate) fn compile(
     Ok(program)
 }
 
-/// CRD-level context variables available at the root schema node.
+/// CRD-level values that kube-cel before 0.9 bound as the variables
+/// `apiVersion`, `apiGroup` and `kind` of root rules.
 ///
-/// These are derived from the CRD definition, not from the object being validated.
-/// Available as root-level CEL variables: `apiVersion`, `apiGroup`, `kind`.
+/// The apiserver declares no such variables: it rejects a CRD whose rule
+/// names one at registration, and kube-cel refuses the rule too
+/// ([`ErrorKind::CompilationFailure`]), so nothing reads these values. A root
+/// rule reads the object's own `self.apiVersion`, `self.kind` and
+/// `self.metadata.name` instead.
+#[deprecated(
+    since = "0.9.0",
+    note = "the apiserver declares no `apiVersion`, `apiGroup` or `kind` variable, so no rule can read them; read `self.apiVersion` / `self.kind` in a root rule"
+)]
 #[derive(Clone, Debug, Default)]
 pub struct RootContext {
     /// CRD API version (e.g., `"apps/v1"`).
@@ -566,23 +574,6 @@ impl Validator {
         object: &serde_json::Value,
         old_object: Option<&serde_json::Value>,
     ) -> Result<(), ValidationErrors> {
-        self.validate_with_context(schema, object, old_object, None)
-    }
-
-    /// Validate an object against a CRD schema's CEL validation rules, with optional root context.
-    ///
-    /// Like [`validate`](Self::validate), but also binds `apiVersion`, `apiGroup`, and `kind`
-    /// as root-level CEL variables when a [`RootContext`] is provided.
-    ///
-    /// Schema `default`s are applied to the object before evaluation, matching the
-    /// apiserver's admission order (defaults run before CEL rules).
-    pub fn validate_with_context(
-        &self,
-        schema: &serde_json::Value,
-        object: &serde_json::Value,
-        old_object: Option<&serde_json::Value>,
-        root_ctx: Option<&RootContext>,
-    ) -> Result<(), ValidationErrors> {
         let registration = registration_errors(schema);
         if !registration.is_empty() {
             return into_result(registration);
@@ -597,10 +588,32 @@ impl Validator {
             String::new(),
             &mut errors,
             &self.base_ctx,
-            root_ctx,
             0,
         );
         into_result(errors)
+    }
+
+    /// [`validate`](Self::validate); `root_ctx` is ignored.
+    ///
+    /// Before 0.9 this bound `apiVersion`, `apiGroup` and `kind` as variables
+    /// of root rules. The apiserver declares no such variables and rejects a
+    /// CRD whose rule names one, and so does kube-cel now
+    /// ([`ErrorKind::CompilationFailure`]), so nothing could read them. A root
+    /// rule reads the object's own `self.apiVersion`, `self.kind` and
+    /// `self.metadata.name`.
+    #[deprecated(
+        since = "0.9.0",
+        note = "no rule can read `apiVersion`, `apiGroup` or `kind`; use `validate` and read `self.apiVersion` / `self.kind` in a root rule"
+    )]
+    #[allow(deprecated)]
+    pub fn validate_with_context(
+        &self,
+        schema: &serde_json::Value,
+        object: &serde_json::Value,
+        old_object: Option<&serde_json::Value>,
+        _root_ctx: Option<&RootContext>,
+    ) -> Result<(), ValidationErrors> {
+        self.validate(schema, object, old_object)
     }
 
     /// Validate an object using a pre-compiled schema tree.
@@ -615,20 +628,6 @@ impl Validator {
         compiled: &CompiledSchema,
         object: &serde_json::Value,
         old_object: Option<&serde_json::Value>,
-    ) -> Result<(), ValidationErrors> {
-        self.validate_compiled_with_context(compiled, object, old_object, None)
-    }
-
-    /// Validate an object using a pre-compiled schema tree, with optional root context.
-    ///
-    /// Like [`validate_compiled`](Self::validate_compiled), but also binds `apiVersion`,
-    /// `apiGroup`, and `kind` as root-level CEL variables when a [`RootContext`] is provided.
-    pub fn validate_compiled_with_context(
-        &self,
-        compiled: &CompiledSchema,
-        object: &serde_json::Value,
-        old_object: Option<&serde_json::Value>,
-        root_ctx: Option<&RootContext>,
     ) -> Result<(), ValidationErrors> {
         let mut registration = Vec::new();
         registration_errors_compiled(compiled, "", None, &mut registration);
@@ -646,10 +645,26 @@ impl Validator {
             String::new(),
             &mut errors,
             &self.base_ctx,
-            root_ctx,
             0,
         );
         into_result(errors)
+    }
+
+    /// [`validate_compiled`](Self::validate_compiled); `root_ctx` is ignored,
+    /// as in [`validate_with_context`](Self::validate_with_context).
+    #[deprecated(
+        since = "0.9.0",
+        note = "no rule can read `apiVersion`, `apiGroup` or `kind`; use `validate_compiled` and read `self.apiVersion` / `self.kind` in a root rule"
+    )]
+    #[allow(deprecated)]
+    pub fn validate_compiled_with_context(
+        &self,
+        compiled: &CompiledSchema,
+        object: &serde_json::Value,
+        old_object: Option<&serde_json::Value>,
+        _root_ctx: Option<&RootContext>,
+    ) -> Result<(), ValidationErrors> {
+        self.validate_compiled(compiled, object, old_object)
     }
 
     /// Validate with schema defaults applied to the object first.
@@ -666,19 +681,21 @@ impl Validator {
         self.validate(schema, object, old_object)
     }
 
-    /// Validate with schema defaults applied and root context variables bound.
-    ///
-    /// Alias for [`validate_with_context`](Self::validate_with_context). As of 0.8,
-    /// that method applies schema defaults itself, so this is equivalent and
-    /// retained only for backward compatibility.
+    /// [`validate`](Self::validate); `root_ctx` is ignored, as in
+    /// [`validate_with_context`](Self::validate_with_context).
+    #[deprecated(
+        since = "0.9.0",
+        note = "no rule can read `apiVersion`, `apiGroup` or `kind`; use `validate` and read `self.apiVersion` / `self.kind` in a root rule"
+    )]
+    #[allow(deprecated)]
     pub fn validate_with_defaults_and_context(
         &self,
         schema: &serde_json::Value,
         object: &serde_json::Value,
         old_object: Option<&serde_json::Value>,
-        root_ctx: Option<&RootContext>,
+        _root_ctx: Option<&RootContext>,
     ) -> Result<(), ValidationErrors> {
-        self.validate_with_context(schema, object, old_object, root_ctx)
+        self.validate(schema, object, old_object)
     }
 
     // ── Schema-based walking (compiles on each call) ────────────────
@@ -692,7 +709,6 @@ impl Validator {
         path: String,
         errors: &mut Vec<ValidationError>,
         base_ctx: &Context<'_, '_>,
-        root_ctx: Option<&RootContext>,
         depth: usize,
     ) {
         if depth > crate::validation::compilation::MAX_SCHEMA_DEPTH {
@@ -709,15 +725,7 @@ impl Validator {
         }
         let cel_value = json_to_cel_with_schema(value, schema);
         let cel_old = old_value.map(|o| json_to_cel_with_schema(o, schema));
-        self.evaluate_validations(
-            schema,
-            &cel_value,
-            cel_old.as_ref(),
-            &path,
-            errors,
-            base_ctx,
-            root_ctx,
-        );
+        self.evaluate_validations(schema, &cel_value, cel_old.as_ref(), &path, errors, base_ctx);
 
         if let (Some(properties), Some(obj)) = (
             schema.get("properties").and_then(|p| p.as_object()),
@@ -734,7 +742,6 @@ impl Validator {
                         child_path,
                         errors,
                         base_ctx,
-                        None,
                         depth + 1,
                     );
                 }
@@ -764,7 +771,6 @@ impl Validator {
                     item_path,
                     errors,
                     base_ctx,
-                    None,
                     depth + 1,
                 );
             }
@@ -800,7 +806,6 @@ impl Validator {
                     child_path,
                     errors,
                     base_ctx,
-                    None,
                     depth + 1,
                 );
             }
@@ -817,7 +822,6 @@ impl Validator {
                         path.clone(),
                         errors,
                         base_ctx,
-                        root_ctx,
                         depth + 1,
                     );
                 }
@@ -825,7 +829,6 @@ impl Validator {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn evaluate_validations(
         &self,
         schema: &serde_json::Value,
@@ -834,10 +837,9 @@ impl Validator {
         path: &str,
         errors: &mut Vec<ValidationError>,
         base_ctx: &Context<'_, '_>,
-        root_ctx: Option<&RootContext>,
     ) {
         let compiled = compile_schema_validations(schema);
-        self.evaluate_compiled_results(&compiled, cel_value, cel_old, path, errors, base_ctx, root_ctx);
+        self.evaluate_compiled_results(&compiled, cel_value, cel_old, path, errors, base_ctx);
     }
 
     // ── CompiledSchema-based walking ────────────────────────────────
@@ -851,7 +853,6 @@ impl Validator {
         path: String,
         errors: &mut Vec<ValidationError>,
         base_ctx: &Context<'_, '_>,
-        root_ctx: Option<&RootContext>,
         depth: usize,
     ) {
         if depth > crate::validation::compilation::MAX_SCHEMA_DEPTH {
@@ -873,7 +874,6 @@ impl Validator {
             &path,
             errors,
             base_ctx,
-            root_ctx,
         );
 
         if let Some(obj) = value.as_object() {
@@ -888,7 +888,6 @@ impl Validator {
                         child_path,
                         errors,
                         base_ctx,
-                        None,
                         depth + 1,
                     );
                 }
@@ -907,7 +906,6 @@ impl Validator {
                     item_path,
                     errors,
                     base_ctx,
-                    None,
                     depth + 1,
                 );
             }
@@ -930,7 +928,6 @@ impl Validator {
                     child_path,
                     errors,
                     base_ctx,
-                    None,
                     depth + 1,
                 );
             }
@@ -949,7 +946,6 @@ impl Validator {
                 path.clone(),
                 errors,
                 base_ctx,
-                root_ctx,
                 depth + 1,
             );
         }
@@ -957,7 +953,6 @@ impl Validator {
 
     // ── Shared evaluation logic ─────────────────────────────────────
 
-    #[allow(clippy::too_many_arguments)]
     fn evaluate_compiled_results(
         &self,
         results: &[Result<CompilationResult, CompilationError>],
@@ -966,28 +961,12 @@ impl Validator {
         path: &str,
         errors: &mut Vec<ValidationError>,
         base_ctx: &Context<'_, '_>,
-        root_ctx: Option<&RootContext>,
     ) {
         // Create a node-level scope once with self/oldSelf bound
         let mut node_ctx = base_ctx.new_inner_scope();
         node_ctx.add_variable_from_value("self", cel_value.clone());
         if let Some(old) = cel_old {
             node_ctx.add_variable_from_value("oldSelf", old.clone());
-        }
-
-        if path.is_empty()
-            && let Some(rc) = root_ctx
-        {
-            node_ctx.add_variable_from_value(
-                "apiVersion",
-                cel::Value::String(std::sync::Arc::new(rc.api_version.clone())),
-            );
-            node_ctx.add_variable_from_value(
-                "apiGroup",
-                cel::Value::String(std::sync::Arc::new(rc.api_group.clone())),
-            );
-            node_ctx
-                .add_variable_from_value("kind", cel::Value::String(std::sync::Arc::new(rc.kind.clone())));
         }
 
         for result in results {
@@ -2328,52 +2307,82 @@ mod tests {
         assert!(validate_compiled(&compiled, &obj, None).is_ok());
     }
 
-    // ── RootContext tests ────────────────────────────────────────────
+    // ── RootContext (deprecated) ─────────────────────────────────────
 
+    /// The apiserver declares no `apiVersion`, `apiGroup` or `kind` variable,
+    /// so a rule naming one does not compile, with or without a
+    /// `RootContext` (checked on v1.36.1: "undeclared reference to 'kind'").
     #[test]
-    fn root_context_variables_bound() {
-        let schema = json!({
-            "type": "object",
-            "properties": {"name": {"type": "string"}},
-            "x-kubernetes-validations": [{
-                "rule": "apiVersion == 'apps/v1'",
-                "message": "wrong api version"
-            }]
-        });
-        let obj = json!({"name": "test"});
+    #[allow(deprecated)]
+    fn root_context_names_do_not_compile() {
         let root_ctx = RootContext {
             api_version: "apps/v1".into(),
             api_group: "apps".into(),
             kind: "Deployment".into(),
         };
-        assert!(
-            Validator::new()
-                .validate_with_context(&schema, &obj, None, Some(&root_ctx))
-                .is_ok()
-        );
+        for rule in [
+            "apiVersion == 'apps/v1'",
+            "apiGroup == 'apps'",
+            "true || kind == 'Deployment'",
+        ] {
+            let schema = json!({"type": "object", "x-kubernetes-validations": [{"rule": rule}]});
+            let compiled = crate::validation::compilation::compile_schema(&schema);
+            let validator = Validator::new();
+            for result in [
+                validator.validate(&schema, &json!({}), None),
+                validator.validate_with_context(&schema, &json!({}), None, Some(&root_ctx)),
+                validator.validate_with_defaults_and_context(&schema, &json!({}), None, Some(&root_ctx)),
+                validator.validate_compiled_with_context(&compiled, &json!({}), None, Some(&root_ctx)),
+            ] {
+                let errors = result.unwrap_err();
+                assert!(
+                    errors.iter().all(|e| e.kind == ErrorKind::CompilationFailure),
+                    "{rule}: {errors:?}"
+                );
+            }
+        }
     }
 
+    /// The deprecated `*_with_context` methods validate as their plain
+    /// counterparts, defaults included; a root rule reads the object's own
+    /// `apiVersion`, `kind` and `metadata.name`.
     #[test]
-    fn root_context_empty_api_group_for_core() {
+    #[allow(deprecated)]
+    fn root_rules_read_the_objects_api_version_and_kind() {
         let schema = json!({
             "type": "object",
-            "properties": {"name": {"type": "string"}},
-            "x-kubernetes-validations": [{
-                "rule": "apiGroup == ''",
-                "message": "not core"
-            }]
+            "properties": {"replicas": {"type": "integer", "default": 1}},
+            "x-kubernetes-validations": [
+                {"rule": "self.apiVersion == 'apps/v1' && self.kind == 'Deployment' && self.metadata.name == 'd'"},
+                {"rule": "self.replicas == 1"}
+            ]
         });
-        let obj = json!({"name": "test"});
-        let root_ctx = RootContext {
-            api_version: "v1".into(),
-            api_group: "".into(),
-            kind: "Pod".into(),
-        };
-        assert!(
-            Validator::new()
-                .validate_with_context(&schema, &obj, None, Some(&root_ctx))
-                .is_ok()
-        );
+        let obj = json!({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "d"}});
+        let other = json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "d"}});
+        let root_ctx = RootContext::default();
+        let compiled = crate::validation::compilation::compile_schema(&schema);
+        let validator = Validator::new();
+        for (object, ok) in [(&obj, true), (&other, false)] {
+            assert_eq!(validator.validate(&schema, object, None).is_ok(), ok);
+            assert_eq!(
+                validator
+                    .validate_with_context(&schema, object, None, Some(&root_ctx))
+                    .is_ok(),
+                ok
+            );
+            assert_eq!(
+                validator
+                    .validate_with_defaults_and_context(&schema, object, None, Some(&root_ctx))
+                    .is_ok(),
+                ok
+            );
+            assert_eq!(
+                validator
+                    .validate_compiled_with_context(&compiled, object, None, Some(&root_ctx))
+                    .is_ok(),
+                ok
+            );
+        }
     }
 
     #[test]
@@ -2386,30 +2395,6 @@ mod tests {
         let obj = json!({"x": -1});
         let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors.len(), 1);
-    }
-
-    #[test]
-    fn root_context_compiled_path() {
-        let schema = json!({
-            "type": "object",
-            "properties": {"x": {"type": "integer"}},
-            "x-kubernetes-validations": [{
-                "rule": "kind == 'MyResource'",
-                "message": "wrong kind"
-            }]
-        });
-        let obj = json!({"x": 1});
-        let root_ctx = RootContext {
-            api_version: "v1".into(),
-            api_group: "example.com".into(),
-            kind: "MyResource".into(),
-        };
-        let compiled = crate::validation::compilation::compile_schema(&schema);
-        assert!(
-            Validator::new()
-                .validate_compiled_with_context(&compiled, &obj, None, Some(&root_ctx))
-                .is_ok()
-        );
     }
 
     #[test]
@@ -2476,36 +2461,6 @@ mod tests {
         assert!(
             validate(&nested, &json!({ "m": { "a": {} } }), None).is_err(),
             "nested map value defaulted → REJECT (was fail-open even via validate_with_defaults)"
-        );
-    }
-
-    #[test]
-    fn validate_with_defaults_and_context_combined() {
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "replicas": {
-                    "type": "integer",
-                    "default": 1,
-                    "x-kubernetes-validations": [
-                        {"rule": "self >= 0", "message": "must be non-negative"}
-                    ]
-                }
-            },
-            "x-kubernetes-validations": [
-                {"rule": "kind == 'Deployment'", "message": "wrong kind"}
-            ]
-        });
-        let root_ctx = RootContext {
-            api_version: "apps/v1".into(),
-            api_group: "apps".into(),
-            kind: "Deployment".into(),
-        };
-        // Empty object: defaults fill replicas=1, root context provides kind
-        assert!(
-            Validator::new()
-                .validate_with_defaults_and_context(&schema, &json!({}), None, Some(&root_ctx))
-                .is_ok()
         );
     }
 

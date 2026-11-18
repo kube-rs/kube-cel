@@ -304,6 +304,17 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     A policy with `spec.variables` cannot be evaluated client-side until
     kube-cel models them (README "apiserver divergence").
 
+- **`apiVersion`, `apiGroup` and `kind` are no longer variables of root
+  rules.** kube-cel bound them from a `RootContext`; the apiserver declares
+  no such variables and rejects a CRD whose rule names one ("undeclared
+  reference to 'kind'", checked on v1.36.1). Such a rule now fails to
+  compile (`ErrorKind::CompilationFailure`) on every entry point, with or
+  without a `RootContext`.
+  - Migration: read the object's own fields in a root rule:
+    `self.apiVersion`, `self.kind`, `self.metadata.name` (the API group is
+    the part of `self.apiVersion` before the `/`). `RootContext` and the
+    `*_with_context` methods are deprecated (below).
+
 ### Added
 - `new_env() -> cel::Env`: kube-cel's environment, the apiserver's base CEL
   environment as far as kube-cel models it: the `cel` standard library,
@@ -324,6 +335,12 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   extension).
 
 ### Deprecated
+- `RootContext`, `Validator::validate_with_context`,
+  `Validator::validate_compiled_with_context` and
+  `Validator::validate_with_defaults_and_context`. No rule can read what
+  `RootContext` bound (see Breaking), so the methods ignore it and validate
+  as `validate` / `validate_compiled`. Use those, and `self.apiVersion` /
+  `self.kind` in a root rule.
 - `KubeCelExt::register_all` / `with_all`. They keep working, but register
   only the functions that live on a context: on `Context::default()` the
   `lists` extension, the macros and `string(<IP>)` are missing. Use
@@ -338,6 +355,10 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   overloads.
 - The `UnsupportedReference` message no longer blames an unsupported CEL macro
   or function; it names the reference evaluation could not resolve.
+- Static analysis (`check_rule_scope`, `analyze_rule`) follows the apiserver's
+  declarations: `ScopeContext::CrdValidation` takes `self` and `oldSelf`
+  only (no `apiVersion`, `apiGroup`, `kind`), and
+  `ScopeContext::AdmissionPolicy` no longer takes `self` and `oldSelf`.
 
 ### Fixed
 - Schema defaults fill in under a parent that was itself just defaulted

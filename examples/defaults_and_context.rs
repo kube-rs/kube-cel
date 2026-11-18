@@ -1,8 +1,11 @@
-//! Demonstrates schema default injection and root-level variable binding.
+//! Demonstrates schema default injection and root rules reading the object's
+//! own `apiVersion` and `kind` (the apiserver declares no `apiVersion`,
+//! `apiGroup` or `kind` variable; kube-cel's deprecated `RootContext` bound
+//! them before 0.9).
 //!
 //! Run with: `cargo run --example defaults_and_context --features validation`
 
-use kube_cel::{RootContext, Validator, apply_defaults};
+use kube_cel::{Validator, apply_defaults};
 use serde_json::json;
 
 fn main() {
@@ -22,13 +25,18 @@ fn main() {
             }
         },
         "x-kubernetes-validations": [
-            {"rule": "apiGroup == 'apps'", "message": "only apps group allowed"},
-            {"rule": "kind == 'Deployment'", "message": "must be a Deployment"}
+            {"rule": "self.apiVersion.startsWith('apps/')", "message": "only apps group allowed"},
+            {"rule": "self.kind == 'Deployment'", "message": "must be a Deployment"}
         ]
     });
 
     // Object with missing fields (would have defaults in K8s)
-    let object = json!({"replicas": 3});
+    let object = json!({
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {"name": "web"},
+        "replicas": 3
+    });
 
     // 1. Apply defaults
     let defaulted = apply_defaults(&schema, &object);
@@ -36,15 +44,9 @@ fn main() {
     println!("Before: {object}");
     println!("After:  {defaulted}\n");
 
-    // 2. Validate with root context
-    let root_ctx = RootContext {
-        api_version: "apps/v1".into(),
-        api_group: "apps".into(),
-        kind: "Deployment".into(),
-    };
-
+    // 2. Validate: root rules read the object's own apiVersion and kind
     let validator = Validator::new();
-    let result = validator.validate_with_context(&schema, &defaulted, None, Some(&root_ctx));
+    let result = validator.validate(&schema, &defaulted, None);
 
     println!("=== Validation Results ===");
     match result {
@@ -57,8 +59,7 @@ fn main() {
     }
 
     // 3. Demonstrate validate_with_defaults convenience method
-    // Uses a simpler schema without root-context variables (apiGroup/kind),
-    // since validate_with_defaults does not accept a RootContext.
+    // Uses a simpler schema without the root rules, on an empty object.
     println!("\n=== validate_with_defaults ===");
     let simple_schema = json!({
         "type": "object",

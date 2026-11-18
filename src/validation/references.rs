@@ -142,10 +142,7 @@ impl Scope {
     /// Whether the apiserver declares the variable `name` in this context.
     fn declares_variable(self, name: &str) -> bool {
         match self {
-            // `apiVersion`, `apiGroup` and `kind` are what kube-cel's
-            // `RootContext` binds at the root, which the apiserver does not
-            // declare.
-            Scope::Crd => matches!(name, "self" | "oldSelf" | "apiVersion" | "apiGroup" | "kind"),
+            Scope::Crd => matches!(name, "self" | "oldSelf"),
             Scope::Vap { params, authorizer } => match name {
                 "object" | "oldObject" | "request" | "namespaceObject" => true,
                 "params" => params,

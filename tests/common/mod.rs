@@ -1959,6 +1959,56 @@ pub fn cases() -> Vec<ParityCase> {
             note: "namespaced functions (format., optional., lists., strings., sets., ip.) are no identifiers → accepted",
         },
         ParityCase {
+            kind: "ProotApiVersion",
+            plural: "prootapiversions",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "true || apiVersion == 'x.test/v1'", "message": "root" }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "no `apiVersion` variable (kube-cel's RootContext bound it before 0.9) → rejected at registration",
+        },
+        ParityCase {
+            kind: "ProotApiGroup",
+            plural: "prootapigroups",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "true || apiGroup == 'x.test'", "message": "root" }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "no `apiGroup` variable (kube-cel's RootContext bound it before 0.9) → rejected at registration",
+        },
+        ParityCase {
+            kind: "ProotKind",
+            plural: "prootkinds",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "true || kind == 'ProotKind'", "message": "root" }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "no `kind` variable (kube-cel's RootContext bound it before 0.9) → rejected at registration",
+        },
+        ParityCase {
+            kind: "ProotSelfFields",
+            plural: "prootselffields",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "self.apiVersion == 'x.test/v1' && self.kind == 'ProotSelfFields' && self.metadata.name == 'probe'"
+                }]
+            }),
+            object: json!({ "apiVersion": "x.test/v1", "kind": "ProotSelfFields", "metadata": { "name": "probe" } }),
+            expect: Expect::Accept,
+            note: "a root rule reads the object's own apiVersion, kind and metadata.name → accepted",
+        },
+        ParityCase {
             kind: "PidentNestedTypes",
             plural: "pidentnestedtypes",
             schema: json!({

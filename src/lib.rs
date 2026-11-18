@@ -137,8 +137,11 @@ mod functions;
 pub use ext::{RegisterError, new_context, new_env};
 
 #[cfg(feature = "validation")]
+#[allow(deprecated)]
+pub use crate::validation::RootContext;
+#[cfg(feature = "validation")]
 pub use crate::validation::{
-    ErrorKind, RootContext, ValidationError, ValidationErrors, Validator,
+    ErrorKind, ValidationError, ValidationErrors, Validator,
     analysis::{
         AnalysisWarning, ScopeContext, WarningKind, analyze_rule, check_rule_scope, estimate_rule_cost,
     },
