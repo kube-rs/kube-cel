@@ -90,6 +90,7 @@ without an API server.
 
 ```toml
 kube-cel = { version = "0.8", features = ["validation"] }
+serde_json = "1"
 ```
 
 ```rust

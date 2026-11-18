@@ -21,9 +21,8 @@ no migration for rules the apiserver accepts.
   for `Context<'_, '_>`.
 - **One environment: build it with `new_env()` and a context on it with
   `new_context()`.** General use now gets the environment the validation
-  engine uses. `new_env()` adds `cel`'s upstream `lists` extension (with the
-  `lists` feature; cel-go's `ext.Lists`, with the `sortBy` macro), the
-  two-variable comprehension macros (`all(i, v, …)`, `exists(i, v, …)`,
+  engine uses. `new_env()` adds kube-cel's port of cel-go's `ext.Lists` (with
+  the `lists` feature, and its `sortBy` macro), the two-variable comprehension macros (`all(i, v, …)`, `exists(i, v, …)`,
   `existsOne(i, v, …)`, `transformList`, `transformMap`, `transformMapEntry`)
   and the `string(<IP>)` / `string(<CIDR>)` overloads, and `new_context()`
   registers the same functions as validation. What moved to the `Env` is
@@ -76,7 +75,7 @@ no migration for rules the apiserver accepts.
     `k.replace('~', '~0').replace('/', '~1')`.
 - **Function results change outside validation too.** kube-cel's own
   `slice`, `flatten`, `distinct`, `reverse`, `sort` and `lists.range` are
-  removed in favour of the upstream ones on the `Env`, and so is its string
+  removed in favour of that port on the `Env`, and so is its string
   `reverse()`; `sum`, `isSorted`, the list `min` / `max`, `indexOf`,
   `lastIndexOf`, `first` and `last` stay. The results below now match the
   apiserver's, in validation and in general use alike:
@@ -84,17 +83,18 @@ no migration for rules the apiserver accepts.
     `reverse()` and rejects it at registration (in validation it is an
     `EvaluationError` where evaluation reaches it, fail-closed).
   - `sort()` refuses a list mixing numeric types (`[3, 1u, 2.0].sort()`, "list
-    elements must have the same type"), a `null`, a NaN, or elements it
-    cannot compare even alone (`[{}].sort()`, `[[1]].sort()`), all of which
-    kube-cel's own sorted; it sorts `bytes` now.
+    elements must have the same type"), a `null`, or elements it cannot
+    compare even alone (`[{}].sort()`, `[[1]].sort()`), all of which
+    kube-cel's own sorted; it sorts `bytes` and a list holding a NaN now,
+    which were errors (see Fixed).
   - The list functions are member functions only: the global forms
     `sort([2, 1])`, `reverse([1, 2])`, `distinct([1, 1])` and
     `slice([1, 2], 0, 1)` are errors.
   - An extra argument is refused (`[1].sort(99)`, `[1, 2].slice(0, 1, 99)`,
     `[[1]].flatten(1, 2)`, `[1].distinct(99)`, `[1].reverse(99)`,
     `lists.range(2, 99)`), where kube-cel's own ignored it.
-  - `lists.range(n)` makes at most 1,000,000 elements (kube-cel's own made up
-    to 10,000,000).
+  - `lists.range(n)` makes at most 1,000,000 elements (kube-cel's own had no
+    limit).
   - Global `min(..)` / `max(..)` (`min(5, 3)`) are errors: kube-cel's list
     `min` / `max` fell back to a variadic form that neither the apiserver
     (only `<list>.min()` / `<list>.max()`) nor the `cel` standard library has.
@@ -608,12 +608,13 @@ Each group below follows kube-apiserver v1.36.1, checked live.
 - **Lists.**
   - `sort()` and `sortBy()` order elements with equal keys as the apiserver
     does: both reorder the indices with a port of go1.26.2's `sort.Slice` (the
-    toolchain of kube-apiserver v1.36.1), as cel-go v0.26 does. `cel`'s `lists`
-    extension sorts stably, so from 13 elements on the order differed:
-    `lists.range(20).sortBy(x, x % 2)[0] == 0` held, a **fail-open**, as did a
-    rule reading where `sort()` put a `-0.0` among equal zeros. `lists.range(-1)`
-    is `[]`, and a list holding a NaN sorts (no comparison with it is "less"),
-    as in cel-go; both used to be errors (fail-closed).
+    toolchain of kube-apiserver v1.36.1), as cel-go v0.26 does, so
+    `lists.range(20).sortBy(x, x % 2)[0] == 0` is false, as there. kube-cel's
+    own `sort()` sorted stably, so from 13 elements on the order differed: a
+    rule reading where `sort()` put a `-0.0` among equal zeros passed, a
+    **fail-open**. `lists.range(-1)` is `[]`, and a list holding a NaN sorts
+    (no comparison with it is "less"), as in cel-go; both used to be errors
+    (fail-closed).
   - `isSorted()`, `min()` and `max()` compare as the apiserver's lists library
     does: bytes order (a `format: byte` list, `[b'c', b'a'].min()`, was an
     error), a pair cel-go cannot compare, such as one with a NaN, replaces or
@@ -767,8 +768,18 @@ Each group below follows kube-apiserver v1.36.1, checked live.
   closed). The authz library row now covers every function the apiserver
   declares that kube-cel does not implement (`optional.unwrap`,
   `<list>.unwrapOpt()`, ..). A fail-closed row covers a `timestamp(string)`
-  zone offset of 24 hours or more, which Go parses. Two last rows document
-  the known fail-open classes. `cel` has no type checker yet
+  zone offset of 24 hours or more, which Go parses. Other new fail-closed
+  rows cover what `cel` cannot evaluate as cel-go does: type names with no
+  `cel` value and message constructions (`net.IP`,
+  `google.protobuf.Duration{seconds: 1}`), `.self` / `.oldSelf` in a CRD
+  rule, a two-variable comprehension over fields the schema does not
+  declare, `has()` / `.?` on a scalar, a set read from a list or map a
+  variable holds and `+`ed twice, iterating a set or map list that `+` gave
+  an element its items refuse, a refused list or map field of an element `+`
+  added, a plain map or list (an `additionalProperties` map) that a set or
+  map list's `+` or `==` takes or a typeless preserve-unknown value compares
+  with, and a map list with four or more keys and a number key value. Two
+  last rows document the known fail-open classes. `cel` has no type checker yet
   ([cel-rust#350](https://github.com/cel-rust/cel-rust/issues/350)), so a
   type, arity or call-shape error the apiserver rejects at registration
   passes when evaluation does not reach it. And `cel` has no cost model yet

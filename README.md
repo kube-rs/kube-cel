@@ -61,6 +61,7 @@ With the `validation` feature, you can compile and evaluate `x-kubernetes-valida
 ```toml
 [dependencies]
 kube-cel = { version = "0.8", features = ["validation"] }
+serde_json = "1" # the examples build schemas and objects with json!
 ```
 
 ```rust
