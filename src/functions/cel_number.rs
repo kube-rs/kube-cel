@@ -11,11 +11,22 @@
 //! rewrite `double(e)` to `double(@kube.doubleInput(e))` and `uint(e)` to
 //! `uint(@kube.uintInput(e))`, the leading-dot forms included: a string goes
 //! through Go's parser, any other value passes through to `cel`'s overload.
+//!
+//! It also rewrites the operands of `<`, `<=`, `>` and `>=`, a literal aside,
+//! to `@kube.ordered(e)`, which passes the value through and notes a NaN as
+//! unsupported. cel-go before v0.30 (the apiserver before 1.38) fails to order
+//! a NaN against a number ("NaN values cannot be ordered"), where `cel` and
+//! cel-go v0.30 answer false: `!(double('NaN') < 1.0)` holds in kube-cel and
+//! fails on the apiserver. The validation engine refuses an evaluation that
+//! ordered a NaN, even where CEL absorbs the comparison (`… || true`, which
+//! passes there). `==` and `!=` with a NaN agree, and are left alone, and
+//! `sort()`, `sortBy`, `min()`, `max()` and `isSorted()` order a NaN as the
+//! apiserver does (see `lists`, `lists_ext`).
 
 use cel::{
     DeclarationError, Env, ExecutionError,
     common::{
-        ast::{CallExpr, Expr},
+        ast::{CallExpr, Expr, operators},
         decls::Signature,
         types::{CelDouble, CelString, CelUInt, DYN_TYPE},
         value::CowVal,
@@ -27,6 +38,13 @@ use super::cel_time::{conversion_error, single};
 
 const DOUBLE_INPUT: &str = "@kube.doubleInput";
 const UINT_INPUT: &str = "@kube.uintInput";
+/// The helper the operands of an ordering comparison go through.
+const ORDERED: &str = "@kube.ordered";
+
+/// Why an evaluation that ordered a NaN is refused.
+const UNSUPPORTED_NAN_ORDER: &str = "an ordering comparison (<, <=, >, >=) with a NaN operand, which \
+                                     the apiserver before 1.38 fails (\"NaN values cannot be \
+                                     ordered\") and 1.38 answers false";
 
 /// Adds the macros and helpers described in the [module docs](self).
 pub(crate) fn declare(env: &mut Env) -> Result<(), DeclarationError> {
@@ -54,7 +72,55 @@ pub(crate) fn declare(env: &mut Env) -> Result<(), DeclarationError> {
             }))?;
         }
     }
+    env.add_overload(ORDERED, ORDERED, Signature::new(vec![DYN_TYPE]), ordered)?;
+    for operator in [
+        operators::LESS,
+        operators::LESS_EQUALS,
+        operators::GREATER,
+        operators::GREATER_EQUALS,
+    ] {
+        env.add_macro(Macro::global(operator, 2, move |h, _, args| {
+            // A literal is never a NaN (CEL has no NaN literal).
+            if args.iter().all(|arg| matches!(arg.expr, Expr::Literal(_))) {
+                return Ok(None);
+            }
+            let operands = std::mem::take(args)
+                .into_iter()
+                .map(|arg| {
+                    if matches!(arg.expr, Expr::Literal(_)) {
+                        arg
+                    } else {
+                        h.next_expr(Expr::Call(CallExpr {
+                            target: None,
+                            func_name: ORDERED.to_owned(),
+                            args: vec![arg],
+                        }))
+                    }
+                })
+                .collect();
+            Ok(Some(h.next_expr(Expr::Call(CallExpr {
+                target: None,
+                func_name: operator.to_owned(),
+                args: operands,
+            }))))
+        }))?;
+    }
     Ok(())
+}
+
+/// An operand of `<`, `<=`, `>` or `>=`, passed through to `cel`'s operator; a
+/// NaN is noted as unsupported (see the [module docs](self)).
+fn ordered<'b, 'v>(args: Vec<CowVal<'b, 'v>>) -> Result<CowVal<'b, 'v>, ExecutionError> {
+    let arg = single(args)?;
+    if arg
+        .downcast_ref::<CelDouble>()
+        .is_some_and(|d| d.inner().is_nan())
+    {
+        crate::functions::note_unsupported_error(|| {
+            ExecutionError::function_error("ordering", UNSUPPORTED_NAN_ORDER)
+        });
+    }
+    Ok(arg)
 }
 
 /// `double(<string>)` as cel-go has it: Go's `strconv.ParseFloat(s, 64)`.
@@ -463,5 +529,73 @@ mod tests {
         assert!(eval(&format!("double('1{zeros}0e-800')")).is_err());
         // Past the range Go's fallback is the reading.
         assert!(eval(&format!("double('9{}')", "9".repeat(800))).is_err());
+    }
+
+    /// An ordering comparison with a NaN operand keeps `cel`'s value (false)
+    /// and is noted as unsupported: the apiserver before 1.38 fails it, even
+    /// where CEL absorbs the comparison. `==`, `!=` and the list functions
+    /// that order a NaN as the apiserver does are not noted. Values are cel-go
+    /// v0.26 through the apiserver's environment (k8s.io/apiserver v0.36.1),
+    /// and v0.33 (v0.38.0-beta.0) for the false of an ordering.
+    #[test]
+    fn ordering_a_nan_is_noted() {
+        let tracked = |expr: &str| crate::functions::tracking_unsupported(|| eval(expr));
+        for (expr, value) in [
+            ("double('NaN') < 1.0", false),
+            ("1 <= double('NaN')", false),
+            ("1u > double('NaN')", false),
+            ("double('NaN') >= double('NaN')", false),
+            ("!(double('NaN') < 1.0) || true", true),
+            ("[double('NaN'), 0.5].exists(x, x < 1.0)", true),
+            ("[1.5].map(x, x * 0.0 / 0.0).all(x, !(x > 1.0))", true),
+        ] {
+            let (result, noted) = tracked(expr);
+            assert_eq!(result, Ok(Value::Bool(value)), "{expr}");
+            assert!(noted.is_some(), "{expr} must be noted");
+        }
+        let not_noted = |expr: &str| {
+            let (result, noted) = tracked(expr);
+            assert_eq!(result, Ok(Value::Bool(true)), "{expr}");
+            assert!(noted.is_none(), "{expr} must not be noted");
+        };
+        not_noted("double('NaN') != double('NaN') && !(double('NaN') == 1.0)");
+        not_noted("1.0 < 2.0 && 2 >= 1u && double('Inf') > 1.0 && -double('Inf') < 1.0");
+        not_noted("true || double('NaN') < 1.0");
+        #[cfg(feature = "lists")]
+        {
+            not_noted("[1.0, double('NaN')].min() == 1.0 && [1.0, double('NaN'), 0.5].isSorted()");
+            not_noted("[double('NaN'), 1.0].sort().size() == 2");
+        }
+    }
+
+    /// The operands of an ordering comparison go through `@kube.ordered` in
+    /// place, a literal aside, so each is still evaluated once.
+    #[test]
+    fn ordering_operands_are_wrapped_once() {
+        let env = crate::new_env();
+        let ordered = |expr: &str| {
+            let program = env.compile(expr).expect("compiles");
+            let mut wrapped = Vec::new();
+            fn walk(e: &cel::common::ast::IdedExpr, wrapped: &mut Vec<bool>) {
+                if let cel::common::ast::Expr::Call(call) = &e.expr {
+                    use cel::common::ast::operators::{GREATER, GREATER_EQUALS, LESS, LESS_EQUALS};
+                    if [LESS, LESS_EQUALS, GREATER, GREATER_EQUALS].contains(&call.func_name.as_str()) {
+                        wrapped.extend(call.args.iter().map(|a| {
+                            matches!(&a.expr, cel::common::ast::Expr::Call(c) if c.func_name == super::ORDERED)
+                        }));
+                    }
+                    call.target.iter().for_each(|t| walk(t, wrapped));
+                    call.args.iter().for_each(|a| walk(a, wrapped));
+                }
+            }
+            walk(program.expression(), &mut wrapped);
+            wrapped
+        };
+        assert_eq!(ordered("1 < 2"), [false, false]);
+        assert_eq!(ordered("double('NaN') < 1.0"), [true, false]);
+        assert_eq!(ordered("1 >= dyn(2) && dyn(1) <= dyn(2)"), [
+            false, true, true, true
+        ]);
+        assert_eq!(ordered("dyn(1) > 0"), [true, false]);
     }
 }

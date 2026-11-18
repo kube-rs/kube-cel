@@ -512,13 +512,10 @@ impl VapEvaluator {
                         message: None,
                     },
                     Ok(Value::Bool(false)) => {
-                        let expr_result =
-                            ce.message_program
-                                .as_ref()
-                                .and_then(|prog| match prog.execute(&ctx) {
-                                    Ok(Value::String(s)) => Some((*s).clone()),
-                                    _ => None,
-                                });
+                        let expr_result = ce
+                            .message_program
+                            .as_ref()
+                            .and_then(|prog| super::message_expression_value(prog, &ctx));
                         // Same sanitisation as the CRD path (trim + reject empty/
                         // multi-line/oversize), and apiserver's VAP default message.
                         let msg = super::resolve_failure_message(
@@ -972,6 +969,34 @@ mod tests {
         }]);
         assert!(!results[0].passed);
         assert_eq!(results[0].message.as_deref(), Some("replicas is -1"));
+    }
+
+    /// As for a CRD rule, a `messageExpression` reaching a value kube-cel notes
+    /// as unsupported falls back to the static message.
+    #[test]
+    fn vap_message_expression_reaching_an_unsupported_value_falls_back() {
+        let evaluator = VapEvaluator::builder()
+            .object(json!({"spec": {"replicas": -1}}))
+            .request(AdmissionRequest::default())
+            .build();
+        let message = |me: &str| {
+            evaluator.evaluate(&[VapExpression {
+                expression: "object.spec.replicas >= 0".into(),
+                message: Some("static fallback".into()),
+                message_expression: Some(me.into()),
+            }])[0]
+                .message
+                .clone()
+        };
+        assert_eq!(
+            message("double('NaN') < 1.0 ? 'lt' : 'ge'").as_deref(),
+            Some("static fallback")
+        );
+        assert_eq!(
+            message("'v=' + string(b'a' + b'b')").as_deref(),
+            Some("static fallback")
+        );
+        assert_eq!(message("1.0 < 2.0 ? 'lt' : 'ge'").as_deref(), Some("lt"));
     }
 
     #[test]

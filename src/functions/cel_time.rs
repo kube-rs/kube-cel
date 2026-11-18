@@ -21,7 +21,8 @@
 //! - `a + b`, `a - b` and `-a` to `@kube.add(a, b)`, `@kube.sub(a, b)` and
 //!   `@kube.negate(a)`, which do duration arithmetic in int64 nanoseconds with
 //!   Go's overflow checks and hand everything else to `cel`'s operator (cel-go
-//!   negates a duration reached through `dyn`; `cel` has no such operator);
+//!   negates a duration reached through `dyn`; `cel` has no such operator),
+//!   noting a bytes concatenation as unsupported (see `add`);
 //!
 //! the leading-dot forms (`.duration(e)`, ..) included; and it declares
 //! cel-go's `int(<duration>)`, the nanoseconds, which `cel` lacks. A literal argument is
@@ -40,7 +41,10 @@ use cel::{
     common::{
         ast::{CallExpr, Expr, IdedExpr, LiteralValue, operators},
         decls::Signature,
-        types::{CelDouble, CelDuration, CelInt, CelString, CelTimestamp, DURATION_TYPE, DYN_TYPE, INT_TYPE},
+        types::{
+            CelBytes, CelDouble, CelDuration, CelInt, CelString, CelTimestamp, DURATION_TYPE, DYN_TYPE,
+            INT_TYPE,
+        },
         value::{CowVal, Val},
     },
     objects::Value,
@@ -224,9 +228,24 @@ fn duration_val<'b, 'v>(nanos: i64) -> CowVal<'b, 'v> {
     CowVal::owned(CelDuration::from(chrono::Duration::nanoseconds(nanos)))
 }
 
+/// Why an evaluation that concatenated bytes is refused.
+const UNSUPPORTED_BYTES_ADD: &str = "a bytes `+`, whose result the apiserver before 1.38 can change \
+                                     with a later `+` on the same bytes value (cel-go appends into \
+                                     the left value's spare capacity), which kube-cel does not \
+                                     model";
+
 /// `a + b`: two durations add in int64 nanoseconds (cel-go's
 /// `addDurationChecked`); anything else is `cel`'s `+`, whose timestamp range
 /// is cel-go's.
+///
+/// Two bytes concatenate, and the evaluation is noted as unsupported: cel-go
+/// before v0.30 (the apiserver before 1.38) is `append(a, b...)`, so where `a`
+/// has spare capacity the result shares `a`'s array, and a later `a + c` writes
+/// over it (`[b'abc'].all(x, [x + b'1', x + b'2'][0] == b'abc1')` is false
+/// there). The capacity hangs on Go's allocator, and a literal or a folded
+/// `bytes('..')` keeps one array across a loop's iterations, so kube-cel
+/// refuses any bytes concatenation evaluation reaches, even where CEL absorbs
+/// the result.
 fn add<'b, 'v>(args: Vec<CowVal<'b, 'v>>) -> Result<CowVal<'b, 'v>, ExecutionError> {
     let [lhs, rhs] = pair(args)?;
     match (
@@ -240,6 +259,11 @@ fn add<'b, 'v>(args: Vec<CowVal<'b, 'v>>) -> Result<CowVal<'b, 'v>, ExecutionErr
         (a, b) => {
             for d in [a, b].into_iter().flatten() {
                 go_nanos(d)?;
+            }
+            if lhs.downcast_ref::<CelBytes>().is_some() && rhs.downcast_ref::<CelBytes>().is_some() {
+                crate::functions::note_unsupported_error(|| {
+                    ExecutionError::function_error("_+_", UNSUPPORTED_BYTES_ADD)
+                });
             }
             let adder = lhs.as_adder().ok_or_else(|| {
                 ExecutionError::UnsupportedBinaryOperator(
@@ -850,5 +874,38 @@ mod tests {
         holds("[timestamp(0)].all(timestamp, type(timestamp) == google.protobuf.Timestamp)");
         holds("optional.of('1s').optMap(x, duration(x)).value() == duration('1s')");
         errs("dyn('1s').duration()");
+    }
+
+    /// A bytes concatenation keeps its value and is noted as unsupported,
+    /// reached alone, absorbed or not: the apiserver before 1.38 appends into
+    /// the left value's spare capacity (`[b'abc'].map(x, [x + b'1', x +
+    /// b'2'])` is `[[b'abc2', b'abc2']]` there, cel-go v0.26 through
+    /// k8s.io/apiserver v0.36.1). Other `+`s, and a bytes `+` evaluation does
+    /// not reach, are not noted.
+    #[test]
+    fn bytes_concatenation_is_noted() {
+        let tracked = |expr: &str| crate::functions::tracking_unsupported(|| eval(expr));
+        for expr in [
+            "[b'abc'].map(x, [x + b'1', x + b'2']) == [[b'abc1', b'abc2']]",
+            "b'abc' + b'1' == b'abc1'",
+            "b'' + b'' == b''",
+            "[b'abc'].all(x, [x + b'1', x + b'2'][0] == b'abc2') || true",
+        ] {
+            let (result, noted) = tracked(expr);
+            assert_eq!(result, Ok(Value::Bool(true)), "{expr}");
+            assert!(noted.is_some(), "{expr} must be noted");
+        }
+        for expr in [
+            "'ab' + 'c' == 'abc' && [b'a'] + [b'b'] == [b'a', b'b'] && 1 + 2 == 3",
+            "duration('1s') + duration('1s') == duration('2s')",
+            "true || b'a' + b'b' == b''",
+        ] {
+            let (result, noted) = tracked(expr);
+            assert_eq!(result, Ok(Value::Bool(true)), "{expr}");
+            assert!(noted.is_none(), "{expr} must not be noted");
+        }
+        // Bytes and another type: no overload, an error as before, not noted.
+        let (result, noted) = tracked("dyn(b'a') + dyn('b')");
+        assert!(result.is_err() && noted.is_none());
     }
 }

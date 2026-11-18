@@ -468,6 +468,12 @@ Each group below follows kube-apiserver v1.36.1, checked live.
     passed (fail-open) and a rule reading such a default failed.
   - A `messageExpression` result is trimmed, and an empty, multi-line or
     over-5 KiB result falls back to `message` (CRD rules and VAP validations).
+  - A `messageExpression` that reaches a value kube-cel refuses in a rule even
+    where CEL absorbs it falls back to `message` too, as one that fails does:
+    the apiserver fails there on an ordering of a NaN or a quantity `==` with
+    an `add` / `sub` result on the right (`static`, where kube-cel gave its
+    own message), and it may compute another message elsewhere (a bytes `+`),
+    which kube-cel cannot tell (a divergence row, message only).
 - **VAP variables.**
   - `object` / `oldObject` / `params` / `namespaceObject` are bound without
     field-name escaping, so `object.metadata.labels['app.kubernetes.io/name']`
@@ -519,6 +525,28 @@ Each group below follows kube-apiserver v1.36.1, checked live.
   - A map literal that repeats a key keeps the last entry (`{'k': 1, 'k':
     2}['k']` is 2), and `1` and `1u` are two keys, as in cel-go: `new_env()`
     turns off `cel`'s duplicate-key error, which refused both (fail-closed).
+- **A bytes `+` and an ordering comparison with a NaN are refused**
+  (`EvaluationError`), even where CEL absorbs them. kube-apiserver v1.33 to
+  v1.37 (cel-go before v0.30) reject rules of both kinds that kube-cel
+  passed, a **fail-open**, now closed:
+  - cel-go concatenates bytes with `append`, so where the left value has
+    spare capacity a later `+` on it writes over an earlier result:
+    `[b'abc'].all(x, [x + b'1', x + b'2'][0] == b'abc1')` is false there,
+    and so is `[b'1', b'2'].map(y, b'abc' + y)[0] == b'abc1'`, one `+` in a
+    loop. The capacity hangs on Go's allocator, so kube-cel refuses any bytes
+    `+` evaluation reaches, also where the apiserver's outcome holds
+    (`b'abc' + b'1' == b'abc1'`; fail-closed, a divergence row).
+  - `<`, `<=`, `>` and `>=` with a NaN operand fail ("NaN values cannot be
+    ordered"), where kube-cel answered false: `!(double('NaN') < 1.0)`
+    passed. kube-cel refuses an evaluation that ordered a NaN, also where the
+    apiserver absorbs the error (`… || true`; fail-closed, a divergence row).
+    `==` and `!=` with a NaN, and the list functions that order one
+    (`sort()`, `sortBy`, `min()`, `max()`, `isSorted()`), already matched and
+    are unchanged.
+
+  kube-apiserver v1.38 (cel-go v0.33; the fixes landed in v0.30) copies the
+  bytes and answers false for a NaN; kube-cel keeps both refusals for the
+  older versions.
 - **A type conversion of a constant that fails is refused at compile time**
   (`CompilationFailure`, reached or not): `int('x')`, `uint(-1)`,
   `string(b'\xff')`, `int(dyn('x'))`. The apiserver builds each rule's

@@ -118,11 +118,16 @@ impl Walker {
     /// Whether evaluating `e` can neither fail nor read a quantity: a
     /// comprehension variable, a literal, or `quantity(<literal>)` with a
     /// literal that parses. The order of such a part against another cannot
-    /// show.
+    /// show. The operand of an ordering comparison, which `new_env()` wraps in
+    /// `@kube.ordered(..)`, is inert as the operand is: the wrapper fails on
+    /// nothing, and the NaN it notes refuses the rule whatever the order.
     fn is_inert(&self, e: &IdedExpr) -> bool {
         match &e.expr {
             Expr::Ident(name) => self.bound.iter().any(|b| b == name),
             Expr::Literal(_) => true,
+            Expr::Call(call) if call.target.is_none() && call.func_name == "@kube.ordered" => {
+                matches!(call.args.as_slice(), [operand] if self.is_inert(operand))
+            }
             Expr::Call(call) => {
                 call.target.is_none()
                     && bare(&call.func_name) == "quantity"
@@ -305,6 +310,8 @@ mod tests {
         for expr in [
             "quantity('1').add(quantity('2').compareTo(quantity('3'))).isInteger()",
             "[quantity('1')].all(q, 0 > q.compareTo(quantity('2')))",
+            // An ordering comparison's operand is wrapped in `@kube.ordered`.
+            "[quantity('1')].all(q, [1].all(i, i > q.compareTo(quantity('2'))))",
             "[quantity('1')].all(q, q.add(1).compareTo(q) == 0)",
             "[quantity('1')].all(q, quantity('1').add(q.compareTo(quantity('2'))).isInteger())",
             "[quantity('1')].all(q, q.isLessThan(quantity('2')) && q.add(1).isInteger())",

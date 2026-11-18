@@ -93,7 +93,9 @@ fn declared_only() -> &'static [&'static str] {
 /// compared with an `add`/`sub` result on the right, a timestamp offset of a
 /// day or more, a URL component that is not UTF-8, a function the apiserver
 /// declares that kube-cel does not implement) fails, even where CEL absorbed
-/// the error (`|| true`, `exists`, an optional).
+/// the error (`|| true`, `exists`, an optional). So does one that
+/// concatenated bytes or ordered a NaN, which the apiserver before 1.38
+/// evaluates otherwise, though kube-cel's own value there is no error.
 pub(crate) fn execute_supported(program: &Program, ctx: &Context<'_, '_>) -> cel::ResolveResult {
     match crate::functions::tracking_unsupported(|| program.execute(ctx)) {
         (Ok(_), Some(error)) => Err(error),
@@ -1171,14 +1173,28 @@ impl Validator {
     /// (see [`resolve_failure_message`]).
     fn resolve_message(&self, cr: &CompilationResult, ctx: &Context<'_, '_>) -> String {
         let expr_result = cr.message_program.as_ref().and_then(|prog| {
-            match structural::tracking_inexact(|| prog.execute(ctx)) {
-                (Ok(cel::Value::String(s)), false) => Some((*s).clone()),
+            match structural::tracking_inexact(|| message_expression_value(prog, ctx)) {
+                (Some(s), false) => Some(s),
                 _ => None,
             }
         });
         resolve_failure_message(expr_result.as_deref(), cr.rule.message.as_deref(), || {
             format!("failed rule: {}", cr.rule.rule.trim())
         })
+    }
+}
+
+/// The string a `messageExpression` evaluates to, or `None` for the
+/// apiserver's fallback to the static message: an error, a value other than a
+/// string, or an evaluation that reached a value kube-cel notes as unsupported
+/// (see [`execute_supported`]). There the apiserver may fail where kube-cel
+/// has a value (an ordering of a NaN, a quantity `==` with an `add` / `sub`
+/// result on the right) or compute another value (a bytes `+`), so kube-cel
+/// does not use its own, as it does not use one a rule reaches.
+pub(crate) fn message_expression_value(program: &Program, ctx: &Context<'_, '_>) -> Option<String> {
+    match crate::functions::tracking_unsupported(|| program.execute(ctx)) {
+        (Ok(cel::Value::String(s)), None) => Some((*s).clone()),
+        _ => None,
     }
 }
 
@@ -1929,6 +1945,31 @@ mod tests {
         let obj = json!({"replicas": -5, "name": "app"});
         let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors[0].message, "static fallback");
+    }
+
+    /// A `messageExpression` that reaches a value kube-cel notes as
+    /// unsupported falls back as one that fails: the apiserver (v1.36.1) fails
+    /// the first two and gives `static`, and computes the bytes one, which
+    /// kube-cel cannot be sure of. A plain one keeps its value.
+    #[test]
+    fn message_expression_reaching_an_unsupported_value_falls_back_to_static() {
+        let message = |me: &str| {
+            let schema = make_schema(json!([{
+                "rule": "self.replicas >= 0",
+                "message": "static",
+                "messageExpression": me
+            }]));
+            let errors = validate(&schema, &json!({"replicas": -5, "name": "app"}), None).unwrap_err();
+            errors[0].message.clone()
+        };
+        assert_eq!(message("double('NaN') < 1.0 ? 'lt' : 'ge'"), "static");
+        #[cfg(feature = "quantity")]
+        assert_eq!(
+            message("quantity('2') == quantity('1').add(1) ? 'eq' : 'ne'"),
+            "static"
+        );
+        assert_eq!(message("'v=' + string(b'a' + b'b')"), "static");
+        assert_eq!(message("1.0 < 2.0 ? 'lt' : 'ge'"), "lt");
     }
 
     #[test]

@@ -124,7 +124,9 @@ impl<'c, 'p, 'v> Registrar<'c, 'p, 'v> {
 ///   standard-library overload, which `cel` refuses as a context function;
 /// - cel-go's standard time conversions and duration arithmetic, and its
 ///   `double(<string>)` / `uint(<string>)`, in front of `cel`'s (see
-///   `cel_time`, `cel_number`), its short-circuiting `or` / `orValue` on
+///   `cel_time`, `cel_number`), with a bytes `+` and an ordering comparison
+///   with a NaN noted as unsupported for the validation engine (the apiserver
+///   before 1.38 evaluates them otherwise), its short-circuiting `or` / `orValue` on
 ///   optionals (see `cel_optional`), and `matches` checked against RE2's
 ///   syntax (see `cel_regex`).
 pub(crate) fn declare_env(env: &mut cel::Env) -> Result<(), cel::DeclarationError> {

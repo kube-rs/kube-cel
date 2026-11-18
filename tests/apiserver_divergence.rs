@@ -1571,6 +1571,98 @@ fn url_component_not_utf8_fails_closed() {
     assert!(run_rule("url('http://h%80x/p%FF').getEscapedPath() == '/p%FF'").is_ok());
 }
 
+// ── A bytes `+` — fails CLOSED (a window refusal) ──────────────────────────
+// apiserver: v1.33 to v1.37 (cel-go before v0.30) concatenate bytes with
+//            `append(a, b...)`: where `a` has spare capacity the result shares
+//            its array, and a later `+` on `a` writes over the earlier result
+//            (`[b'abc'].all(x, [x + b'1', x + b'2'][0] == b'abc1')` is false;
+//            parity rows `PwinBytes*`). The capacity hangs on Go's allocator:
+//            a literal or `bytes(s)` rounds up to a size class (`b'abcdefgh'`,
+//            eight bytes, has none), a `format: byte` field keeps the base64
+//            decoder's buffer (`YQ==` decodes one byte into three, `YWJj`
+//            three into three) and decodes afresh on each read. v1.38 (cel-go
+//            v0.33; the fix landed in v0.30, cel-go#1381) copies. Go oracles
+//            on k8s.io/apiserver v0.33.0, v0.36.1, v0.37.2 and v0.38.0-beta.0
+//            accept every rule below.
+// kube-cel:  concatenates afresh, and refuses any bytes `+` evaluation reaches
+//            (noted as unsupported), even where the apiserver's outcome holds
+//            or CEL absorbs it. The refusal stays when the reference moves to
+//            v1.38: older versions in kube's window alias.
+
+#[test]
+fn bytes_concatenation_fails_closed() {
+    let schema = |rule: &str| {
+        json!({
+            "type": "object",
+            "properties": { "b": { "type": "string", "format": "byte" } },
+            "x-kubernetes-validations": [{ "rule": rule, "message": "b" }]
+        })
+    };
+    let validate = |rule: &str, b: &str| Validator::new().validate(&schema(rule), &json!({ "b": b }), None);
+    for (rule, b) in [
+        ("b'abc' + b'1' == b'abc1'", "YQ=="),
+        (
+            "[b'abcdefgh'].all(x, [x + b'1', x + b'2'][0] == b'abcdefgh1')",
+            "YQ==",
+        ),
+        (
+            "[b'abc'].all(x, [x + b'1', x + b'2'][0] == b'abc1') || true",
+            "YQ==",
+        ),
+        ("[self.b].all(x, [x + b'1', x + b'2'][0] == b'abc1')", "YWJj"),
+        ("[self.b + b'1', self.b + b'2'][0] == b'a1'", "YQ=="),
+        ("bytes(string(self.b)) + b'1' == b'a1'", "YQ=="),
+    ] {
+        let errors = validate(rule, b).unwrap_err();
+        assert!(
+            errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
+            "{rule}: {errors:?}"
+        );
+    }
+    // Not reached, or not bytes: evaluated.
+    for rule in [
+        "self.b == b'a' || self.b + b'b' == b''",
+        "string(self.b) + 'b' == 'ab'",
+    ] {
+        validate(rule, "YQ==").unwrap();
+    }
+}
+
+// ── An ordering comparison with a NaN — fails CLOSED (a window refusal) ────
+// apiserver: v1.33 to v1.37 (cel-go before v0.30) fail `<`, `<=`, `>` and
+//            `>=` with a NaN operand ("NaN values cannot be ordered"), so
+//            `!(double('NaN') < 1.0)` fails (parity rows `PwinNaN*`) and an
+//            absorbing `|| true` or a later true `exists` item passes. v1.38
+//            (cel-go v0.33; the fix landed in v0.30, cel-go#1370) answers
+//            false. The same Go oracles accept every rule below.
+// kube-cel:  evaluates the comparison to false, as v1.38 does, and refuses an
+//            evaluation that ordered a NaN (noted as unsupported), so where CEL
+//            absorbs the comparison the rule is refused. `==` / `!=` with a
+//            NaN, and the list functions that order one, agree with every
+//            version and are left alone. The refusal stays when the reference
+//            moves to v1.38.
+
+#[test]
+fn nan_ordering_fails_closed() {
+    for rule in [
+        "!(double('NaN') < 1.0) || true",
+        "double('NaN') < 1.0 || true",
+        "[double('NaN'), 0.5].exists(x, x < 1.0)",
+        "dyn(double('NaN')) < dyn('a') || true",
+    ] {
+        let errors = run_rule(rule).unwrap_err();
+        assert!(
+            errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
+            "{rule}: {errors:?}"
+        );
+    }
+    assert_passes("double('NaN') != double('NaN') && !(double('NaN') == 1.0)");
+    assert_passes("true || double('NaN') < 1.0");
+    assert_passes("self.items.all(x, double(x) > 0.0)");
+    #[cfg(feature = "lists")]
+    assert_passes("[1.0, double('NaN')].min() == 1.0 && [1.0, double('NaN'), 0.5].isSorted()");
+}
+
 // ── A quantity update whose result depends on the order — fails CLOSED ─────
 // apiserver: cel-go evaluates a call's receiver before its arguments, and both
 //            operands of a two-operand call even when the first fails, and its
@@ -1743,6 +1835,48 @@ fn invalid_message_expression_fails_closed() {
         errors.iter().any(|e| e.kind == ErrorKind::CompilationFailure),
         "a rule whose messageExpression fails to compile must fail closed, got {errors:?}"
     );
+}
+
+// ── A messageExpression reaching a refused value — the message differs ────
+// apiserver: evaluates the `messageExpression` of a failing rule, and falls
+//            back to the static `message` only where it fails (v1.36.1 Go
+//            oracle): `static` for an ordering of a NaN and a quantity `==`
+//            with an `add` result on the right, but `v=ab` for
+//            `'v=' + string(b'a' + b'b')` and `y` for a timestamp with a
+//            24-hour offset.
+// kube-cel:  the static `message` wherever the `messageExpression` reached a
+//            value it refuses in a rule even where CEL absorbs it, as for one
+//            that fails: it cannot tell what the apiserver computes there.
+//            Only the message differs; the rule fails on both.
+
+#[test]
+fn message_expression_reaching_a_refused_value_falls_back() {
+    let message = |me: &str| {
+        let schema = json!({
+            "type": "object",
+            "x-kubernetes-validations": [{ "rule": "false", "message": "static", "messageExpression": me }]
+        });
+        let errors = Validator::new().validate(&schema, &json!({}), None).unwrap_err();
+        assert!(
+            errors.iter().all(|e| e.kind == ErrorKind::ValidationFailure),
+            "{me}: {errors:?}"
+        );
+        errors.iter().next().unwrap().message.clone()
+    };
+    for me in [
+        "double('NaN') < 1.0 ? 'lt' : 'ge'",
+        "'v=' + string(b'a' + b'b')",
+        "'v=' + string([b'abc'].map(x, [x + b'1', x + b'2'][0])[0])",
+        "timestamp('2024-01-15T10:30:00+24:00').getFullYear() == 2024 ? 'y' : 'n'",
+    ] {
+        assert_eq!(message(me), "static", "{me}");
+    }
+    #[cfg(feature = "quantity")]
+    assert_eq!(
+        message("quantity('2') == quantity('1').add(1) ? 'eq' : 'ne'"),
+        "static"
+    );
+    assert_eq!(message("1.0 < 2.0 ? 'lt' : 'ge'"), "lt");
 }
 
 // ── additionalProperties map-key escaping — faithful since #8; used to fail OPEN

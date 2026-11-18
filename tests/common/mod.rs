@@ -3934,6 +3934,176 @@ pub fn cases() -> Vec<ParityCase> {
             expect: Expect::Accept,
             note: "a rule naming oldSelf is a transition rule, skipped on create → ACCEPT",
         },
+        // Window refusals: kube-apiserver v1.33 to v1.37 (cel-go before v0.30)
+        // reject these and v1.38 (cel-go v0.33, which has v0.30's fixes)
+        // accepts them, so kube-cel refuses them under either reference (see
+        // "A bytes `+`" and "An ordering comparison" in
+        // docs/apiserver-divergence.md). A bytes `+` appends into the left
+        // value's spare capacity, which a later `+` on the same value
+        // overwrites; `<`, `<=`, `>`, `>=` with a NaN fail.
+        // When the parity reference moves to v1.38, the `Reject` rows move to
+        // tests/apiserver_divergence.rs as fail-closed (`Pwin*`; the two
+        // `Accept` rows stay).
+        ParityCase {
+            kind: "PwinBytesAlias",
+            plural: "pwinbytesaliases",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "s": { "type": "string", "maxLength": 8 },
+                    "b": { "type": "string", "format": "byte", "maxLength": 8 },
+                    "l": { "type": "array", "maxItems": 4, "items": { "type": "number" } }
+                },
+                "x-kubernetes-validations": [{ "rule": "[b'abc'].all(x, [x + b'1', x + b'2'][0] == b'abc1')" }]
+            }),
+            object: json!({ "s": "x", "b": "YQ==", "l": [1.5, 0.5] }),
+            expect: Expect::Reject,
+            note: "x + b'2' writes into the spare capacity x + b'1' shares → b'abc2', REJECT",
+        },
+        ParityCase {
+            kind: "PwinBytesLoop",
+            plural: "pwinbytesloops",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "s": { "type": "string", "maxLength": 8 },
+                    "b": { "type": "string", "format": "byte", "maxLength": 8 },
+                    "l": { "type": "array", "maxItems": 4, "items": { "type": "number" } }
+                },
+                "x-kubernetes-validations": [{ "rule": "[b'1', b'2'].map(y, b'abc' + y)[0] == b'abc1'" }]
+            }),
+            object: json!({ "s": "x", "b": "YQ==", "l": [1.5, 0.5] }),
+            expect: Expect::Reject,
+            note: "one + in a loop: the literal keeps one array, the second iteration overwrites → REJECT",
+        },
+        ParityCase {
+            kind: "PwinBytesField",
+            plural: "pwinbytesfields",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "s": { "type": "string", "maxLength": 8 },
+                    "b": { "type": "string", "format": "byte", "maxLength": 8 },
+                    "l": { "type": "array", "maxItems": 4, "items": { "type": "number" } }
+                },
+                "x-kubernetes-validations": [{ "rule": "[self.b].all(x, [x + b'1', x + b'2'][0] == b'a1')" }]
+            }),
+            object: json!({ "s": "x", "b": "YQ==", "l": [1.5, 0.5] }),
+            expect: Expect::Reject,
+            note: "format: byte 'YQ==' decodes 1 byte into a 3-byte buffer, which the + results share → REJECT",
+        },
+        ParityCase {
+            kind: "PwinBytesChain",
+            plural: "pwinbyteschains",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "s": { "type": "string", "maxLength": 8 },
+                    "b": { "type": "string", "format": "byte", "maxLength": 8 },
+                    "l": { "type": "array", "maxItems": 4, "items": { "type": "number" } }
+                },
+                "x-kubernetes-validations": [{ "rule": "[b'abcdefgh' + b'1'].all(x, [x + b'2', x + b'3'][0] == b'abcdefgh12')" }]
+            }),
+            object: json!({ "s": "x", "b": "YQ==", "l": [1.5, 0.5] }),
+            expect: Expect::Reject,
+            note: "a + result grows to 16 bytes of capacity, which later +s share → REJECT",
+        },
+        ParityCase {
+            kind: "PwinBytesUnreached",
+            plural: "pwinbytesunreacheds",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "s": { "type": "string", "maxLength": 8 },
+                    "b": { "type": "string", "format": "byte", "maxLength": 8 },
+                    "l": { "type": "array", "maxItems": 4, "items": { "type": "number" } }
+                },
+                "x-kubernetes-validations": [{ "rule": "self.s == 'x' || b'a' + b'b' == b''" }]
+            }),
+            object: json!({ "s": "x", "b": "YQ==", "l": [1.5, 0.5] }),
+            expect: Expect::Accept,
+            note: "a bytes + evaluation does not reach is not refused → ACCEPT",
+        },
+        ParityCase {
+            kind: "PwinNaNLiteral",
+            plural: "pwinnanliterals",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "s": { "type": "string", "maxLength": 8 },
+                    "b": { "type": "string", "format": "byte", "maxLength": 8 },
+                    "l": { "type": "array", "maxItems": 4, "items": { "type": "number" } }
+                },
+                "x-kubernetes-validations": [{ "rule": "!(double('NaN') < 1.0)" }]
+            }),
+            object: json!({ "s": "x", "b": "YQ==", "l": [1.5, 0.5] }),
+            expect: Expect::Reject,
+            note: "NaN values cannot be ordered → REJECT (v1.38: false, ACCEPT)",
+        },
+        ParityCase {
+            kind: "PwinNaNField",
+            plural: "pwinnanfields",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "s": { "type": "string", "maxLength": 8 },
+                    "b": { "type": "string", "format": "byte", "maxLength": 8 },
+                    "l": { "type": "array", "maxItems": 4, "items": { "type": "number" } }
+                },
+                "x-kubernetes-validations": [{ "rule": "!(double(self.s.replace('x', 'NaN')) > 1.0)" }]
+            }),
+            object: json!({ "s": "x", "b": "YQ==", "l": [1.5, 0.5] }),
+            expect: Expect::Reject,
+            note: "a NaN built from a field cannot be ordered → REJECT",
+        },
+        ParityCase {
+            kind: "PwinNaNInt",
+            plural: "pwinnanints",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "s": { "type": "string", "maxLength": 8 },
+                    "b": { "type": "string", "format": "byte", "maxLength": 8 },
+                    "l": { "type": "array", "maxItems": 4, "items": { "type": "number" } }
+                },
+                "x-kubernetes-validations": [{ "rule": "!(1 <= double('NaN'))" }]
+            }),
+            object: json!({ "s": "x", "b": "YQ==", "l": [1.5, 0.5] }),
+            expect: Expect::Reject,
+            note: "an int ordered against a NaN is an error too → REJECT",
+        },
+        ParityCase {
+            kind: "PwinNaNMacro",
+            plural: "pwinnanmacros",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "s": { "type": "string", "maxLength": 8 },
+                    "b": { "type": "string", "format": "byte", "maxLength": 8 },
+                    "l": { "type": "array", "maxItems": 4, "items": { "type": "number" } }
+                },
+                "x-kubernetes-validations": [{ "rule": "self.l.map(x, x * 0.0 / 0.0).all(x, !(x >= 0.0))" }]
+            }),
+            object: json!({ "s": "x", "b": "YQ==", "l": [1.5, 0.5] }),
+            expect: Expect::Reject,
+            note: "a NaN computed in a macro cannot be ordered → REJECT",
+        },
+        ParityCase {
+            kind: "PwinNaNUnreached",
+            plural: "pwinnanunreacheds",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "s": { "type": "string", "maxLength": 8 },
+                    "b": { "type": "string", "format": "byte", "maxLength": 8 },
+                    "l": { "type": "array", "maxItems": 4, "items": { "type": "number" } }
+                },
+                "x-kubernetes-validations": [{ "rule": "self.s == 'x' || double('NaN') < 1.0" }]
+            }),
+            object: json!({ "s": "x", "b": "YQ==", "l": [1.5, 0.5] }),
+            expect: Expect::Accept,
+            note: "a NaN ordering evaluation does not reach is not refused → ACCEPT",
+        },
     ]
 }
 
