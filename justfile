@@ -9,6 +9,9 @@ default:
 # KIND_NODE_IMAGE.
 kind_node_image := env("KIND_NODE_IMAGE", "kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5")
 
+# The GitHub repository `release` reads CI results from and releases to.
+github_repo := "kube-rs/kube-cel"
+
 # --- CI / pre-publish checks (single source of truth) ---
 
 # Run all checks — CI runs this, you should too before push
@@ -228,6 +231,56 @@ release:
         echo "⚠ tag ${tag} already exists on origin"
         exit 1
     fi
+    # CI must have passed on that commit: the ci workflow's `check` job and its
+    # `apiserver parity (kind)` job, which `just check` does not cover. The
+    # latest push run of ci.yml for the SHA counts, at its latest attempt. Both
+    # jobs must be there, so a job renamed in ci.yml cannot pass silently.
+    pick_run='
+    import json, sys
+    runs = [r for r in json.load(sys.stdin)["workflow_runs"] if r["head_sha"] == sys.argv[1]]
+    if runs:
+        r = max(runs, key=lambda r: (r["run_number"], r["run_attempt"]))
+        print(r["id"], r["status"], r["html_url"])
+    '
+    judge_jobs='
+    import json, sys
+    status, url = sys.argv[1], sys.argv[2]
+    jobs = dict((j["name"], j) for j in json.load(sys.stdin)["jobs"])
+    required = ["check", "apiserver parity (kind)"]
+    missing = [n for n in required if n not in jobs]
+    if missing and status != "completed":
+        sys.exit(print("job " + ", ".join(missing) + " not listed yet (the run is " + status + ")") or 2)
+    if missing:
+        sys.exit(print("the ci run " + url + " has no job named " + ", ".join(missing)
+                       + "; if ci.yml renamed it, update the list in `just release`") or 3)
+    failed = [n + ": " + str(jobs[n]["conclusion"]) for n in required
+              if jobs[n]["status"] == "completed" and jobs[n]["conclusion"] != "success"]
+    if failed:
+        sys.exit(print("; ".join(failed) + " (" + url + ")") or 1)
+    pending = [n + ": " + jobs[n]["status"] for n in required if jobs[n]["status"] != "completed"]
+    if pending:
+        sys.exit(print("; ".join(pending)) or 2)
+    '
+    ci_runs=$(gh api "repos/{{github_repo}}/actions/workflows/ci.yml/runs?head_sha=${sha}&event=push&per_page=100")
+    ci_run=$(python3 -c "${pick_run}" "${sha}" <<< "${ci_runs}")
+    if [ -z "${ci_run}" ]; then
+        echo "⚠ no ci run for ${sha} yet (the push to main starts one); wait for it to finish, then rerun"
+        exit 1
+    fi
+    read -r ci_run_id ci_run_status ci_run_url <<< "${ci_run}"
+    ci_jobs=$(gh api "repos/{{github_repo}}/actions/runs/${ci_run_id}/jobs?per_page=100")
+    if ci_message=$(python3 -c "${judge_jobs}" "${ci_run_status}" "${ci_run_url}" <<< "${ci_jobs}"); then
+        ci_rc=0
+    else
+        ci_rc=$?
+    fi
+    case "${ci_rc}" in
+        0) echo "CI passed for ${sha} (${ci_run_url})" ;;
+        1) echo "⚠ CI failed for ${sha}: ${ci_message}"; exit 1 ;;
+        2) echo "⚠ CI for ${sha} has not finished: ${ci_message}"
+           echo "  wait for ${ci_run_url}, then rerun"; exit 1 ;;
+        *) echo "⚠ ${ci_message}"; exit 1 ;;
+    esac
     tmp=$(mktemp -d)
     trap 'git worktree remove --force "${tmp}/kube-cel" >/dev/null 2>&1 || true; rm -rf "${tmp}"' EXIT
     git worktree add --quiet --detach "${tmp}/kube-cel" "${sha}"
