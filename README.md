@@ -103,7 +103,7 @@ The validator walks the schema tree, compiles rules at each node, and evaluates 
 
 ### Schema-aware `format` support
 
-Fields with `format: "date-time"` or `format: "duration"` in the schema are automatically converted to CEL `Timestamp` / `Duration` values, matching K8s API server behavior:
+Fields with `format: "date-time"` or `format: "date"` in the schema are automatically converted to CEL `Timestamp` values, and `format: "duration"` to `Duration`, matching K8s API server behavior:
 
 ```rust
 let schema = json!({
@@ -130,7 +130,7 @@ As in the apiserver, an `x-kubernetes-list-type: set` list compares as a set and
 
 ### Field name escaping
 
-JSON field names that are CEL reserved words or contain special characters are automatically escaped when converting to CEL map keys, matching K8s API server behavior:
+JSON field names that are CEL reserved words or contain `__`, `.`, `-` or `/` are automatically escaped when converting to CEL map keys, matching K8s API server behavior (a single `_` stays as it is):
 
 | JSON field name | CEL access |
 |----------------|------------|
@@ -138,7 +138,8 @@ JSON field names that are CEL reserved words or contain special characters are a
 | `foo-bar` | `self.foo__dash__bar` |
 | `a.b` | `self.a__dot__b` |
 | `x/y` | `self.x__slash__y` |
-| `my_field` | `self.my__field` |
+| `a__b` | `self.a__underscores__b` |
+| `my_field` | `self.my_field` |
 
 ### Schema defaults
 
@@ -275,7 +276,7 @@ whatever the features: `all(i, v, ..)`, `exists(i, v, ..)`, `existsOne(i, v, ..)
 `semver`, `isSemver`, `major`, `minor`, `patch`, `isGreaterThan`, `isLessThan`, `compareTo`
 
 ### Quantity
-`quantity`, `isQuantity`, `isInteger`, `asInteger`, `asApproximateFloat`, `sign`, `add`, `sub`, `isGreaterThan`, `isLessThan`, `compareTo`
+`quantity`, `isQuantity`, `isInteger`, `asInteger`, `asApproximateFloat`, `sign` (global: `sign(<Quantity>)`), `add`, `sub`, `isGreaterThan`, `isLessThan`, `compareTo`
 
 ### Format
 `<string>.format(<list>)` with verbs: `%s`, `%d`, `%f`, `%e`, `%b`, `%o`, `%x`, `%X`
@@ -335,15 +336,18 @@ kube-cel = { version = "0.8", default-features = false, features = ["full"] }
 | `strings` | - | String extension functions |
 | `lists` | - | List extension functions, and cel-go's `ext.Lists` on the `Env` |
 | `sets` | - | Set operations |
-| `regex_funcs` | `regex` | Regex find/findAll |
+| `regex_funcs` | - | Regex find/findAll |
 | `urls` | - | URL parsing and accessors (a port of Go's `net/url`) |
 | `ip` | `ipnet` | IP/CIDR parsing and operations |
 | `semver_funcs` | `semver` | Semantic versioning |
 | `format` | - | String formatting |
 | `quantity` | - | Kubernetes resource quantities |
 | `named_format` | - | Named format validation (`format.dns1123Label()`, etc.) |
-| `validation` | `serde_json`, `serde`, `chrono`, `base64` | CRD validation pipeline, VAP evaluation, static analysis, schema defaults |
+| `validation` | `serde_json`, `serde`, `base64` | CRD validation pipeline, VAP evaluation, static analysis, schema defaults |
 | `full` | *(all of the above)* | Umbrella: every extension-function group **plus** `validation`. Not in `default` (which is functions-only) |
+
+`regex` and `chrono` are dependencies whatever the features: the standard
+`matches` and time conversions use them, and `cel` depends on both already.
 
 ## Versioning and stability
 

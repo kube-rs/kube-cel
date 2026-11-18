@@ -2,81 +2,59 @@
 
 ## [0.9.0] - Unreleased
 
-Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
+Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14))
+and brings the validation engine's verdicts in line with kube-apiserver
+v1.36.1 (cel-go v0.26), failing closed where it cannot match them (README
+"apiserver divergence"): each verdict change below was checked against a live
+apiserver (`just parity`). "Breaking" lists what code and rules may need to
+change, with migrations. Most entries under "Fixed" close a
+**fail-open** divergence (kube-cel passed what the apiserver rejects) and need
+no migration for rules the apiserver accepts.
 
 ### Breaking
-- **`cel` 0.14 → 0.16.** `cel` is a public dependency (`pub use cel`), so this
-  is breaking on its own. `cel::Context` gained a second lifetime
-  (`Context<'p, 'v>`); `KubeCelExt` is implemented for `Context<'_, '_>`.
-- **`string(<IP>)` / `string(<CIDR>)` need kube-cel's `Env`.** `cel` 0.16
-  refuses a context function whose name the `Env` already declares, and the
-  standard library declares `string`, so kube-cel can no longer override
-  `string` on a context (in 0.8 it reimplemented the standard conversions to do
-  so). The IP and CIDR conversions are now `string` overloads on the `Env`
-  built by the new `new_env()`. On a plain `Context::default().with_all()`,
-  `string(ip(...))` fails with "no such overload".
+
+#### Rust API
+
+- **`cel` 0.13 → 0.16** (0.8.0 depended on 0.13). `cel` is a public
+  dependency (`pub use cel`), so this is breaking on its own. `cel::Context`
+  gained a second lifetime (`Context<'p, 'v>`); `KubeCelExt` is implemented
+  for `Context<'_, '_>`.
+- **One environment: build it with `new_env()` and a context on it with
+  `new_context()`.** General use now gets the environment the validation
+  engine uses. `new_env()` adds `cel`'s upstream `lists` extension (with the
+  `lists` feature; cel-go's `ext.Lists`, with the `sortBy` macro), the
+  two-variable comprehension macros (`all(i, v, …)`, `exists(i, v, …)`,
+  `existsOne(i, v, …)`, `transformList`, `transformMap`, `transformMapEntry`)
+  and the `string(<IP>)` / `string(<CIDR>)` overloads, and `new_context()`
+  registers the same functions as validation. What moved to the `Env` is
+  missing from a context built otherwise:
+  - `string(<IP>)` / `string(<CIDR>)` need kube-cel's `Env`. `cel` 0.16
+    refuses a context function whose name the `Env` already declares, and the
+    standard library declares `string`, so kube-cel can no longer override
+    `string` on a context (in 0.8 it reimplemented the standard conversions to
+    do so). On a plain `Context::default().with_all()`, `string(ip(...))`
+    fails with "no such overload".
+  - `sortBy` and the two-variable comprehensions are macros: compile with
+    `env.compile(..)` on the environment from `new_env()`.
+    `Program::compile` knows only the standard macros, so such a program
+    fails on its iteration variable (`UndeclaredReference("x")`).
+  - `register_all` / `with_all` panic instead of silently registering
+    nothing. On a child scope (`Context::new_inner_scope`) `cel` reports
+    success and registers nothing; on a context whose `Env` already declares
+    one of kube-cel's names, `cel` 0.16 refuses the name. Both used to pass
+    silently. Neither happens on `Context::default()` or on `new_env()`.
   - Migration: build the env and context with
     `let env = Arc::new(kube_cel::new_env()); let ctx = kube_cel::new_context(Arc::clone(&env))?;`
-    and compile with `env.compile(..)`.
-- **The member form `<IP>.string()` / `<CIDR>.string()` (and `42.string()`,
-  `'a'.string()`, …) is now an error**, matching the apiserver, which rejects
-  it at compile time. Use the global form `string(x)`.
-- **`register_all` / `with_all` panic instead of silently registering
-  nothing.** On a child scope (`Context::new_inner_scope`) `cel` reports success
-  and registers nothing; on a context whose `Env` already declares one of
-  kube-cel's names, `cel` 0.16 refuses the name. Both used to pass silently.
-  Neither happens on `Context::default()` or on `new_env()`.
-- **The validation engine's CEL environment now mirrors the apiserver's base
-  environment** (`k8s.io/apiserver` `environment.MustBaseEnvSet(..)`): it is
-  the environment `new_env()` builds (see "One environment" below), and its
-  compile path adds a check of function names. Verdicts change:
-  - A rule, VAP expression or `messageExpression` that calls a function the
-    apiserver does not declare (`cel.bind`, the `math` library, `base64.*`,
-    `jsonpatch.escapeKey`, kube-cel's `isIPv4` / `isIPv6` / `isCIDRv4` /
-    `isCIDRv6`) or a global `min(..)` / `max(..)` (the apiserver only has
-    `<list>.min()` / `<list>.max()`) now fails to compile
-    (`ErrorKind::CompilationFailure`, `CompilationError::Parse` /
-    `MessageExpressionParse`, `VapError`). The whole AST is checked, so a call
-    evaluation never reaches (`self.s == '' || isIPv4(self.s)`, the body of a
-    comprehension over an empty list, the `messageExpression` of a rule that
-    holds) is refused too. The apiserver rejects all of these at registration;
-    all but `cel.bind` used to pass client-side: a **fail-open** divergence,
-    now closed. (`cel.bind` used to fail closed as `UnsupportedReference`.) The
-    names accepted are the functions the `k8s.io/apiserver` v0.36.1 base
-    environment declares (`src/validation/apiserver_functions.txt`, checked
-    against a live apiserver by `just parity`). One that kube-cel does not
-    implement (`optional.unwrap`, `<list>.unwrapOpt()`, the authorizer library
-    in a VAP) compiles as before, and fails closed only when evaluation reaches
-    it.
-  - String `reverse()` (`'abc'.reverse()`) is rejected (`EvaluationError`), as
-    the apiserver rejects it at registration.
-  - `sortBy` and the two-variable comprehensions (`all(i, v, …)`,
-    `exists(i, v, …)`, `transformList`, `transformMap`, …) now evaluate instead
-    of failing closed with `UnsupportedReference`. `slice`, `flatten`,
-    `distinct`, `reverse`, `sort` and `lists.range` already evaluated; they are
-    now a port of cel-go's `ext.Lists` declared on the `Env` (it replaces
-    kube-cel's own implementations of before), so, for one, `sort()` now
-    fails on a list mixing `int` and `double` ("list elements must have the
-    same type"), and an extra argument is an error rather than ignored. It
-    needs the `lists` feature: without it, a rule reaching a list function is
-    rejected (`UnsupportedReference`), and one using `sortBy` (a macro) does
-    not compile.
-  - `ErrorKind::UnsupportedReference` now covers a reference evaluation cannot
-    resolve (a variable kube-cel does not bind, a function the apiserver declares but
-    kube-cel does not implement or has behind a disabled feature, or a function
-    called in a form none of its overloads takes, such as `ip(..).string()`); a
-    function the apiserver does not declare is a `CompilationFailure`.
-  - Migration: none for rules the apiserver accepts. The functions above are
-    gone from kube-cel altogether (the next entry, and global `min` / `max`
-    under "One environment").
+    and compile with `env.compile(..)`. `KubeCelExt` is deprecated (see
+    Deprecated).
 - **kube-cel ships only functions the apiserver declares.** The `math.*`
   functions (18) and `base64.encode` / `base64.decode`, kube-cel's copies of
   cel-go's `ext.Math` and `ext.Encoders`, and `isIPv4`, `isIPv6`, `isCIDRv4`,
   `isCIDRv6` and `jsonpatch.escapeKey` are removed from `new_env()`,
   `new_context()` and `KubeCelExt`, together with the `math`, `encoders` and
   `jsonpatch` Cargo features (a manifest that still enables one fails to
-  resolve). The validation engine already refused all of them (previous
-  entry), so verdicts do not change.
+  resolve). The validation engine refuses all of them as undeclared (see
+  Fixed), so verdicts do not change.
   - Migration: add `cel`'s own extensions to the `Env` before sharing it.
     `encoders` needs `cel`'s `ext_encoders` feature, on by default.
     ```rust
@@ -96,22 +74,19 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     `isIPv6`), `isCIDRv4(s)` → `isCIDR(s) && cidr(s).ip().family() == 4` (`6`
     for `isCIDRv6`), `jsonpatch.escapeKey(k)` →
     `k.replace('~', '~0').replace('/', '~1')`.
-- **One environment: `new_env()` / `new_context()` give general use the
-  environment the validation engine uses.** `new_env()` adds `cel`'s upstream
-  `lists` extension (with the `lists` feature; cel-go's `ext.Lists`, with the
-  `sortBy` macro) and the two-variable comprehension macros (`all(i, v, …)`,
-  `exists(i, v, …)`, `existsOne(i, v, …)`, `transformList`, `transformMap`,
-  `transformMapEntry`), and `new_context()` registers the same functions as
-  validation. kube-cel's own `slice`, `flatten`, `distinct`, `reverse`, `sort`
-  and `lists.range` are removed in favour of the upstream ones, and so is its
-  string `reverse()`. `sum`, `isSorted`, the list `min` / `max`, `indexOf`,
-  `lastIndexOf`, `first` and `last` stay. Validation verdicts do not change;
-  general-purpose evaluation does:
+- **Function results change outside validation too.** kube-cel's own
+  `slice`, `flatten`, `distinct`, `reverse`, `sort` and `lists.range` are
+  removed in favour of the upstream ones on the `Env`, and so is its string
+  `reverse()`; `sum`, `isSorted`, the list `min` / `max`, `indexOf`,
+  `lastIndexOf`, `first` and `last` stay. The results below now match the
+  apiserver's, in validation and in general use alike:
   - `'abc'.reverse()` is an error: the apiserver's environment has no string
-    `reverse()`.
-  - `sort()` refuses a list mixing numeric types (`[3, 1u, 2.0].sort()`), a
-    `null`, a NaN, or elements it cannot compare even alone (`[{}].sort()`,
-    `[[1]].sort()`), all of which kube-cel's own sorted; it sorts `bytes` now.
+    `reverse()` and rejects it at registration (in validation it is an
+    `EvaluationError` where evaluation reaches it, fail-closed).
+  - `sort()` refuses a list mixing numeric types (`[3, 1u, 2.0].sort()`, "list
+    elements must have the same type"), a `null`, a NaN, or elements it
+    cannot compare even alone (`[{}].sort()`, `[[1]].sort()`), all of which
+    kube-cel's own sorted; it sorts `bytes` now.
   - The list functions are member functions only: the global forms
     `sort([2, 1])`, `reverse([1, 2])`, `distinct([1, 1])` and
     `slice([1, 2], 0, 1)` are errors.
@@ -124,15 +99,17 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     `min` / `max` fell back to a variadic form that neither the apiserver
     (only `<list>.min()` / `<list>.max()`) nor the `cel` standard library has.
     The list members stay.
-  - `sortBy` and the two-variable comprehensions are macros: compile with
-    `env.compile(..)` on the environment from `new_env()`.
-    `Program::compile` knows only the standard macros, so such a program
-    fails on its iteration variable (`UndeclaredReference("x")`).
-  - Migration: build the env and context with `new_env()` / `new_context()`
-    and compile with `env.compile(..)`. Write a global `min(a, b)` as
-    `[a, b].min()`, and a global list call as a member call
-    (`[2, 1].sort()`). For a string `reverse()` outside the apiserver's
-    environment, declare the overload on the `Env` yourself:
+  - The member form `<IP>.string()` / `<CIDR>.string()` (and `42.string()`,
+    `'a'.string()`, …) is an error, matching the apiserver, which rejects it
+    at compile time. Use the global form `string(x)`.
+  - `format.named(name)` returns `optional(Format)`, as in the apiserver:
+    `optional.none()` for an unknown name. Unwrap it with `.value()`.
+  - Quantity `sign()` is a global function only, as in the apiserver
+    (`quantity(..).sign()` is an error): write `sign(q)`.
+  - Migration: write a global `min(a, b)` as `[a, b].min()`, a global list
+    call as a member call (`[2, 1].sort()`), and `x.string()` as
+    `string(x)`. For a string `reverse()` outside the apiserver's environment,
+    declare the overload on the `Env` yourself:
     ```rust
     use kube_cel::cel::{self, common::types::CelString};
     fn reverse(this: &CelString<'_>) -> CelString<'static> {
@@ -145,29 +122,256 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     `indexOf`, `lowerAscii`, `format`, … under kube-cel's names, so
     `new_context()` refuses an environment with it (`RegisterError::Rejected`)
     unless kube-cel's `strings`, `lists` and `format` features are all off.
-- **Validation verdicts follow the apiserver in more places.** Each change below
-  was checked against a live kube-apiserver v1.36.1 (`just parity`):
-  - Field-name escaping escapes only `__` (to `__underscores__`), `.`, `-`
-    and `/`; a single `_` stays as it is. A rule on a field `my_field` is
-    `self.my_field`, as in the apiserver, no longer `self.my__field`.
-  - Under `optionalOldSelf: true`, `oldSelf` is a CEL optional:
-    `optional.none()` on create, `optional.of(old)` on update. Write
-    `!oldSelf.hasValue() || … oldSelf.value() …` instead of
-    `oldSelf == null || …`. As cel-go resolves an optional variable through
-    its native value, `oldSelf.value()` holds a list or map of the old
-    object as plain JSON (a set a plain list, an object's `null` and
-    undeclared fields present, numbers as JSON has them), and the rule's
-    `messageExpression` sees `oldSelf` itself, not the optional.
+- **Error kinds follow where the apiserver refuses.** A rule, VAP expression
+  or `messageExpression` that calls a function the apiserver does not declare
+  is a `CompilationFailure` (see Fixed). `ErrorKind::UnsupportedReference`
+  now covers a reference evaluation cannot resolve: a variable kube-cel does
+  not bind, a function the apiserver declares but kube-cel does not implement
+  or has behind a disabled feature, or a function called in a form none of
+  its overloads takes, such as `ip(..).string()`. Its message no longer
+  blames an unsupported CEL macro or function; it names the reference.
+  `cel.bind`, which used to fail closed as `UnsupportedReference`, is now a
+  `CompilationFailure`.
+
+#### Rules to update
+
+- **Field-name escaping escapes only `__` (to `__underscores__`), `.`, `-`
+  and `/`**; a single `_` stays as it is. A rule on a field `my_field` is
+  `self.my_field`, as in the apiserver, no longer `self.my__field` (which
+  0.8's README table showed).
+  - Migration: write `self.my_field`.
+- **Under `optionalOldSelf: true`, `oldSelf` is a CEL optional**:
+  `optional.none()` on create, `optional.of(old)` on update. As cel-go
+  resolves an optional variable through its native value, `oldSelf.value()`
+  holds a list or map of the old object as plain JSON (a set a plain list, an
+  object's `null` and undeclared fields present, numbers as JSON has them),
+  and the rule's `messageExpression` sees `oldSelf` itself, not the optional.
+  - Migration: write `!oldSelf.hasValue() || … oldSelf.value() …` instead of
+    `oldSelf == null || …`.
+- **`apiVersion`, `apiGroup` and `kind` are no longer variables of root
+  rules.** kube-cel bound them from a `RootContext`; the apiserver declares
+  no such variables and rejects a CRD whose rule names one ("undeclared
+  reference to 'kind'", checked on v1.36.1). Such a rule now fails to
+  compile (`ErrorKind::CompilationFailure`) on every entry point, with or
+  without a `RootContext`.
+  - Migration: read the object's own fields in a root rule:
+    `self.apiVersion`, `self.kind`, `self.metadata.name` (the API group is
+    the part of `self.apiVersion` before the `/`). `RootContext` and the
+    `*_with_context` methods are deprecated (see Deprecated).
+- **CEL rules under `allOf`, `anyOf`, `oneOf` or `not` fail to compile.**
+  The apiserver refuses `x-kubernetes-validations` anywhere under a schema
+  combinator, at any depth (in its `properties`, `items`, nested
+  combinators), as not structural ("must be empty to be structural",
+  checked on v1.36.1). kube-cel evaluated the rules under `allOf` / `anyOf`
+  / `oneOf` as if they were on the node and ignored those under `not`, so an
+  object satisfying them passed: a **fail-open** divergence, now closed.
+  Every entry point rejects the object with one root `CompilationFailure`
+  per node holding rules (`CompilationError::RuleInCombinator`, also listed
+  by `CompiledSchema::compilation_errors()`); an empty rule list is fine.
+  - Migration: move the rules onto the node the combinator sits on.
+- **Rule fields the apiserver refuses at registration are refused.**
+  Beside the expressions, the apiserver checks a rule's other fields when it
+  registers the CRD or policy (checked on v1.36.1): a static `message` that
+  is blank but not empty, or holds a line break once trimmed (CRD rules and
+  VAP validations); a CRD rule holding a line break without a `message`; a
+  `reason` other than `FieldValueRequired`, `FieldValueForbidden`,
+  `FieldValueInvalid` or `FieldValueDuplicate`; a `fieldPath` that is blank,
+  holds a line break or names no field of the rule's node (it starts with
+  `.` or `[`, steps through `.name` or `['name']`, and cannot index a list).
+  kube-cel accepted all of them. A CRD rule with one is now rejected on
+  every object (`ErrorKind::InvalidRule`, `CompilationError::InvalidRuleField`),
+  and a VAP expression with a refused message fails to compile (`VapError`).
+  - Migration: fix the field. A `fieldPath` names a field relative to the
+    rule's node and starts with `.`: `spec.x` on the root becomes `.spec.x`.
+- **A VAP's declarations come from the policy, its values from the
+  request**, as in the apiserver. `VapEvaluator` declares `params` only for
+  a policy with a `paramKind`: the new `VapEvaluatorBuilder::has_param_kind(bool)`
+  says whether it has one; unset, it follows `params(..)` (a parameter
+  object set means a `paramKind`). `has_param_kind(false)` with `params(..)`,
+  in either order, is a policy without one: `params` is not declared and the
+  object is not bound. Each `CompiledVapExpression` keeps whether `params`
+  was declared, and `evaluate_compiled` binds `params` to `null` when it was
+  and the evaluator has no parameter object, as for a binding with no
+  `paramRef`. An expression naming `params` on an evaluator with neither
+  used to compile and fail only when evaluation reached `params`; it now
+  fails to compile. So does one naming `variables`: it comes with
+  `spec.variables`, which kube-cel does not model, and the apiserver rejects
+  it without them.
+  - Migration: none for expressions the apiserver accepts in the policy they
+    come from, but for those naming `variables`. To compile a policy's
+    expressions once, ahead of the requests, pass its
+    `spec.paramKind.is_some()`; per request, set the parameter object, or
+    nothing for a binding with no `paramRef`:
+    ```rust
+    let compiled = VapEvaluator::builder()
+        .has_param_kind(true)
+        .build()
+        .compile_expressions(&expressions);
+    let results = VapEvaluator::builder()
+        .object(object)
+        .params(param_object) // or omit it: `params` is null
+        .build()
+        .evaluate_compiled(&compiled);
+    ```
+    A policy with `spec.variables` cannot be evaluated client-side until
+    kube-cel models them (README "apiserver divergence").
+
+### Added
+
+- `new_env() -> cel::Env`: kube-cel's environment, the apiserver's base CEL
+  environment as far as kube-cel models it: the `cel` standard library,
+  cel-go's `ext.Lists` (feature `lists`), the two-variable comprehension
+  macros and `string(<IP>)` / `string(<CIDR>)` (feature `ip`). The validation
+  engine uses it too. It does not install `cel`'s `lists` extension, whose
+  functions it declares itself, so adding that extension to it fails.
+- `new_context(env) -> Result<cel::Context, RegisterError>`: a root context on
+  `env` with every compiled-in function registered, the path that replaces
+  `KubeCelExt`. `env` must start from `new_env()`, with `cel`'s extensions or
+  overloads of your own added as you need.
+- `RegisterError`: `IncompleteEnv` for an `env` that does not start from
+  `new_env()` (such as `Env::stdlib()`), `Rejected { function, source }` for an
+  `env` that declares one of kube-cel's names (such as with `cel`'s `strings`
+  extension).
+- `VapEvaluatorBuilder::has_param_kind(bool)`: whether the policy has a
+  `paramKind`, which declares `params` (see Breaking).
+- `CompilationError::RuleInCombinator` and `CompilationError::InvalidRuleField`
+  (see Breaking).
+- `SchemaFormat::Date` (`format: date` binds as a timestamp) and
+  `SchemaFormat::Number` (`type: number` binds as a `double`); see Fixed.
+- `CompiledSchema::list_map_keys` (an `x-kubernetes-list-type: map` node's
+  keys, which pair new and old items for transition rules) and
+  `CompiledSchema::nullable`.
+
+### Deprecated
+
+- `RootContext`, `Validator::validate_with_context`,
+  `Validator::validate_compiled_with_context` and
+  `Validator::validate_with_defaults_and_context`. No rule can read what
+  `RootContext` bound (see Breaking), so the methods ignore it and validate
+  as `validate` / `validate_compiled`. Use those, and `self.apiVersion` /
+  `self.kind` in a root rule.
+- `KubeCelExt::register_all` / `with_all`. They keep working, but register
+  only the functions that live on a context: on `Context::default()` the
+  `lists` extension, the macros and `string(<IP>)` are missing. Use
+  `new_env()` and `new_context()`. They will be removed once kube-cel's
+  functions move to `Env` overloads
+  ([#17](https://github.com/kube-rs/kube-cel/issues/17)).
+
+### Changed
+
+- `regex` is a dependency whatever the features (it was one of
+  `regex_funcs`): `matches` compiles with it. `chrono` is a dependency
+  whatever the features (it was one of `validation`): the standard time
+  conversions build `cel`'s time values. `cel` depends on both already. The
+  `urls` feature no longer depends on the `url` crate.
+- Dependency lower bounds are raised to the oldest versions that build and
+  pass the tests under `-Z direct-minimal-versions`: `chrono` 0.4.39 (`cel`
+  0.16 needs it), `regex` 1.10.5, `serde` 1.0.103, `serde_json` 1.0.25.
+- The validation engine (`Validator`, `compile_schema`, `VapEvaluator`, static
+  analysis) compiles with `Env::compile` on a shared `Env` from `new_env()`,
+  modelled on the apiserver's base environment (`k8s.io/apiserver`
+  `environment.MustBaseEnvSet(..)`), instead of `Program::compile`, so it
+  sees the environment's macros and overloads.
+- Static analysis (`check_rule_scope`, `analyze_rule`) follows the apiserver's
+  declarations: `ScopeContext::CrdValidation` takes `self` and `oldSelf`
+  only (no `apiVersion`, `apiGroup`, `kind`), and
+  `ScopeContext::AdmissionPolicy` no longer takes `self` and `oldSelf`. It
+  resolves names as the compile-time check does, so a type name (`int`,
+  `net.IP`), a function namespace (`optional.of`, `format.dns1123Label()`) or
+  a macro's variable inside the macro is no longer reported as a variable
+  outside its scope, while a macro's variable outside the macro is.
+- `sortBy` and the two-variable comprehensions (`all(i, v, …)`,
+  `exists(i, v, …)`, `transformList`, `transformMap`, …) evaluate in the
+  validation engine instead of failing closed with `UnsupportedReference`.
+  The list functions (`sortBy`, `slice`, `flatten`, `distinct`, `reverse`,
+  `sort`, `lists.range`) are now a port of cel-go's `ext.Lists` declared on
+  the `Env` (see Breaking for how their results changed) and need the
+  `lists` feature: without it, a rule reaching a list function is rejected
+  (`UnsupportedReference`), and one using `sortBy` (a macro) does not
+  compile.
+
+### Fixed
+
+Each group below follows kube-apiserver v1.36.1, checked live.
+
+- **Rules the apiserver refuses at registration fail to compile, reached or
+  not** (`ErrorKind::CompilationFailure`, `CompilationError::Parse` /
+  `MessageExpressionParse`, `VapError`). The apiserver rejects all of these
+  when it registers the CRD or policy; they used to pass client-side unless
+  evaluation reached them. More such checks sit with the areas they belong
+  to below (regular expressions, time conversions, constant conversions,
+  quantities).
+  - A call to a function the apiserver does not declare (`cel.bind`, the
+    `math` library, `base64.*`, `jsonpatch.escapeKey`, kube-cel's former
+    `isIPv4` / `isIPv6` / `isCIDRv4` / `isCIDRv6`), a global `min(..)` /
+    `max(..)` (the apiserver only has `<list>.min()` / `<list>.max()`). The
+    whole AST is checked, so a call evaluation never
+    reaches (`self.s == '' || isIPv4(self.s)`, the body of a comprehension
+    over an empty list, the `messageExpression` of a rule that holds) is
+    refused too. All but `cel.bind` used to pass client-side. The names
+    accepted are the functions the `k8s.io/apiserver` v0.36.1 base
+    environment declares (`src/validation/apiserver_functions.txt`, checked
+    against a live apiserver by `just parity`). One that kube-cel does not
+    implement (`optional.unwrap`, `<list>.unwrapOpt()`, the authorizer library
+    in a VAP) compiles as before, and fails closed only when evaluation
+    reaches it.
+  - An identifier not declared where it appears. A CRD rule and its
+    `messageExpression` read `self` and `oldSelf`; a VAP expression reads
+    `object`, `oldObject`, `request`, `namespaceObject`, `authorizer` (not in
+    its `messageExpression`), and `params` when the policy has a `paramKind`
+    (see Breaking); a macro's variables (`all`, `exists`, `map`, `filter`,
+    `sortBy`, `optMap`, the two-variable forms, …) are declared inside the
+    macro only; type names (`int`, `string`, `net.IP`,
+    `google.protobuf.Timestamp`, …) everywhere. A typo
+    (`self.x > 0 || slef.y == 1`), a macro's variable outside the macro (or
+    bound as `.x` and read as `x`), `__result__` as the variable of `all`,
+    `exists`, `map`, `filter` or `sortBy` (cel-go's legacy accumulator name),
+    `authorizer` or `object` in a CRD rule, `self` in a VAP expression,
+    `authorizer` in a VAP `messageExpression`, `params` in a VAP expression
+    of a policy without a `paramKind`, `variables` in any VAP expression,
+    `dyn` or `duration` used as a value, or the construction of an
+    undeclared message type (`Foo{a: 1}`) is refused; the README "no type
+    checker" row no longer covers them. Field names are not checked
+    (`self.undeclared` on a schema without it still needs a type checker).
+    `.x` naming a macro's variable `x` is refused too, though the apiserver
+    reads the macro's `x`: `cel` looks a leading-dot name up outside the
+    macros, so it cannot evaluate it alike (README "apiserver divergence",
+    fail-closed). The declared type names and message types were measured
+    one by one, as values and as constructions, so a name the apiserver
+    accepts (`google.protobuf.Struct.FieldsEntry`, `duration{}`) compiles.
+  - Every rule in the schema is compiled before the object is walked, as the
+    apiserver compiles them all when it registers the CRD. A rule or
+    `messageExpression` that does not compile on a node the object does not
+    reach (an omitted property, the items of an empty list, a node past the
+    64-level depth cap) used to pass unchecked. The object is then rejected
+    with those compilation errors alone; their `field_path` names the schema
+    node (`spec.items[*]`, a map value as `*`). A valid rule past the depth
+    cap still passes under a shallow object: the apiserver has no nesting
+    limit (v1.36.1 registers a 400-level CRD), so the README no longer
+    claims it rejects deep schemas.
+  - A rule reading `oldSelf` in the items of a list that is not
+    `x-kubernetes-list-type: map` (at any depth below it), and
+    `optionalOldSelf` set on a rule that does not read `oldSelf`, are
+    `CompilationFailure`s for every object. Both used to pass (the first
+    skipped its rule). As in the apiserver, a rule uses `oldSelf` when any
+    identifier in it is named `oldSelf`, a comprehension variable included
+    (`[1].all(oldSelf, oldSelf > 0)`), so such a rule is also skipped on
+    create. An empty `messageExpression` (`""`) counts as unset.
+- **Values bind as the apiserver binds them, by their schema.**
   - Item-level transition rules pair each new list item with the old item of
     the same `x-kubernetes-list-map-keys` in an `x-kubernetes-list-type: map`
     list, instead of the old item at the same index. With several keys, float
     key values compare to six decimals, as the apiserver's `%f` key does.
-  - A JSON-null old value counts as no old value: a transition rule skips, and
-    under `optionalOldSelf` the rule sees `optional.none()`.
+  - A JSON-null old value counts as no old value: a transition rule skips,
+    and under `optionalOldSelf` the rule sees `optional.none()`.
   - `type: number` binds as `double` even when the JSON number is integral
     (`self.x / 2.0` with `x: 1` is `0.5`), whatever its `format`; `format:
     date` binds as a timestamp, and a `format: date` string that is not a
-    valid date is an `EvaluationError` at its field.
+    valid date is an `EvaluationError` at its field. A schema `format:
+    duration` parses as the apiserver's `strfmt.ParseDuration`: Go's
+    `time.ParseDuration` exactly (`µs` / `μs`, a `+` sign, every overflow
+    refused), then strfmt's word units (`1d`, `2 hours`); a duration it
+    cannot parse is an `EvaluationError` at its field.
   - Map-list number keys compare as the apiserver decodes JSON: an integer
     past int64 is a float (2^63 and 2^63 + 1 are one key), and a single float
     key `-0.0` equals `0.0`.
@@ -230,40 +434,36 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     `indexOf`, `lastIndexOf`, `first`, `last`, `sets.*`, `format`) take such
     lists and objects; `indexOf`, `lastIndexOf` and `sets.*` compare a set
     element as a set, and `first` / `last` return it as one.
-  - Migration: none for rules the apiserver accepts.
-- **Kubernetes library functions follow the apiserver in more places** (each
-  checked live on v1.36.1):
-  - `format.named(name)` returns `optional(Format)`, as in the apiserver:
-    `optional.none()` for an unknown name. Unwrap it with `.value()`.
-  - Validity in `isURL`, `url()` and `format.uri()` follows Go's
-    `url.ParseRequestURI`: a bad `%` escape, a control character, a leading
-    space or, for http/https, a second colon in the host is refused; an
-    absolute path (`/foo`) is accepted by `format.uri()`.
-  - The `url()` accessors return what Go's `url.URL` holds, as in the
-    apiserver, which checks the string with `url.ParseRequestURI` and parses
-    it with `url.Parse`: `getHost()` / `getPort()` keep a default port
-    (`url('http://h:80/').getPort()` is `80`, it was empty), `getHost()` of a
-    path is empty (it was `localhost`), the host is unescaped but not
-    lowercased, a `#fragment` is split off, `//host/p` has a host,
-    `getEscapedPath()` keeps the path's own escaping, `getQuery()` skips a
-    pair with a `;` or a bad escape, `==` compares Go's `String()` (so
-    `url('http://H:80/') != url('http://h/')`), and `url('*')` converts. The
-    accessors read a WHATWG parse before, which differed in each of these: a
-    **fail-open**, now closed. A component that is not UTF-8 once unescaped
-    (`url('http://h%80x/').getHost()`) is an error (fail-closed), as a CEL
-    string here must be UTF-8. The `urls` feature no longer depends on the
-    `url` crate.
-  - `format.byte()` requires standard, padded base64 and refuses the empty
-    string; `format.date()` / `format.datetime()` refuse a `+`-signed
-    component and a leap second.
-  - Lenient `semver(x, true)` / `isSemver(x, true)` strip only a lowercase
-    `v` and refuse a fourth component (`1.2.3.4`).
-  - Quantity comparison is exact for magnitudes beyond `i128` scaling
-    (`compareTo` used to call quantities 3 apart equal there).
+- **Defaults, pruning and messages.**
+  - Schema defaults fill in under a parent that was itself just defaulted
+    (`spec: {default: {}}` with a defaulted `spec.x`), and a present-but-null
+    field that is not `nullable` takes its default, as in the apiserver. A
+    `default: null` is no default and is skipped.
+  - A `null` field or map value under a schema node that is neither
+    `nullable` nor has a `default` is pruned before defaulting and before the
+    rules run, as the apiserver does (`apply_defaults` included): a rule sees
+    it absent (`!has(self.x)` holds). A `null` list item stays. And no rule
+    runs at a null node, nor below it; kube-cel used to evaluate the rules of
+    a nullable object that was `null` with `self == null`.
+  - Under `x-kubernetes-preserve-unknown-fields`, the rules under
+    `additionalProperties` are evaluated and its `default`s applied, as the
+    apiserver does. Both used to be skipped, so an object breaking such a rule
+    passed (fail-open) and a rule reading such a default failed.
+  - A `messageExpression` result is trimmed, and an empty, multi-line or
+    over-5 KiB result falls back to `message` (CRD rules and VAP validations).
+- **VAP variables.**
+  - `object` / `oldObject` / `params` / `namespaceObject` are bound without
+    field-name escaping, so `object.metadata.labels['app.kubernetes.io/name']`
+    resolves. An integer past `i64` in them (and in an `optionalOldSelf`
+    rule's `oldSelf.value()`) binds as a `double`, as Kubernetes' JSON decoder
+    reads it, not a `uint`.
+  - `namespaceObject` is `null` when no namespace object is set (a
+    cluster-scoped request), as on the apiserver; `namespaceObject == null`
+    used to fail as an unresolved reference.
 - **The standard time and number conversions, `string()` of a time value,
   duration arithmetic and optional `or` / `orValue` follow cel-go v0.26**:
   `new_env()` puts cel-go's in front of `cel`'s, through macros, so general
-  use and validation both see them (each checked live on v1.36.1):
+  use and validation both see them.
   - `duration(string)` is Go's `time.ParseDuration` and `timestamp(string)`
     Go's `time.Parse(time.RFC3339, ..)` with cel-go's range. A duration past
     int64 nanoseconds, an exponent, a sign between components, trailing text,
@@ -271,7 +471,8 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     they were accepted, a **fail-open**, now closed. A `,` before the
     fraction, a one-digit hour, an offset minute of 60 and the units `µs` /
     `μs` convert; they were errors. A timestamp offset of 24 hours or more,
-    which Go takes, is still an error (fail-closed).
+    which Go takes, is still an error (fail-closed, a README "apiserver
+    divergence" row).
   - A literal argument the conversion refuses fails to compile, reached or not
     (`true || duration('1e3s') > duration('0s')`), as the apiserver's
     literal validators refuse it at registration; so does `timestamp(n)` with
@@ -298,11 +499,25 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   - `x.or(y)` and `x.orValue(y)` evaluate `y` only when `x` is an optional
     holding no value (`optional.of(1).orValue(1 / 0)` is `1`, it was an
     error), and return an `x` that is not an optional as it is.
-  - Migration: none for rules the apiserver accepts.
+  - A map literal that repeats a key keeps the last entry (`{'k': 1, 'k':
+    2}['k']` is 2), and `1` and `1u` are two keys, as in cel-go: `new_env()`
+    turns off `cel`'s duplicate-key error, which refused both (fail-closed).
+- **A type conversion of a constant that fails is refused at compile time**
+  (`CompilationFailure`, reached or not): `int('x')`, `uint(-1)`,
+  `string(b'\xff')`, `int(dyn('x'))`. The apiserver builds each rule's
+  program at registration with cel-go's `OptOptimize`, which folds a
+  conversion (`bool`, `bytes`, `double`, `duration`, `dyn`, `int`, `string`,
+  `timestamp`, `type`, `uint`) of a literal, of a folded conversion or of a
+  list or map literal of them, and rejects the CRD when one fails; such a
+  rule passed client-side where evaluation did not reach it, a **fail-open**,
+  now closed. Nothing else is folded, as in cel-go, except that cel-go also
+  folds a type name read as a value (`type(int)`, `dyn(int)`) and kube-cel
+  does not. No verdict changes: the only conversions of a type that
+  type-check (`type`, `dyn`) cannot fail, and any other (`int(int)`) is in
+  the no-type-checker exception.
 - **Regular expressions are RE2's**, as in the apiserver (Go's `regexp`):
   `matches`, `find` and `findAll` check a pattern with a port of Go's
-  `regexp/syntax` before the `regex` crate compiles it (each checked live on
-  v1.36.1).
+  `regexp/syntax` before the `regex` crate compiles it.
   - A pattern Go refuses and the `regex` crate takes (`\u0041`, `(?x)`, `a**`,
     `a{1001}`, `[a--b]`, `[[:foo:]]`, `\p{Emoji}`, `\p{sc=Greek}`, a Unicode 16
     script, `\p{Old_Italic}`) is an error; it matched, a **fail-open**, now
@@ -340,65 +555,18 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     handful of others) is an error noted as unsupported (fail-closed); so is
     any match of such a pattern where `regex` resolves to tables other than
     16.0.0's, which kube-cel checks once.
-  - Migration: none for rules the apiserver accepts.
-- **A type conversion of a constant that fails is refused at compile time**
-  (`CompilationFailure`, reached or not): `int('x')`, `uint(-1)`,
-  `string(b'\xff')`, `int(dyn('x'))`. The apiserver builds each rule's
-  program at registration with cel-go's `OptOptimize`, which folds a
-  conversion (`bool`, `bytes`, `double`, `duration`, `dyn`, `int`, `string`,
-  `timestamp`, `type`, `uint`) of a literal, of a folded conversion or of a
-  list or map literal of them, and rejects the CRD when one fails; such a
-  rule passed client-side where evaluation did not reach it, a **fail-open**,
-  now closed. Nothing else is folded, as in cel-go, except that cel-go also
-  folds a type name read as a value (`type(int)`, `dyn(int)`) and kube-cel
-  does not. No verdict changes: the only conversions of a type that
-  type-check (`type`, `dyn`) cannot fail, and any other (`int(int)`) is in
-  the no-type-checker exception.
-- **A quantity update whose result depends on evaluation order is refused**
-  at compile time (`CompilationFailure`, reached or not): an `add`, `sub`,
-  `compareTo`, `isGreaterThan` or `isLessThan` on a quantity held by a
-  variable (a comprehension's, or reached through `dyn(..)` or `[q][0]`) in a
-  call's receiver or arguments, or in the second operand of a two-operand
-  call, next to a part that could fail or read a quantity. The apiserver's
-  quantities share state, and `cel` evaluates a call's arguments before its
-  receiver and skips a second operand after a failure, where cel-go does
-  neither; such a rule could pass client-side where the apiserver rejects
-  it. Fail-closed: an update of a new quantity
-  (`quantity(s)`, `add` / `sub` on one), one next to parts that can neither
-  fail nor read a quantity (a comprehension variable, a literal,
-  `quantity(<literal>)`) and one where both orders agree (`&&`, `||`) are not
-  refused.
-  For the same reason an error kube-cel has where the apiserver has a value
-  (a timestamp offset of a day or more, a URL component that is not UTF-8, a
-  declared function kube-cel does not implement, a policy's `authorizer`,
-  which kube-cel does not bind) now fails the rule even where CEL absorbs the
-  error (`… || true`).
-- **Every rule in the schema is compiled before the object is walked**, as
-  the apiserver compiles them all when it registers the CRD. A rule or
-  `messageExpression` that does not compile on a node the object does not
-  reach (an omitted property, the items of an empty list, a node past the
-  64-level depth cap) used to pass unchecked: a **fail-open**, now closed. The
-  object is then rejected with those compilation errors alone; their
-  `field_path` names the schema node (`spec.items[*]`, a map value as `*`).
-  A valid rule past the depth cap still passes under a shallow object: the
-  apiserver has no nesting limit (v1.36.1 registers a 400-level CRD), so the
-  README no longer claims it rejects deep schemas.
-- **`oldSelf` rules the apiserver refuses at registration are refused**: a
-  rule reading `oldSelf` in the items of a list that is not
-  `x-kubernetes-list-type: map` (at any depth below it), and `optionalOldSelf`
-  set on a rule that does not read `oldSelf`, are `CompilationFailure`s for
-  every object. Both used to pass (the first skipped its rule): a
-  **fail-open**, now closed. As in the apiserver, a rule uses `oldSelf` when
-  any identifier in it is named `oldSelf`, a comprehension variable included
-  (`[1].all(oldSelf, oldSelf > 0)`), so such a rule is also skipped on create.
-  An empty `messageExpression` (`""`) counts as unset.
 - **Strings and `format()` follow cel-go v0.26**, the version kube-apiserver
-  v1.36.1 uses (each checked live):
+  v1.36.1 uses:
   - `indexOf` / `lastIndexOf`: a negative offset is an error; with an offset an
     empty needle returns the offset unchanged (`'hello'.indexOf('', -5)` is
     `-5`), and `lastIndexOf` with an offset at or past the length is `-1`.
   - `split('')` splits into characters without empty ends; `join()` errors on
     a non-string element.
+  - `replace(old, new, n)` with a negative `n` replaces every match, as Go's
+    `strings.Replace` does (it replaced nothing, a **fail-open**:
+    `'aaa'.replace('a', 'b', -1) == 'aaa'` held). `replace`, `findAll`,
+    `charAt`, `indexOf` and `substring` no longer narrow an `int` with `as
+    usize`, which truncated values past `u32::MAX` on 32-bit targets.
   - `%s`: a whole double prints without `.0` and turns scientific from exponent
     6 (`1e+06`); inside a list or map a double is `%.6f` and an infinity is
     quoted, map entries are sorted, and timestamps, durations, bytes and
@@ -422,332 +590,183 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     (Unicode 15.0.0, so `["\u0378"]`), and writes a type value bare
     (`[int]`). The output differed before, a documented **fail-open**, now
     closed.
-
-- **An identifier not declared where it appears fails to compile.** The
-  validation engine's compile-time check covers identifiers as well as
-  function names. A CRD rule and its `messageExpression` read `self` and
-  `oldSelf`; a VAP expression reads `object`, `oldObject`, `request`,
-  `namespaceObject`, `authorizer` (not in its `messageExpression`), and
-  `params` when the policy has a `paramKind` (below); a macro's variables
-  (`all`, `exists`, `map`, `filter`, `sortBy`, `optMap`, the two-variable
-  forms, …) are declared inside the macro only; type names (`int`, `string`,
-  `net.IP`, `google.protobuf.Timestamp`, …) everywhere. A typo (`self.x > 0 || slef.y == 1`), a macro's variable
-  outside the macro (or bound as `.x` and read as `x`), `__result__` as the
-  variable of `all`, `exists`, `map`, `filter` or `sortBy` (cel-go's legacy
-  accumulator name), `authorizer` or `object` in a CRD rule, `self` in a VAP
-  expression, `authorizer` in a VAP `messageExpression`, `params` in a VAP
-  expression of a policy without a `paramKind`, `variables` in any VAP
-  expression (it comes with `spec.variables`, which kube-cel does not model;
-  the apiserver rejects it without them), `dyn` or `duration` used as a
-  value, or the construction of an undeclared message type (`Foo{a: 1}`) is
-  now `ErrorKind::CompilationFailure` (`CompilationError::Parse` /
-  `MessageExpressionParse`, `VapError`), even where evaluation never reaches
-  it. The apiserver rejects all of these at registration (checked on
-  v1.36.1); they used to pass client-side unless evaluation reached them: a
-  **fail-open** divergence, now closed and gone from the README "no type
-  checker" row. Field names are not checked (`self.undeclared` on a schema
-  without it still needs a type checker). `.x` naming a macro's variable `x`
-  is refused too, though the apiserver reads the macro's `x`: `cel` looks a
-  leading-dot name up outside the macros, so it cannot evaluate it alike
-  (README "apiserver divergence", fail-closed). The declared type names and message types were
-  measured one by one, as values and as constructions, so a name the
-  apiserver accepts (`google.protobuf.Struct.FieldsEntry`, `duration{}`)
-  compiles.
-  - `VapEvaluator` takes the policy's declarations apart from the
-    request's values, as the apiserver does. The new
-    `VapEvaluatorBuilder::has_param_kind(bool)` says whether the policy has a
-    `paramKind`, which declares `params`; unset, it follows `params(..)` (a
-    parameter object set means a `paramKind`). `has_param_kind(false)` with
-    `params(..)`, in either order, is a policy without one: `params` is not
-    declared and the object is not bound. Each `CompiledVapExpression` keeps
-    whether `params` was declared, and `evaluate_compiled` binds `params` to
-    `null` when it was and the evaluator has no parameter object, as for a
-    binding with no `paramRef`. An expression naming `params` on an
-    evaluator with neither used to compile and fail only when evaluation
-    reached `params`; it now fails to compile.
-  - Migration: none for expressions the apiserver accepts in the policy
-    they come from, but for those naming `variables` (below). To compile a policy's expressions once, ahead of the
-    requests, pass its `spec.paramKind.is_some()`; per request, set the
-    parameter object, or nothing for a binding with no `paramRef`:
-    ```rust
-    let compiled = VapEvaluator::builder()
-        .has_param_kind(true)
-        .build()
-        .compile_expressions(&expressions);
-    let results = VapEvaluator::builder()
-        .object(object)
-        .params(param_object) // or omit it: `params` is null
-        .build()
-        .evaluate_compiled(&compiled);
-    ```
-    A policy with `spec.variables` cannot be evaluated client-side until
-    kube-cel models them (README "apiserver divergence").
-
-- **`apiVersion`, `apiGroup` and `kind` are no longer variables of root
-  rules.** kube-cel bound them from a `RootContext`; the apiserver declares
-  no such variables and rejects a CRD whose rule names one ("undeclared
-  reference to 'kind'", checked on v1.36.1). Such a rule now fails to
-  compile (`ErrorKind::CompilationFailure`) on every entry point, with or
-  without a `RootContext`.
-  - Migration: read the object's own fields in a root rule:
-    `self.apiVersion`, `self.kind`, `self.metadata.name` (the API group is
-    the part of `self.apiVersion` before the `/`). `RootContext` and the
-    `*_with_context` methods are deprecated (below).
-
-- **CEL rules under `allOf`, `anyOf`, `oneOf` or `not` fail to compile.**
-  The apiserver refuses `x-kubernetes-validations` anywhere under a schema
-  combinator, at any depth (in its `properties`, `items`, nested
-  combinators), as not structural ("must be empty to be structural",
-  checked on v1.36.1). kube-cel evaluated the rules under `allOf` / `anyOf`
-  / `oneOf` as if they were on the node and ignored those under `not`, so an
-  object satisfying them passed: a **fail-open** divergence, now closed.
-  Every entry point rejects the object with one root `CompilationFailure`
-  per node holding rules (`CompilationError::RuleInCombinator`, also listed
-  by `CompiledSchema::compilation_errors()`); an empty rule list is fine.
-  - Migration: move the rules onto the node the combinator sits on.
-
-- **Rule fields the apiserver refuses at registration are refused.**
-  Beside the expressions, the apiserver checks a rule's other fields when it
-  registers the CRD or policy (checked on v1.36.1): a static `message` that
-  is blank but not empty, or holds a line break once trimmed (CRD rules and
-  VAP validations); a CRD rule holding a line break without a `message`; a
-  `reason` other than `FieldValueRequired`, `FieldValueForbidden`,
-  `FieldValueInvalid` or `FieldValueDuplicate`; a `fieldPath` that is blank,
-  holds a line break or names no field of the rule's node (it starts with
-  `.` or `[`, steps through `.name` or `['name']`, and cannot index a list).
-  kube-cel accepted all of them. A CRD rule with one is now rejected on
-  every object (`ErrorKind::InvalidRule`, `CompilationError::InvalidRuleField`),
-  and a VAP expression with a refused message fails to compile (`VapError`).
-  - Migration: fix the field. A `fieldPath` names a field relative to the
-    rule's node and starts with `.`: `spec.x` on the root becomes `.spec.x`.
-
-### Added
-- `new_env() -> cel::Env`: kube-cel's environment, the apiserver's base CEL
-  environment as far as kube-cel models it: the `cel` standard library,
-  cel-go's `ext.Lists` (feature `lists`), the two-variable comprehension
-  macros and `string(<IP>)` / `string(<CIDR>)` (feature `ip`). The validation
-  engine uses it too. It does not install `cel`'s `lists` extension, whose
-  functions it declares itself, so adding that extension to it fails.
-- `new_context(env) -> Result<cel::Context, RegisterError>`: a root context on
-  `env` with every compiled-in function registered, the path that replaces
-  `KubeCelExt`. `env` must start from `new_env()`, with `cel`'s extensions or
-  overloads of your own added as you need.
-- `VapEvaluatorBuilder::has_param_kind(bool)`: whether the policy has a
-  `paramKind`, which declares `params` (see "An identifier not declared
-  where it appears" above).
-- `RegisterError`: `IncompleteEnv` for an `env` that does not start from
-  `new_env()` (such as `Env::stdlib()`), `Rejected { function, source }` for an
-  `env` that declares one of kube-cel's names (such as with `cel`'s `strings`
-  extension).
-
-### Deprecated
-- `RootContext`, `Validator::validate_with_context`,
-  `Validator::validate_compiled_with_context` and
-  `Validator::validate_with_defaults_and_context`. No rule can read what
-  `RootContext` bound (see Breaking), so the methods ignore it and validate
-  as `validate` / `validate_compiled`. Use those, and `self.apiVersion` /
-  `self.kind` in a root rule.
-- `KubeCelExt::register_all` / `with_all`. They keep working, but register
-  only the functions that live on a context: on `Context::default()` the
-  `lists` extension, the macros and `string(<IP>)` are missing. Use
-  `new_env()` and `new_context()`. They will be removed once kube-cel's
-  functions move to `Env` overloads
-  ([#17](https://github.com/kube-rs/kube-cel/issues/17)).
-
-### Changed
-- `regex` is a dependency whatever the features (it was one of
-  `regex_funcs`): `matches` compiles with it. `cel` depends on it already.
-- `chrono` is a dependency whatever the features (it was one of `validation`):
-  the standard time conversions build `cel`'s time values. `cel` depends on it
-  already.
-- The validation engine (`Validator`, `compile_schema`, `VapEvaluator`, static
-  analysis) compiles with `Env::compile` on a shared `Env` from `new_env()`
-  instead of `Program::compile`, so it sees the environment's macros and
-  overloads.
-- The `UnsupportedReference` message no longer blames an unsupported CEL macro
-  or function; it names the reference evaluation could not resolve.
-- Static analysis (`check_rule_scope`, `analyze_rule`) follows the apiserver's
-  declarations: `ScopeContext::CrdValidation` takes `self` and `oldSelf`
-  only (no `apiVersion`, `apiGroup`, `kind`), and
-  `ScopeContext::AdmissionPolicy` no longer takes `self` and `oldSelf`. It
-  resolves names as the compile-time check does, so a type name (`int`,
-  `net.IP`), a function namespace (`optional.of`, `format.dns1123Label()`) or
-  a macro's variable inside the macro is no longer reported as a variable
-  outside its scope, while a macro's variable outside the macro is.
-
-### Fixed
-- Schema defaults fill in under a parent that was itself just defaulted
-  (`spec: {default: {}}` with a defaulted `spec.x`), and a present-but-null
-  field that is not `nullable` takes its default, as in the apiserver. A
-  `default: null` is no default and is skipped.
-- A `messageExpression` result is trimmed, and an empty, multi-line or
-  over-5 KiB result falls back to `message` (CRD rules and VAP validations).
-- VAP `object` / `oldObject` / `params` / `namespaceObject` are bound without
-  field-name escaping, so `object.metadata.labels['app.kubernetes.io/name']`
-  resolves. An integer past `i64` in them (and in an `optionalOldSelf`
-  rule's `oldSelf.value()`) binds as a `double`, as Kubernetes' JSON decoder
-  reads it, not a `uint`.
-- A `null` field or map value under a schema node that is neither
-  `nullable` nor has a `default` is pruned before defaulting and before the
-  rules run, as the apiserver does (`apply_defaults` included): a rule sees
-  it absent (`!has(self.x)` holds). A `null` list item stays. And no rule
-  runs at a null node, nor below it; kube-cel used to evaluate the rules of
-  a nullable object that was `null` with `self == null`.
-- Under `x-kubernetes-preserve-unknown-fields`, the rules under
-  `additionalProperties` are evaluated and its `default`s applied, as the
-  apiserver does. Both used to be skipped, so an object breaking such a rule
-  passed (fail-open) and a rule reading such a default failed.
-- VAP `namespaceObject` is `null` when no namespace object is set (a
-  cluster-scoped request), as on the apiserver; `namespaceObject == null`
-  used to fail as an unresolved reference.
-- `<list>.sum()` overflow is an error instead of a panic (debug) or a wrapped
-  result (release).
+  - `format()` with a precision past 65535 (`'%.65536f'`, `'%.65535e'`) no
+    longer panics in Rust's formatter. A precision past the int64 range is an
+    error for every verb, as in cel-go.
+- **Lists.**
+  - `sort()` and `sortBy()` order elements with equal keys as the apiserver
+    does: both reorder the indices with a port of go1.26.2's `sort.Slice` (the
+    toolchain of kube-apiserver v1.36.1), as cel-go v0.26 does. `cel`'s `lists`
+    extension sorts stably, so from 13 elements on the order differed:
+    `lists.range(20).sortBy(x, x % 2)[0] == 0` held, a **fail-open**, as did a
+    rule reading where `sort()` put a `-0.0` among equal zeros. `lists.range(-1)`
+    is `[]`, and a list holding a NaN sorts (no comparison with it is "less"),
+    as in cel-go; both used to be errors (fail-closed).
+  - `isSorted()`, `min()` and `max()` compare as the apiserver's lists library
+    does: bytes order (a `format: byte` list, `[b'c', b'a'].min()`, was an
+    error), a pair cel-go cannot compare, such as one with a NaN, replaces or
+    unsorts nothing (`[1.0, double('NaN'), 0.5].min()` is 0.5, was an error),
+    and an element that is not comparable is an error even alone
+    (`[null].min()` and `[null, null].isSorted()` passed: **fail-open**).
+  - `<list>.sum()` overflow is an error instead of a panic (debug) or a wrapped
+    result (release).
+- **URLs.**
+  - Validity in `isURL`, `url()` and `format.uri()` follows Go's
+    `url.ParseRequestURI`: a bad `%` escape, a control character, a leading
+    space or, for http/https, a second colon in the host is refused; an
+    absolute path (`/foo`) is accepted by `format.uri()`.
+  - The `url()` accessors return what Go's `url.URL` holds, as in the
+    apiserver, which checks the string with `url.ParseRequestURI` and parses
+    it with `url.Parse`: `getHost()` / `getPort()` keep a default port
+    (`url('http://h:80/').getPort()` is `80`, it was empty), `getHost()` of a
+    path is empty (it was `localhost`), the host is unescaped but not
+    lowercased, a `#fragment` is split off, `//host/p` has a host,
+    `getEscapedPath()` keeps the path's own escaping, `getQuery()` skips a
+    pair with a `;` or a bad escape, `==` compares Go's `String()` (so
+    `url('http://H:80/') != url('http://h/')`), and `url('*')` converts. The
+    accessors read a WHATWG parse before, which differed in each of these: a
+    **fail-open**, now closed. A component that is not UTF-8 once unescaped
+    (`url('http://h%80x/').getHost()`) is an error (fail-closed), as a CEL
+    string here must be UTF-8.
+- **Named formats.**
+  - `format.byte()` requires standard, padded base64 and refuses the empty
+    string.
+  - `format.date()` / `format.datetime()` refuse a `+`-signed component and a
+    leap second. `format.datetime()` otherwise follows kube-openapi's
+    `strfmt.IsDateTime`, which the apiserver calls, instead of RFC 3339: the
+    offset is not range-checked (`+99:99`), any character may stand before
+    the fraction digits (`10:30:00,5Z`, `10:30:0012Z`), and only the first two
+    `t`-separated pieces are read (`2024-01-15T10:30:00ZtXYZ`); each of these
+    was refused here (fail-closed). Both report the apiserver's messages
+    (`invalid date`, `invalid datetime`). `format.datetime().validate(..)` on
+    a time with a multi-byte character in the seconds
+    (`'2024-01-15T12:30:0é:00Z'`) reports an invalid date-time instead of
+    panicking.
+  - `format.uri().validate(s)` reports Go's `*url.Error` text, as the
+    apiserver does: `parse "<s>": <reason>`, with Go's `%q` quoting
+    (non-printable characters and bytes that are not UTF-8 escaped as Go
+    escapes them) and, for a bracketed host, `netip.ParseAddr`'s reason
+    (`invalid host: ParseAddr("x"): unable to parse IP`). Before, the
+    `parse "<s>": ` part and the `ParseAddr` reason were missing and Rust
+    quoting was used.
+  - The name formats (`format.dns1123Label()`, `dns1123Subdomain`,
+    `dns1035Label`, their `*Prefix` forms, `qualifiedName` and `labelValue`)
+    are ports of k8s.io/apimachinery's validators, which the apiserver calls,
+    and `.validate(s)` reports their messages verbatim; before, every message
+    differed (a rule reading `.validate(s).value()` could pass where the
+    apiserver rejects). The `*Prefix` forms mask a trailing `-` as
+    apimachinery does, so `format.dns1035LabelPrefix().validate('')` is
+    invalid (was valid: **fail-open**). `format.uuid()` is strfmt's `IsUUID`,
+    whose dashes are each optional (`550e8400e29b41d4a716446655440000` is
+    valid, was refused), with the apiserver's message.
+- **Semver follows blang/semver v4**, which the apiserver calls: a numeric
+  pre-release identifier past a uint64 is not a version
+  (`isSemver('1.0.0-18446744073709551616')` is false, was true:
+  **fail-open**), and `==`, `compareTo`, `isGreaterThan` and `isLessThan`
+  ignore build metadata (`semver('1.0.0+a') == semver('1.0.0+b')`). Lenient
+  `semver(x, true)` / `isSemver(x, true)` strip only a lowercase `v` and
+  refuse a fourth component (`1.2.3.4`).
+- **Quantities follow k8s.io/apimachinery's `resource.Quantity`**, which the
+  apiserver's library calls, representation included. Each of these
+  differed, most of them **fail-open**.
+  - Parsing is `ParseQuantity`: no trimming (`isQuantity(' 1 ')` is false),
+    `-` or `+` alone is 0, a non-zero value finer than nano units rounds up
+    to them (`quantity('1e-10') == quantity('1n')`), and a binary quantity is
+    capped at the largest int64 (`10Ei`). `isInteger()` / `asInteger()` are
+    `AsInt64()`: only a quantity kept as an int64 times a non-negative power
+    of ten converts, so `1000m`, `1.0`, `1e40`, `1.5Gi` and `1Pi` are not
+    integers (`asInteger()` returned a value where the apiserver errors). `asApproximateFloat()` multiplies by Go's `math.Pow10` table
+    (`0e1000` is NaN). `add` / `sub` keep Go's representation, and `==` with
+    an `add` / `sub` result on the right is an error in the apiserver; here
+    it is false, and a rule reaching it is refused.
+  - Comparison is exact for magnitudes beyond `i128` scaling (`compareTo`
+    used to call quantities 3 apart equal there).
+  - Quantities have a supported range: exponents and scales (the exponent
+    less the fraction digits, with an SI or binary suffix) within ±1000, and
+    a mantissa within `i128`. The exponent is read as an int64, as in the
+    apiserver, so one past that range is not a quantity (`isQuantity` false),
+    as is a malformed string however many digits it has, and a number without
+    digits that the apiserver parses on its `inf.Dec` path (`e-1001`; on its
+    int64 path, `e1001` is a 0 past the range). One within it but past
+    ±1000, before or after trailing zeros move into the scale (`1e1001`,
+    `10e1000`, `0e2147483648`, a sum such as `5e1000 + 5e1000`), or a
+    mantissa past `i128`, is an error from `quantity()` and `isQuantity()`
+    alike, and a rule or VAP expression that reaches one fails with an
+    `EvaluationError`, even where CEL absorbs the error (`… || true`). The
+    apiserver parses these, narrowing the exponent to int32
+    (`quantity('1e4294967296') == quantity('1')`) and, near the int32 bounds,
+    computing for minutes or panicking: a documented fail-closed limit.
+    Before, `isQuantity` was false for an exponent past the int32 range or a
+    mantissa past `i128`, so `!isQuantity(s)` passed (a **fail-open**), and an
+    exponent near the int32 bounds overflowed the scale arithmetic (a panic
+    in debug builds, a wrapped scale in release).
+  - `add` / `sub` past the `i128` range is an error instead of a panic or a
+    wrapped result (the apiserver's quantities are exact, so this is a
+    documented fail-closed limit), and it fails the rule even where CEL
+    absorbs its error (`… || true`): the apiserver has written the exact
+    result into a receiver holding an `inf.Dec`, which kube-cel cannot, so a
+    later read of it could pass (**fail-open**).
+  - `add` / `sub` with a zero term no longer fails with `quantity overflow`
+    when the scales are far apart
+    (`quantity('0').add(quantity('0e-1000'))`): a zero needs no power of ten
+    to align.
+  - A quantity's state is shared and updated as in the apiserver, which
+    keeps quantities behind pointers: `add` / `sub` copy the receiver, and a
+    receiver held as an `inf.Dec` shares it with the copy, which the result
+    is written into, so the receiver takes the new value
+    (`[quantity('1.5Gi')].all(q, q.add(1).compareTo(q) == 0)` is true).
+    Before, the receiver kept its value, and a rule reading it after `add`
+    could pass where the apiserver rejects (**fail-open**).
+  - `compareTo`, `isGreaterThan` and `isLessThan` turn an `int64Amount`
+    receiver into an `inf.Dec` when the other side holds one, as Go's `Cmp`
+    does with `AsDec()`: `[quantity('1')].all(q, q.isLessThan(quantity('1.5Gi'))
+    && q.isInteger())` is false, and a later `asInteger()` an error. Before,
+    the receiver stayed an integer (**fail-open**). `==` compares copies and
+    changes neither side, as in the apiserver.
+  - A quantity update whose result depends on evaluation order is refused at
+    compile time (`CompilationFailure`, reached or not): an `add`, `sub`,
+    `compareTo`, `isGreaterThan` or `isLessThan` on a quantity held by a
+    variable (a comprehension's, or reached through `dyn(..)` or `[q][0]`)
+    in a call's receiver or arguments, or in the second operand of a
+    two-operand call, next to a part that could fail or read a quantity. The
+    apiserver's quantities share state, and `cel` evaluates a call's
+    arguments before its receiver and skips a second operand after a
+    failure, where cel-go does neither; such a rule could pass client-side
+    where the apiserver rejects it. Fail-closed: an update of a new quantity
+    (`quantity(s)`, `add` / `sub` on one), one next to parts that can neither
+    fail nor read a quantity (a comprehension variable, a literal,
+    `quantity(<literal>)`) and one where both orders agree (`&&`, `||`) are
+    not refused. For the same reason an error kube-cel has where the
+    apiserver has a value (a timestamp offset of a day or more, a URL
+    component that is not UTF-8, a declared function kube-cel does not
+    implement, a policy's `authorizer`, which kube-cel does not bind) now
+    fails the rule even where CEL absorbs the error (`… || true`).
 - With every function feature off, `indexOf`, `lastIndexOf`, `isGreaterThan`,
   `isLessThan` and `compareTo` are no longer registered: there was nothing for
   them to call, and they took those names from a user's own functions. Each
   pair now needs a feature that implements it (`strings` or `lists`;
   `semver_funcs` or `quantity`).
-- Quantity `add` / `sub` past the `i128` range is an error instead of a panic
-  or a wrapped result (the apiserver's quantities are exact, so this is a
-  documented fail-closed limit).
-- `format.datetime().validate(..)` on a time with a multi-byte character in
-  the seconds (`'2024-01-15T12:30:0é:00Z'`) reports an invalid date-time
-  instead of panicking.
-- `format()` with a precision past 65535 (`'%.65536f'`, `'%.65535e'`) no
-  longer panics in Rust's formatter (see "Strings and `format()`" above for
-  what it prints). A precision past the int64 range is an error for every
-  verb, as in cel-go.
-- Quantities have a supported range: exponents and scales (the exponent less
-  the fraction digits, with an SI or binary suffix) within ±1000, and a mantissa
-  within `i128`. The exponent is read as an int64, as in the apiserver,
-  so one past that range is not a quantity (`isQuantity` false), as is a
-  malformed string however many digits it has, and a number without digits
-  that the apiserver parses on its `inf.Dec` path (`e-1001`; on its int64
-  path, `e1001` is a 0 past the range). One within it but past ±1000,
-  before or after trailing zeros move into the scale (`1e1001`, `10e1000`,
-  `0e2147483648`, a sum such as `5e1000 + 5e1000`), or a mantissa past `i128`, is
-  an error from `quantity()` and `isQuantity()` alike, and a rule or VAP
-  expression that reaches one fails with an `EvaluationError`, even where CEL
-  absorbs the error (`… || true`). The apiserver parses these, narrowing the
-  exponent to int32 (`quantity('1e4294967296') == quantity('1')`) and, near
-  the int32 bounds, computing for minutes or panicking: a documented
-  fail-closed limit. Before, `isQuantity` was false for an exponent past the
-  int32 range or a mantissa past `i128`, so `!isQuantity(s)` passed (a
-  **fail-open**), and an exponent near the int32 bounds overflowed the scale
-  arithmetic (a panic in debug builds, a wrapped scale in release).
-- Quantities follow k8s.io/apimachinery's `resource.Quantity`, which the
-  apiserver's library calls, representation included. Parsing is
-  `ParseQuantity`: no trimming (`isQuantity(' 1 ')` is false), `-` or `+`
-  alone is 0, a non-zero value finer than nano units rounds up to them
-  (`quantity('1e-10') == quantity('1n')`), and a binary quantity is capped at
-  the largest int64 (`10Ei`). `isInteger()` / `asInteger()` are `AsInt64()`:
-  only a quantity kept as an int64 times a non-negative power of ten
-  converts, so `1000m`, `1.0`, `1e40`, `1.5Gi` and `1Pi` are not integers
-  (D10: `asInteger()` returned a value where the apiserver errors).
-  `asApproximateFloat()` multiplies by Go's `math.Pow10` table (`0e1000` is
-  NaN). `add` / `sub` keep Go's representation, and `==` with an `add` / `sub`
-  result on the right is an error in the apiserver; here it is false, and a
-  rule reaching it is refused. `sign()` is a global function only, as in the
-  apiserver (`quantity(..).sign()` is an error). Each of these differed, most
-  of them **fail-open**.
-- `format.uri().validate(s)` reports Go's `*url.Error` text, as the apiserver
-  does: `parse "<s>": <reason>`, with Go's `%q` quoting (non-printable
-  characters and bytes that are not UTF-8 escaped as Go escapes them) and,
-  for a bracketed host, `netip.ParseAddr`'s reason
-  (`invalid host: ParseAddr("x"): unable to parse IP`). Before, the
-  `parse "<s>": ` part and the `ParseAddr` reason were missing and Rust
-  quoting was used.
-- The name formats (`format.dns1123Label()`, `dns1123Subdomain`,
-  `dns1035Label`, their `*Prefix` forms, `qualifiedName` and `labelValue`)
-  are ports of k8s.io/apimachinery's validators, which the apiserver calls,
-  and `.validate(s)` reports their messages verbatim; before, every message
-  differed (a rule reading `.validate(s).value()` could pass where the
-  apiserver rejects). The `*Prefix` forms mask a trailing `-` as
-  apimachinery does, so `format.dns1035LabelPrefix().validate('')` is
-  invalid (was valid: **fail-open**). `format.uuid()` is strfmt's `IsUUID`,
-  whose dashes are each optional (`550e8400e29b41d4a716446655440000` is
-  valid, was refused), with the apiserver's message.
-- A quantity's state is shared and updated as in the apiserver, which keeps
-  quantities behind pointers: `add` / `sub` copy the receiver, and a receiver
-  held as an `inf.Dec` shares it with the copy, which the result is written
-  into, so the receiver takes the new value
-  (`[quantity('1.5Gi')].all(q, q.add(1).compareTo(q) == 0)` is true). Before,
-  the receiver kept its value, and a rule reading it after `add` could pass
-  where the apiserver rejects (**fail-open**).
-- A quantity `add` / `sub` past `i128` fails the rule even where CEL absorbs
-  its error (`… || true`), as a quantity past the supported range does: the
-  apiserver has written the exact result into a receiver holding an
-  `inf.Dec`, which kube-cel cannot, so a later read of it could pass
-  (**fail-open**).
-- Quantity `add` / `sub` with a zero term no longer fails with `quantity
-  overflow` when the scales are far apart (`quantity('0').add(quantity('0e-1000'))`):
-  a zero needs no power of ten to align.
-- `compareTo`, `isGreaterThan` and `isLessThan` turn an `int64Amount`
-  receiver into an `inf.Dec` when the other side holds one, as Go's `Cmp`
-  does with `AsDec()`: `[quantity('1')].all(q, q.isLessThan(quantity('1.5Gi'))
-  && q.isInteger())` is false, and a later `asInteger()` an error. Before,
-  the receiver stayed an integer (**fail-open**). `==` compares copies and
-  changes neither side, as in the apiserver.
-- `format.datetime()` follows kube-openapi's `strfmt.IsDateTime`, which the
-  apiserver calls, instead of RFC 3339: the offset is not range-checked
-  (`+99:99`), any character may stand before the fraction digits
-  (`10:30:00,5Z`, `10:30:0012Z`), and only the first two `t`-separated pieces
-  are read (`2024-01-15T10:30:00ZtXYZ`). `format.date()` / `format.datetime()`
-  report the apiserver's messages (`invalid date`, `invalid datetime`). Each
-  of these was refused here (fail-closed).
-- Semver follows blang/semver v4, which the apiserver calls: a numeric
-  pre-release identifier past a uint64 is not a version
-  (`isSemver('1.0.0-18446744073709551616')` is false, was true:
-  **fail-open**), and `==`, `compareTo`, `isGreaterThan` and `isLessThan`
-  ignore build metadata (`semver('1.0.0+a') == semver('1.0.0+b')`).
-- `isSorted()`, `min()` and `max()` compare as the apiserver's lists library
-  does: bytes order (a `format: byte` list, `[b'c', b'a'].min()`, was an
-  error), a pair cel-go cannot compare, such as one with a NaN, replaces or
-  unsorts nothing (`[1.0, double('NaN'), 0.5].min()` is 0.5, was an error),
-  and an element that is not comparable is an error even alone
-  (`[null].min()` and `[null, null].isSorted()` passed: **fail-open**).
-- `replace(old, new, n)` with a negative `n` replaces every match, as Go's
-  `strings.Replace` does (it replaced nothing, a **fail-open**:
-  `'aaa'.replace('a', 'b', -1) == 'aaa'` held). `replace`, `findAll`,
-  `charAt`, `indexOf` and `substring` no longer narrow an `int` with `as
-  usize`, which truncated values past `u32::MAX` on 32-bit targets.
-- `sort()` and `sortBy()` order elements with equal keys as the apiserver
-  does: both reorder the indices with a port of go1.26.2's `sort.Slice` (the
-  toolchain of kube-apiserver v1.36.1), as cel-go v0.26 does. `cel`'s `lists`
-  extension sorts stably, so from 13 elements on the order differed:
-  `lists.range(20).sortBy(x, x % 2)[0] == 0` held, a **fail-open**, as did a
-  rule reading where `sort()` put a `-0.0` among equal zeros. `lists.range(-1)`
-  is `[]`, and a list holding a NaN sorts (no comparison with it is "less"),
-  as in cel-go; both used to be errors (fail-closed).
-- A map literal that repeats a key keeps the last entry (`{'k': 1, 'k':
-  2}['k']` is 2), and `1` and `1u` are two keys, as in cel-go: `new_env()`
-  turns off `cel`'s duplicate-key error, which refused both (fail-closed).
-- README "apiserver divergence" table: a fail-closed row for what `cel`'s
-  standard `timestamp(string)` / `duration(string)` refuse and Go parses (an
-  offset of hour 24 or minute 60, a `,` fraction separator, a one-digit hour,
-  the units `µs` / `μs`).
-- A schema `format: duration` parses as the apiserver's
-  `strfmt.ParseDuration`: Go's `time.ParseDuration` exactly (`µs` / `μs`, a
-  `+` sign, every overflow refused), then strfmt's word units (`1d`,
-  `2 hours`); a duration it cannot parse is an `EvaluationError` at its field.
-- README "apiserver divergence" table: the apiserver does **not** evaluate
-  `cel.bind` (its base environment has no `ext.Bindings`); it rejects the CRD at
-  registration. The `sortBy` and two-variable comprehension rows are gone (both
-  now evaluate), and rows for `math.*`, the `isIPv4`-style helpers, `base64.*` /
-  `jsonpatch.escapeKey`, global `min` / `max`, string `reverse()` and
-  `<IP>.string()` are added (all fail closed). The authz library row now covers
-  every function the apiserver declares that kube-cel does not implement
-  (`optional.unwrap`, `<list>.unwrapOpt()`, ..). Two last rows document the
-  known fail-open classes. `cel` has no type checker yet
-  ([cel-rust#350](https://github.com/cel-rust/cel-rust/issues/350)), so a type,
-  arity or call-shape error the apiserver rejects at registration passes when
-  evaluation does not reach it. And `cel` has no cost model yet
-  ([cel-rust#230](https://github.com/cel-rust/cel-rust/discussions/230)), so a
-  rule the apiserver rejects for its estimated cost at registration
-  (`self.l.all(x, self.l.exists(y, x == y))` on a list with no `maxItems`), or
-  an object it rejects for a rule's runtime cost
-  (`lists.range(1000000).size() > 0`), passes. The claim that a passing result
-  is always at least as strict as the apiserver is narrowed accordingly.
+- **README "apiserver divergence" table.** The apiserver does **not**
+  evaluate `cel.bind` (its base environment has no `ext.Bindings`); it
+  rejects the CRD at registration. The `sortBy` and two-variable
+  comprehension rows are gone (both now evaluate), and rows for `math.*`,
+  the `isIPv4`-style helpers, `base64.*` / `jsonpatch.escapeKey`, global
+  `min` / `max`, string `reverse()` and `<IP>.string()` are added (all fail
+  closed). The authz library row now covers every function the apiserver
+  declares that kube-cel does not implement (`optional.unwrap`,
+  `<list>.unwrapOpt()`, ..). A fail-closed row covers a `timestamp(string)`
+  zone offset of 24 hours or more, which Go parses. Two last rows document
+  the known fail-open classes. `cel` has no type checker yet
+  ([cel-rust#350](https://github.com/cel-rust/cel-rust/issues/350)), so a
+  type, arity or call-shape error the apiserver rejects at registration
+  passes when evaluation does not reach it. And `cel` has no cost model yet
+  ([cel-rust#230](https://github.com/cel-rust/cel-rust/discussions/230)), so
+  a rule the apiserver rejects for its estimated cost at registration
+  (`self.l.all(x, self.l.exists(y, x == y))` on a list with no `maxItems`),
+  or an object it rejects for a rule's runtime cost
+  (`lists.range(1000000).size() > 0`), passes. The claim that a passing
+  result is always at least as strict as the apiserver is narrowed
+  accordingly.
 
 ## [0.8.0] - 2026-06-19
 
