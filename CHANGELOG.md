@@ -279,6 +279,9 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   - `string(<duration>)` prints float64 seconds (`9223372036.854776s`, it
     printed exact nanoseconds), and `string(<timestamp>)` keeps the
     timestamp's offset (`2024-01-15T10:30:00+09:00`, it printed UTC).
+    `string(<double>)` prints Go's shortest `%g` form (`1e+06`, `1e-05`,
+    `+Inf`; it printed `1000000`, `0.00001`, `inf`): a **fail-open**, now
+    closed.
   - Duration `+` and `-`, the difference of two timestamps and a timestamp
     minus a duration stay within int64 nanoseconds, with cel-go's overflow
     checks; they went up to `cel`'s ±315,576,000,000 seconds. `-` negates a
@@ -303,8 +306,9 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   refused.
   For the same reason an error kube-cel has where the apiserver has a value
   (a timestamp offset of a day or more, a URL component that is not UTF-8, a
-  declared function kube-cel does not implement) now fails the rule even
-  where CEL absorbs the error (`… || true`).
+  declared function kube-cel does not implement, a policy's `authorizer`,
+  which kube-cel does not bind) now fails the rule even where CEL absorbs the
+  error (`… || true`).
 - **Every rule in the schema is compiled before the object is walked**, as
   the apiserver compiles them all when it registers the CRD. A rule or
   `messageExpression` that does not compile on a node the object does not

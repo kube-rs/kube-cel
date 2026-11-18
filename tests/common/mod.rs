@@ -1366,6 +1366,36 @@ pub fn cases() -> Vec<ParityCase> {
             note: "time conversions, printing and duration operators follow cel-go → ACCEPT",
         },
         ParityCase {
+            kind: "PtimeYear10000",
+            plural: "ptimeyear10000s",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "string(timestamp('9999-12-31T23:00:00+01:00') + duration('1h')) == '10000-01-01T00:00:00+01:00' && '%s'.format([timestamp('9999-12-31T23:59:59.5+14:00') + duration('1s')]) == '10000-01-01T00:00:00.5+14:00'",
+                    "message": "ptimeyear10000s"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "a local year of 10000 prints without a sign, as Go's RFC3339Nano → ACCEPT",
+        },
+        ParityCase {
+            kind: "PstringDouble",
+            plural: "pstringdoubles",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "string(1e6) == '1e+06' && string(1e-5) == '1e-05' && string(123456.0) == '123456' && string(1.0 / 0.0) == '+Inf' && string(-1.0 / 0.0) == '-Inf' && string(dyn(100.0)) == '100'",
+                    "message": "pstringdoubles"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "string(<double>) is Go's strconv 'g' form → ACCEPT",
+        },
+        ParityCase {
             kind: "PtimeDynamic",
             plural: "ptimedynamics",
             schema: json!({

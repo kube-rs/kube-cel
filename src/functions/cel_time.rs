@@ -16,8 +16,8 @@
 //!   `timestamp`: a string goes through the Go parser, which hands `cel`'s
 //!   identity overload a value Go would build, or fails as Go does; any other
 //!   value (`timestamp(0)`, `duration(d)`) passes through to `cel`'s overload;
-//! - `string(e)` to `string(@kube.stringInput(e))`, which prints a duration or
-//!   a timestamp as cel-go does and passes any other value through;
+//! - `string(e)` to `string(@kube.stringInput(e))`, which prints a duration, a
+//!   timestamp or a double as cel-go does and passes any other value through;
 //! - `a + b`, `a - b` and `-a` to `@kube.add(a, b)`, `@kube.sub(a, b)` and
 //!   `@kube.negate(a)`, which do duration arithmetic in int64 nanoseconds with
 //!   Go's overflow checks and hand everything else to `cel`'s operator (cel-go
@@ -40,15 +40,15 @@ use cel::{
     common::{
         ast::{CallExpr, Expr, IdedExpr, LiteralValue, operators},
         decls::Signature,
-        types::{CelDuration, CelInt, CelString, CelTimestamp, DURATION_TYPE, DYN_TYPE, INT_TYPE},
+        types::{CelDouble, CelDuration, CelInt, CelString, CelTimestamp, DURATION_TYPE, DYN_TYPE, INT_TYPE},
         value::{CowVal, Val},
     },
     objects::Value,
     parser::{Macro, MacroExprHelper},
 };
-use chrono::{DateTime, FixedOffset};
+use chrono::{DateTime, Datelike, FixedOffset};
 
-use crate::functions::go_float::{fmt_f, go_shortest};
+use crate::functions::go_float::{fmt_f, go_g, go_shortest};
 
 const DURATION_INPUT: &str = "@kube.durationInput";
 const TIMESTAMP_INPUT: &str = "@kube.timestampInput";
@@ -185,13 +185,17 @@ fn timestamp_input<'b, 'v>(args: Vec<CowVal<'b, 'v>>) -> Result<CowVal<'b, 'v>, 
     Ok(CowVal::owned(CelTimestamp::from(go_timestamp(s.inner())?)))
 }
 
-/// `string(<duration>)` and `string(<timestamp>)` as cel-go prints them.
+/// `string(<duration>)`, `string(<timestamp>)` and `string(<double>)` as
+/// cel-go prints them (a double with `strconv.FormatFloat(d, 'g', -1, 64)`:
+/// `1e+06`, `+Inf`, where `cel` writes `1000000`, `inf`).
 fn string_input<'b, 'v>(args: Vec<CowVal<'b, 'v>>) -> Result<CowVal<'b, 'v>, ExecutionError> {
     let arg = single(args)?;
     let s = if let Some(d) = arg.downcast_ref::<CelDuration>() {
         duration_string(d.inner())
     } else if let Some(t) = arg.downcast_ref::<CelTimestamp>() {
         timestamp_string(t.inner())
+    } else if let Some(d) = arg.downcast_ref::<CelDouble>() {
+        go_g(*d.inner())
     } else {
         return Ok(arg);
     };
@@ -330,10 +334,13 @@ fn subtract_time(x: &DateTime<FixedOffset>, y: &DateTime<FixedOffset>) -> Option
 // Printing, as cel-go's `ConvertToType(StringType)`
 // ---------------------------------------------------------------------------
 
-/// `time.RFC3339Nano`: the fraction without its trailing zeros, "Z" for a zero
-/// offset, else the ±hh:mm offset the timestamp keeps.
+/// `time.RFC3339Nano`: the year in at least four digits with no sign (an
+/// offset can make the local year 10000 or 0000), the fraction without its
+/// trailing zeros, "Z" for a zero offset, else the ±hh:mm offset the timestamp
+/// keeps. (`chrono`'s `%Y` writes `+10000`.)
 pub(crate) fn timestamp_string(t: &DateTime<FixedOffset>) -> String {
-    let mut s = t.format("%Y-%m-%dT%H:%M:%S").to_string();
+    let mut s = format!("{:04}", t.year());
+    s.push_str(&t.format("-%m-%dT%H:%M:%S").to_string());
     let frac = t.format("%9f").to_string();
     let frac = frac.trim_end_matches('0');
     if !frac.is_empty() {
@@ -760,8 +767,20 @@ mod tests {
         holds("string(duration('-0.000000001s')) == '-0.000000001s'");
         holds("string([duration('1s')][0]) == '1s' && string(dyn(duration('1.5s'))) == '1.5s'");
         holds(".string(duration('1h')) == '3600s'");
+        // An offset can make the local year 10000: no sign, as Go writes it.
+        holds(
+            "string(timestamp('9999-12-31T23:00:00+01:00') + duration('1h')) == '10000-01-01T00:00:00+01:00' \
+             && string(timestamp('0000-12-31T23:00:00-01:00')) == '0000-12-31T23:00:00-01:00'",
+        );
+        // A double as Go's `strconv.FormatFloat(d, 'g', -1, 64)`.
+        holds(
+            "[string(1e6), string(1e-5), string(123456.0), string(1e21), string(0.0001), string(-0.0), \
+             string(1.0 / 0.0), string(-1.0 / 0.0), string(0.0 / 0.0), string(1.5), string(100.0)] \
+             == ['1e+06', '1e-05', '123456', '1e+21', '0.0001', '-0', '+Inf', '-Inf', 'NaN', '1.5', '100']",
+        );
+        holds(".string(dyn(1e6)) == '1e+06'");
         // Any other value keeps `cel`'s conversion.
-        holds("string(1) + string(1u) + string(1.5) + string(b'x') + string(true) == '111.5xtrue'");
+        holds("string(1) + string(1u) + string(b'x') + string(true) == '11xtrue'");
     }
 
     #[test]

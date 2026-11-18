@@ -13,8 +13,10 @@
 //!   (on `cel`'s roadmap, cel-rust discussion #230), see
 //!   [`no_cost_model_fails_open`]. Besides those, until `cel` carries
 //!   cel-rust#462 (before 0.9.0), a list or map `cel` builds compared with a
-//!   schema-bound one, see [`cel_built_operand_until_cel_rust_462`]. Rules on
-//!   schema nodes the object does not reach used to be another, and
+//!   schema-bound one, see [`cel_built_operand_until_cel_rust_462`], and until
+//!   it carries cel-rust#460 (before 0.9.0), the timestamp getters without a
+//!   time zone, see [`timestamp_getters_without_a_zone_until_cel_rust_460`].
+//!   Rules on schema nodes the object does not reach used to be another, and
 //!   `format()`'s output a third; since 0.9 every rule in the schema is
 //!   compiled before the object is walked, and `format()` ports cel-go v0.26's
 //!   formatter.
@@ -901,10 +903,11 @@ fn ip_member_string_fails_closed() {
 // kube-cel:  the compile-time name check accepts every name the apiserver
 //            declares (src/validation/apiserver_functions.txt), so the CRD or
 //            policy compiles and a call evaluation does not reach passes, as on
-//            the apiserver. Reaching the call rejects the object with
-//            UnsupportedReference (kube-cel binds no `authorizer`), even where
-//            CEL absorbs the error: the apiserver has a value there, and an
-//            absorbed error could skip a quantity update it makes. The
+//            the apiserver. Reaching the call, or a policy's `authorizer`
+//            (which kube-cel does not bind), rejects the object with
+//            UnsupportedReference, even where CEL absorbs the error: the
+//            apiserver has a value there, and an absorbed error could skip a
+//            quantity update it makes. The
 //            unreached cases are parity rows (PoptUnwrapShort, ..).
 
 #[test]
@@ -958,6 +961,18 @@ fn declared_unimplemented_functions_fail_closed_when_reached() {
             Some("string([optional.of(1), optional.none()].unwrapOpt()[0])"),
         ),
         expr("authorizer.path('/healthz').check('get').allowed()", None),
+        // Absorbed, the reached `authorizer` still fails: the apiserver has a
+        // value there (an Authorizer), and in the last the absorbed error
+        // would otherwise skip the quantity update (false on the apiserver).
+        expr("type(authorizer) == type(authorizer) || true", None),
+        expr("authorizer.requestResource.check('get').allowed() || true", None),
+        expr(
+            "[quantity('1')].all(q, ((type(authorizer.group('')) == type(authorizer.group('')) ? \
+             q.compareTo(quantity('1.5Gi')) : 0) == 0 || true) && q.isInteger())",
+            None,
+        ),
+        // A comprehension variable of that name is no policy variable.
+        expr("[1].all(authorizer, authorizer == 1)", None),
     ];
     let compiled = evaluator.compile_expressions(&exprs);
     assert!(
@@ -971,8 +986,8 @@ fn declared_unimplemented_functions_fail_closed_when_reached() {
         .collect();
     assert_eq!(
         passed,
-        [true, true, false],
-        "the reached authorizer call fails closed"
+        [true, true, false, false, false, false, true],
+        "the reached authorizer fails closed, absorbed or not"
     );
 }
 
@@ -1325,6 +1340,51 @@ fn timestamp_offset_of_a_day_fails_closed() {
     );
 }
 
+// ── Timestamp getters without a time zone — fail OPEN until cel-rust#460 ──
+// apiserver: cel-go reads `getHours()` and the other getters without a zone
+//            argument in UTC, as the CEL spec says (k8s.io/apiserver v0.36.1
+//            `MustBaseEnvSet(1.36)`).
+// kube-cel:  `cel` 0.16 reads them in the timestamp's own offset.
+
+/// The getters without a time zone on a timestamp with a non-zero offset:
+/// `cel` reads them in that offset, cel-go and the CEL spec in UTC.
+/// cel-rust#460 fixes it. These assertions pin today's verdicts, each the
+/// apiserver's opposite (Go oracle), so they fail once `cel` carries the fix:
+/// then drop this test and its README row, before 0.9.0. kube-cel builds no
+/// workaround.
+#[test]
+fn timestamp_getters_without_a_zone_until_cel_rust_460() {
+    // `2024-01-01T02:30:00+05:45` is `2023-12-31T20:45:00Z`.
+    for rule in [
+        "timestamp('2024-01-01T02:30:00+05:45').getFullYear() == 2024",
+        "timestamp('2024-01-01T02:30:00+05:45').getMonth() == 0",
+        "timestamp('2024-01-01T02:30:00+05:45').getDayOfYear() == 0",
+        "timestamp('2024-01-01T02:30:00+05:45').getDayOfMonth() == 0",
+        "timestamp('2024-01-01T02:30:00+05:45').getDate() == 1",
+        "timestamp('2024-01-01T02:30:00+05:45').getDayOfWeek() == 1",
+        "timestamp('2024-01-01T02:30:00+05:45').getHours() == 2",
+        "timestamp('2024-01-01T02:30:00+05:45').getMinutes() == 30",
+    ] {
+        assert_passes(rule);
+    }
+    // The same for a `format: date-time` field.
+    let schema = json!({
+        "type": "object",
+        "properties": { "t": { "type": "string", "format": "date-time" } },
+        "x-kubernetes-validations": [{ "rule": "self.t.getHours() == 2" }]
+    });
+    assert!(
+        Validator::new()
+            .validate(&schema, &json!({"t": "2024-01-01T02:30:00+05:45"}), None)
+            .is_ok()
+    );
+    // With a zone, and for the seconds, both agree.
+    assert_passes(
+        "timestamp('2024-01-01T02:30:00+05:45').getHours('UTC') == 20 \
+         && timestamp('2024-01-01T02:30:00+05:45').getSeconds() == 0",
+    );
+}
+
 // ── URL components that are not UTF-8 — fail CLOSED ────────────────────────
 // apiserver: `getHost()`, `getHostname()` and `getQuery()` return Go's unescaped
 //            bytes as a string, valid UTF-8 or not (`url('http://h%80x/')`
@@ -1401,10 +1461,12 @@ fn quantity_update_in_an_order_dependent_position_fails_closed() {
         "[quantity('1.5Gi')].all(q, q.add(q).compareTo(quantity('3Gi')) == 0 && q.compareTo(quantity('3Gi')) == 0)",
         "[quantity('1')].all(q, q.compareTo(quantity('1.5Gi')) < 0 && !q.isInteger())",
         "['1', '2'].map(s, quantity(s)).all(q, q.isGreaterThan(quantity('0')) && q.isLessThan(quantity('3')))",
-        "[semver('1.0.0')].all(v, 0 > v.compareTo(semver('2.0.0')))",
     ] {
         assert_passes(rule);
     }
+    // A semver's `compareTo` next to a literal, where `semver` is implemented.
+    #[cfg(feature = "semver_funcs")]
+    assert_passes("[semver('1.0.0')].all(v, 0 > v.compareTo(semver('2.0.0')))");
 }
 
 // ── Quantity `!=` with an add/sub result on the right — fails CLOSED ────────

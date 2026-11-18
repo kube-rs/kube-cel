@@ -150,3 +150,37 @@ pub(crate) fn fmt_f(neg: bool, digits: &[u8], dp: i32, prec: usize) -> String {
     }
     out
 }
+
+/// Go's `fmt` `%g`, which is `strconv.FormatFloat(x, 'g', -1, 64)`: the shortest digits, in scientific form when the exponent
+/// is below -4 or at least 6 (`1e+06`, `1e-05`), "+Inf", "-Inf" and "NaN".
+pub(crate) fn go_g(x: f64) -> String {
+    if x.is_nan() {
+        return "NaN".to_owned();
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { "+Inf" } else { "-Inf" }.to_owned();
+    }
+    let neg = x.is_sign_negative();
+    let (digits, dp) = go_shortest(x.abs());
+    let exp = dp - 1;
+    if digits.is_empty() || (-4..6).contains(&exp) {
+        let prec = (digits.len() as i64 - i64::from(dp)).max(0) as usize;
+        return fmt_f(neg, &digits, dp, prec);
+    }
+    // strconv's `fmtE` with the shortest digits: d[.ddd]e±XX.
+    let mut out = String::new();
+    if neg {
+        out.push('-');
+    }
+    push_digit(&mut out, digits[0]);
+    if digits.len() > 1 {
+        out.push('.');
+        for &d in &digits[1..] {
+            push_digit(&mut out, d);
+        }
+    }
+    out.push('e');
+    out.push(if exp < 0 { '-' } else { '+' });
+    out.push_str(&format!("{:02}", exp.abs()));
+    out
+}

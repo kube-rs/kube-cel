@@ -22,7 +22,7 @@ use std::{collections::HashMap, sync::Arc};
 use crate::functions::{
     Registrar,
     cel_time::time_string,
-    go_float::{exact_decimal, fmt_f, go_shortest, push_digit, round_go},
+    go_float::{exact_decimal, fmt_f, go_g, go_shortest, push_digit, round_go},
     go_isprint,
 };
 
@@ -356,40 +356,6 @@ fn go_fixed(x: f64, prec: usize) -> String {
     let nd = i64::from(dp) + prec as i64;
     round_go(&mut digits, &mut dp, nd);
     fmt_f(x.is_sign_negative(), &digits, dp, prec)
-}
-
-/// Go's `fmt` `%g`: the shortest digits, in scientific form when the exponent
-/// is below -4 or at least 6 (`1e+06`, `1e-05`), "+Inf", "-Inf" and "NaN".
-fn go_g(x: f64) -> String {
-    if x.is_nan() {
-        return "NaN".to_owned();
-    }
-    if x.is_infinite() {
-        return if x > 0.0 { "+Inf" } else { "-Inf" }.to_owned();
-    }
-    let neg = x.is_sign_negative();
-    let (digits, dp) = go_shortest(x.abs());
-    let exp = dp - 1;
-    if digits.is_empty() || (-4..6).contains(&exp) {
-        let prec = (digits.len() as i64 - i64::from(dp)).max(0) as usize;
-        return fmt_f(neg, &digits, dp, prec);
-    }
-    // strconv's `fmtE` with the shortest digits: d[.ddd]e±XX.
-    let mut out = String::new();
-    if neg {
-        out.push('-');
-    }
-    push_digit(&mut out, digits[0]);
-    if digits.len() > 1 {
-        out.push('.');
-        for &d in &digits[1..] {
-            push_digit(&mut out, d);
-        }
-    }
-    out.push('e');
-    out.push(if exp < 0 { '-' } else { '+' });
-    out.push_str(&format!("{:02}", exp.abs()));
-    out
 }
 
 // ---------------------------------------------------------------------------

@@ -1,8 +1,9 @@
 //! Client-side evaluation of Kubernetes ValidatingAdmissionPolicy CEL expressions.
 //!
-//! Binds every VAP variable but `authorizer` (it needs an API server) and
-//! `variables` (kube-cel does not model `spec.variables`, so an expression
-//! naming it does not compile).
+//! Binds every VAP variable but `authorizer` (it needs an API server; an
+//! expression that reads it fails with `UnsupportedReference`, even where CEL
+//! absorbs the error) and `variables` (kube-cel does not model
+//! `spec.variables`, so an expression naming it does not compile).
 //!
 //! # Example
 //!
@@ -31,7 +32,9 @@
 use std::{collections::HashMap, sync::Arc};
 
 use cel::{
-    Context, Program, Value,
+    Context, ExecutionError, Program, Value,
+    common::value::CowVal,
+    context::VariableResolver,
     objects::{Key, Map},
 };
 
@@ -335,6 +338,28 @@ impl VapEvaluatorBuilder {
     }
 }
 
+/// The policy variables the apiserver binds and kube-cel does not:
+/// `authorizer` and `authorizer.requestResource`. Looking one up stays an
+/// `UndeclaredReference`, and is noted as unsupported: the apiserver has a
+/// value there, so a rule that reads one fails even where CEL absorbs the
+/// error, which could otherwise skip a quantity update the apiserver makes. A
+/// comprehension variable of that name is found before this.
+struct UnboundAuthorizer;
+
+static UNBOUND_AUTHORIZER: UnboundAuthorizer = UnboundAuthorizer;
+
+impl VariableResolver for UnboundAuthorizer {
+    fn resolve<'b>(&'b self, variable: &str) -> Option<CowVal<'b, 'b>> {
+        let name = variable.strip_prefix('.').unwrap_or(variable);
+        if name == "authorizer" || name.starts_with("authorizer.") {
+            crate::functions::note_unsupported_error(|| {
+                ExecutionError::UndeclaredReference(Arc::new("authorizer".to_owned()))
+            });
+        }
+        None
+    }
+}
+
 impl VapEvaluator {
     /// Create a new [`VapEvaluatorBuilder`].
     pub fn builder() -> VapEvaluatorBuilder {
@@ -379,6 +404,7 @@ impl VapEvaluator {
         };
         let _ = ctx.add_variable("namespaceObject", namespace_val);
 
+        ctx.set_variable_resolver(&UNBOUND_AUTHORIZER);
         ctx
     }
 
