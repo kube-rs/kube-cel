@@ -51,6 +51,21 @@ pub(crate) fn base_context() -> Context<'static, 'static> {
     crate::new_context(Arc::clone(validation_env())).expect("kube-cel's functions register onto its Env")
 }
 
+/// Runs a rule or VAP expression. One that reached a value kube-cel does not
+/// support (a quantity past its supported range, which the apiserver parses)
+/// fails, even where CEL absorbed the function's error (`|| true`, `exists`,
+/// an optional).
+pub(crate) fn execute_supported(program: &Program, ctx: &Context<'_, '_>) -> cel::ResolveResult {
+    match crate::functions::tracking_unsupported(|| program.execute(ctx)) {
+        (Ok(_), true) => Err(cel::ExecutionError::function_error(
+            "quantity",
+            "evaluation reached a quantity kube-cel does not support (an exponent or scale \
+             outside ±1000, or more significant digits than an i128 holds)",
+        )),
+        (result, _) => result,
+    }
+}
+
 /// Compiles a CRD rule, a VAP expression or either's `messageExpression` on
 /// [`validation_env`], refusing a call to a function the apiserver does not
 /// declare even where evaluation would never reach it, as the apiserver does
@@ -1012,7 +1027,7 @@ impl Validator {
             node_ctx
         };
 
-        let result = cr.program.execute(effective_ctx);
+        let result = execute_supported(&cr.program, effective_ctx);
         let error_path = effective_path(path, cr.rule.field_path.as_deref());
 
         match result {

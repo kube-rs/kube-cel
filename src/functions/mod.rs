@@ -169,6 +169,32 @@ pub(crate) fn register_all(ctx: &mut cel::Context<'_, '_>) -> Result<Vec<String>
     r.finish()
 }
 
+thread_local! {
+    /// Set when an evaluation reaches a value kube-cel does not support (a
+    /// quantity past its supported range), which the apiserver would parse.
+    static UNSUPPORTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Notes that the running evaluation reached a value kube-cel does not
+/// support. The function also returns an error, but CEL can absorb that
+/// (`quantity(s) == q || true`); [`tracking_unsupported`] lets the validation
+/// engine refuse the rule anyway.
+#[cfg_attr(not(feature = "quantity"), allow(dead_code))]
+pub(crate) fn note_unsupported() {
+    UNSUPPORTED.with(|u| u.set(true));
+}
+
+/// Runs `f` (one evaluation) and reports whether it reached a value kube-cel
+/// does not support, see [`note_unsupported`]. A call evaluation does not
+/// reach (`true || quantity(s) == q`) is not noted.
+#[cfg_attr(not(feature = "validation"), allow(dead_code))]
+pub(crate) fn tracking_unsupported<R>(f: impl FnOnce() -> R) -> (R, bool) {
+    let outer = UNSUPPORTED.with(|u| u.replace(false));
+    let result = f();
+    let reached = UNSUPPORTED.with(|u| u.replace(outer));
+    (result, reached)
+}
+
 /// Test helper: evaluates `expr` the public way, on [`new_env`](crate::new_env)
 /// and [`new_context`](crate::new_context), compiled with [`cel::Env::compile`].
 #[cfg(test)]

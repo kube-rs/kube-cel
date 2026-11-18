@@ -933,6 +933,24 @@ pub fn cases() -> Vec<ParityCase> {
             expect: Expect::Accept,
             note: "non-ASCII in a date-time time field is invalid, not a panic → ACCEPT",
         },
+        // A quantity's exponent is an int64 (past it, not a quantity); within
+        // kube-cel's supported ±1000 exponents and scales parse as on the
+        // apiserver, `0e1000` included.
+        ParityCase {
+            kind: "PquantExpRange",
+            plural: "pquantexpranges",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "isQuantity('1e1000') && isQuantity('1e-1000') && isQuantity('1.5e-999') && isQuantity('0e1000') && !isQuantity('1e9223372036854775808') && !isQuantity('1e+-5')",
+                    "message": "exponent"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "quantity exponents within ±1000 parse, past int64 do not → ACCEPT",
+        },
         // ── strings / format vs cel-go v0.26 ──────────────────────────────────
         // kube-cel keeps its own strings and format libraries; the apiserver's
         // are cel-go v0.26 `ext.Strings`.

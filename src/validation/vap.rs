@@ -328,7 +328,7 @@ impl VapEvaluator {
         compiled
             .iter()
             .map(|c| match c {
-                Ok(ce) => match ce.program.execute(&ctx) {
+                Ok(ce) => match super::execute_supported(&ce.program, &ctx) {
                     Ok(Value::Bool(true)) => VapResult {
                         expression: ce.expression.clone(),
                         passed: true,

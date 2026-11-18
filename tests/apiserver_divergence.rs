@@ -543,6 +543,63 @@ fn quantity_arithmetic_past_i128_fails_closed() {
     }
 }
 
+// ── Quantities past kube-cel's supported range — fail CLOSED ───────────────
+// apiserver: reads a quantity's exponent as an int64 and narrows it to int32
+//            (`quantity('1e4294967296') == quantity('1')` holds), parses
+//            `1e1001` and quantities whose mantissa is past `i128`, and
+//            near the int32 bounds computes a power of ten of hundreds of MiB
+//            (`0.1e-2147483647`) or panics (k8s.io/apiserver v0.36.1
+//            `MustBaseEnvSet(1.36)`).
+// kube-cel:  supports exponents and scales within ±1000 and a mantissa
+//            within `i128`. A rule or VAP expression that reaches a quantity past
+//            them fails with an EvaluationError, even where CEL absorbs the
+//            function's error (`|| true`, `exists`, an optional); one that
+//            never calls it (`true || ..`) is unaffected, and a malformed
+//            string is still not a quantity (`isQuantity` false).
+
+#[test]
+#[cfg(feature = "quantity")]
+fn quantity_past_supported_range_fails_closed() {
+    for rule in [
+        "isQuantity('1e1001')",
+        "!isQuantity('1e4294967296')",
+        "quantity('1e4294967296') == quantity('1')",
+        "isQuantity('12345678901234567890123456789012345678901')",
+        "isQuantity('1e1001') || true",
+        "[1].exists(x, quantity('1e1001') == quantity('1')) || true",
+        "optional.of(quantity('1e1001')).hasValue() || true",
+    ] {
+        let errors = run_rule(rule).unwrap_err();
+        assert!(
+            errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
+            "{rule}: {errors:?}"
+        );
+    }
+    for rule in [
+        "true || isQuantity('1e1001')",
+        "isQuantity('1e1000') && isQuantity('1e-1000')",
+        "!isQuantity('1e9223372036854775808')",
+    ] {
+        assert!(run_rule(rule).is_ok(), "{rule}");
+    }
+
+    let evaluator = VapEvaluator::builder().build();
+    let expr = |expression: &str| VapExpression {
+        expression: expression.into(),
+        message: None,
+        message_expression: None,
+    };
+    let passed: Vec<bool> = evaluator
+        .evaluate(&[
+            expr("isQuantity('1e1001') || true"),
+            expr("true || isQuantity('1e1001')"),
+        ])
+        .iter()
+        .map(|r| r.passed)
+        .collect();
+    assert_eq!(passed, [false, true]);
+}
+
 // ── `oldSelf` registration rules — fail CLOSED since 0.9; used to fail OPEN ──
 // apiserver: rejects the CRD at registration for a rule reading `oldSelf` in
 //            the items of a non-map list ("oldSelf cannot be used on the

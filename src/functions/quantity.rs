@@ -233,11 +233,60 @@ fn normalize_pair(a: &KubeQuantity, b: &KubeQuantity) -> Option<(i128, i128)> {
 // Parsing
 // ---------------------------------------------------------------------------
 
-/// Parse a Kubernetes quantity string.
-fn parse_quantity(s: &str) -> Result<KubeQuantity, String> {
+/// The decimal exponents and scales kube-cel supports. The apiserver reads an
+/// exponent as an int64 and narrows it to int32 (`1e4294967296` is 1), and near
+/// the int32 bounds computes powers of ten of hundreds of MiB, or panics; past
+/// ±1000 kube-cel refuses the quantity instead (a documented fail-closed limit).
+const SUPPORTED_SCALE: std::ops::RangeInclusive<i64> = -1000..=1000;
+
+/// Why a string is not a quantity kube-cel can use.
+#[derive(Debug)]
+enum ParseError {
+    /// Not a quantity, for the apiserver too: `quantity()` errors and
+    /// `isQuantity()` is false.
+    Invalid(String),
+    /// A quantity the apiserver parses that kube-cel does not support: an
+    /// exponent or scale outside [`SUPPORTED_SCALE`], or more significant
+    /// digits than an `i128` holds. `quantity()` and `isQuantity()` both error,
+    /// and the validation engine refuses the rule even where CEL absorbs the
+    /// error (`|| true`), see [`note_unsupported`](crate::functions::note_unsupported).
+    Unsupported(String),
+}
+
+impl From<ParseError> for ExecutionError {
+    fn from(e: ParseError) -> Self {
+        match e {
+            ParseError::Invalid(message) => ExecutionError::function_error("quantity", message),
+            ParseError::Unsupported(message) => unsupported(message),
+        }
+    }
+}
+
+/// An error for a quantity kube-cel does not support, noted for the validation
+/// engine.
+fn unsupported(message: String) -> ExecutionError {
+    crate::functions::note_unsupported();
+    ExecutionError::function_error("quantity", message)
+}
+
+fn check_scale(scale: i64, s: &str) -> Result<(), ParseError> {
+    if SUPPORTED_SCALE.contains(&scale) {
+        Ok(())
+    } else {
+        Err(ParseError::Unsupported(format!(
+            "'{s}' has an exponent or scale outside ±1000, which kube-cel does not support"
+        )))
+    }
+}
+
+/// Parse a Kubernetes quantity string. The syntax is checked in full before
+/// the range, so a malformed string is [`ParseError::Invalid`] whatever its
+/// exponent, and the range is checked before the value is simplified, so
+/// `0e2147483648` does not pass as 0.
+fn parse_quantity(s: &str) -> Result<KubeQuantity, ParseError> {
     let s = s.trim();
     if s.is_empty() {
-        return Err("empty quantity string".into());
+        return Err(ParseError::Invalid("empty quantity string".into()));
     }
 
     // Find where the number ends and the suffix begins.
@@ -266,27 +315,25 @@ fn parse_quantity(s: &str) -> Result<KubeQuantity, String> {
     };
 
     if num_part.is_empty() {
-        return Err(format!("no numeric value in '{s}'"));
+        return Err(ParseError::Invalid(format!("no numeric value in '{s}'")));
     }
 
+    let (suffix_scale, binary_multiplier) = parse_suffix(suffix).map_err(ParseError::Invalid)?;
     // Parse number part into mantissa and decimal shift.
     let (mantissa, decimal_shift) = parse_number(num_part)?;
 
-    // Parse suffix.
-    let (suffix_scale, binary_multiplier) = parse_suffix(suffix)?;
-
     if let Some(bin_mult) = binary_multiplier {
+        check_scale(decimal_shift, s)?;
         // Binary SI: multiply mantissa by binary multiplier.
         let m = mantissa
             .checked_mul(bin_mult)
-            .ok_or_else(|| format!("quantity overflow: '{s}'"))?;
+            .ok_or_else(|| ParseError::Unsupported(format!("'{s}' is larger than kube-cel supports")))?;
         Ok(KubeQuantity::new(m, decimal_shift))
     } else {
         // Decimal SI or exponent: combine scales.
-        Ok(KubeQuantity::new(
-            mantissa,
-            decimal_shift + i64::from(suffix_scale),
-        ))
+        let scale = decimal_shift + i64::from(suffix_scale);
+        check_scale(scale, s)?;
+        Ok(KubeQuantity::new(mantissa, scale))
     }
 }
 
@@ -295,35 +342,45 @@ fn parse_quantity(s: &str) -> Result<KubeQuantity, String> {
 /// "1.5" → (15, -1): represents 15 * 10^-1
 /// "100" → (100, 0)
 /// "1e3" → (1, 3): represents 1 * 10^3
-fn parse_number(s: &str) -> Result<(i128, i64), String> {
+///
+/// The exponent is read as an int64, as Go does: past that range it is not a
+/// quantity. Within it, an exponent outside [`SUPPORTED_SCALE`] is unsupported.
+fn parse_number(s: &str) -> Result<(i128, i64), ParseError> {
     // Handle scientific notation.
     if let Some(e_pos) = s.find(['e', 'E']) {
         let base_str = &s[..e_pos];
         let exp_str = &s[e_pos + 1..];
-        let (base_mantissa, base_shift) = parse_decimal(base_str)?;
-        let exp: i32 = exp_str
+        let exp: i64 = exp_str
             .parse()
-            .map_err(|_| format!("invalid exponent in '{s}'"))?;
-        return Ok((base_mantissa, base_shift + i64::from(exp)));
+            .map_err(|_| ParseError::Invalid(format!("invalid exponent in '{s}'")))?;
+        let (base_mantissa, base_shift) = parse_decimal(base_str)?;
+        check_scale(exp, s)?;
+        return Ok((base_mantissa, base_shift + exp));
     }
 
     parse_decimal(s)
 }
 
 /// Parse a decimal number (no exponent), returning (mantissa, decimal_shift).
-fn parse_decimal(s: &str) -> Result<(i128, i64), String> {
-    if let Some(dot_pos) = s.find('.') {
-        let int_part = &s[..dot_pos];
-        let frac_part = &s[dot_pos + 1..];
-        let decimal_places = i64::try_from(frac_part.len()).map_err(|_| format!("invalid number: '{s}'"))?;
-
-        let combined = format!("{int_part}{frac_part}");
-        let mantissa: i128 = combined.parse().map_err(|_| format!("invalid number: '{s}'"))?;
-        Ok((mantissa, -decimal_places))
-    } else {
-        let mantissa: i128 = s.parse().map_err(|_| format!("invalid number: '{s}'"))?;
-        Ok((mantissa, 0))
-    }
+fn parse_decimal(s: &str) -> Result<(i128, i64), ParseError> {
+    let (digits, decimal_places) = match s.find('.') {
+        Some(dot_pos) => {
+            let frac_part = &s[dot_pos + 1..];
+            let places = i64::try_from(frac_part.len())
+                .map_err(|_| ParseError::Invalid(format!("invalid number: '{s}'")))?;
+            (format!("{}{frac_part}", &s[..dot_pos]), places)
+        }
+        None => (s.to_owned(), 0),
+    };
+    // Well-formed digits past the i128 range are a quantity kube-cel cannot
+    // hold, not a malformed one.
+    let mantissa = digits.parse::<i128>().map_err(|e| match e.kind() {
+        std::num::IntErrorKind::PosOverflow | std::num::IntErrorKind::NegOverflow => ParseError::Unsupported(
+            format!("'{s}' has more significant digits than kube-cel supports"),
+        ),
+        _ => ParseError::Invalid(format!("invalid number: '{s}'")),
+    })?;
+    Ok((mantissa, -decimal_places))
 }
 
 /// Parse a quantity suffix, returning (scale_offset, optional_binary_multiplier).
@@ -383,13 +440,19 @@ fn extract_quantity(val: &Value) -> Result<&KubeQuantity, ExecutionError> {
 
 /// `quantity(<string>) -> Quantity`
 fn cel_quantity(s: Arc<String>) -> ResolveResult {
-    let q = parse_quantity(&s).map_err(|e| ExecutionError::function_error("quantity", e))?;
+    let q = parse_quantity(&s)?;
     Ok(Value::Opaque(Arc::new(q)))
 }
 
-/// `isQuantity(<string>) -> bool`
+/// `isQuantity(<string>) -> bool`. A quantity kube-cel does not support is an
+/// error, not `false`: the apiserver parses it, so `!isQuantity(s)` must not
+/// pass.
 fn cel_is_quantity(s: Arc<String>) -> ResolveResult {
-    Ok(Value::Bool(parse_quantity(&s).is_ok()))
+    match parse_quantity(&s) {
+        Ok(_) => Ok(Value::Bool(true)),
+        Err(ParseError::Invalid(_)) => Ok(Value::Bool(false)),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// `<Quantity>.isInteger() -> bool`
@@ -423,6 +486,7 @@ pub(crate) fn cel_add(This(this): This<Value>, Arguments(args): Arguments) -> Re
         return Err(ExecutionError::function_error("add", "missing argument"));
     }
     let other = quantity_or_int(&args[0], "add")?;
+    check_result_scale(q, &other)?;
     let result = q
         .add(&other)
         .ok_or_else(|| ExecutionError::function_error("add", "quantity overflow"))?;
@@ -436,10 +500,23 @@ pub(crate) fn cel_sub(This(this): This<Value>, Arguments(args): Arguments) -> Re
         return Err(ExecutionError::function_error("sub", "missing argument"));
     }
     let other = quantity_or_int(&args[0], "sub")?;
+    check_result_scale(q, &other)?;
     let result = q
         .sub(&other)
         .ok_or_else(|| ExecutionError::function_error("sub", "quantity overflow"))?;
     Ok(Value::Opaque(Arc::new(result)))
+}
+
+/// The scale of a sum or difference, the smaller of the two, must be within
+/// [`SUPPORTED_SCALE`], as a parsed quantity's is.
+fn check_result_scale(a: &KubeQuantity, b: &KubeQuantity) -> Result<(), ExecutionError> {
+    if SUPPORTED_SCALE.contains(&a.scale.min(b.scale)) {
+        Ok(())
+    } else {
+        Err(unsupported(
+            "the result has a scale outside ±1000, which kube-cel does not support".to_owned(),
+        ))
+    }
 }
 
 /// `<Quantity>.isGreaterThan(<Quantity>) -> bool`
@@ -525,44 +602,99 @@ mod tests {
         assert_eq!(eval("quantity('1e40').compareTo(quantity('1n'))"), Value::Int(1));
     }
 
+    /// `(result, whether the evaluation noted an unsupported quantity)`.
+    fn eval_tracked(expr: &str) -> (Result<Value, ExecutionError>, bool) {
+        crate::functions::tracking_unsupported(|| crate::functions::eval(expr))
+    }
+
     #[test]
-    fn exponent_at_i32_bounds_stays_exact() {
-        // 0.1e-2147483647 is 1 * 10^i32::MIN: negating the scale overflowed
-        // i32 (a debug panic, a wrapped value in release). With a second
-        // decimal place the parse itself overflowed.
+    fn exponents_and_scales_within_1000_are_supported() {
+        // Exponent and scale (exponent minus fraction digits, plus an SI suffix)
+        // up to ±1000 inclusive; the apiserver parses all of these.
+        for s in [
+            "1e1000",
+            "1e-1000",
+            "1.5e-999",
+            "0e1000",
+            "1.0e1000",
+            "10e1000",
+            "1E-1000",
+            "1e+0001000",
+        ] {
+            assert_eq!(eval(&format!("isQuantity('{s}')")), Value::Bool(true), "{s}");
+        }
+        let thousand_places = format!("0.{}1", "0".repeat(999));
         assert_eq!(
-            eval("quantity('0.1e-2147483647').isInteger()"),
-            Value::Bool(false)
+            eval(&format!("isQuantity('{thousand_places}')")),
+            Value::Bool(true)
         );
-        assert_eq!(eval("quantity('0.01e-2147483647').sign()"), Value::Int(1));
+        // A suffix brings a long fraction back into range.
+        let k = format!("0.{}1k", "0".repeat(1000));
+        assert_eq!(eval(&format!("isQuantity('{k}')")), Value::Bool(true));
         assert_eq!(
-            eval("quantity('0.1e-2147483647').asApproximateFloat()"),
-            Value::Float(0.0)
-        );
-        assert!(crate::functions::eval("quantity('0.1e-2147483647').asInteger()").is_err());
-        assert_eq!(
-            eval("quantity('0.1e-2147483647').compareTo(quantity('1n'))"),
-            Value::Int(-1)
-        );
-        // Trailing zeros raise the scale past i32::MAX in `simplify`.
-        assert_eq!(eval("quantity('10e2147483647').sign()"), Value::Int(1));
-        assert_eq!(
-            eval("quantity('10e2147483647').compareTo(quantity('1e2147483647'))"),
+            eval("quantity('1e1000').compareTo(quantity('1e999'))"),
             Value::Int(1)
         );
-        assert_eq!(
-            eval("quantity('10e2147483647').asApproximateFloat()"),
-            Value::Float(f64::INFINITY)
-        );
-        assert!(crate::functions::eval("quantity('10e2147483647').asInteger()").is_err());
-        assert!(
-            crate::functions::eval("quantity('10e2147483647').add(quantity('0.1e-2147483647'))").is_err()
-        );
-        // The smallest exponent plus a decimal place goes past i32::MIN.
-        assert_eq!(
-            eval("quantity('0.1e-2147483648').compareTo(quantity('0.1e-2147483647'))"),
-            Value::Int(-1)
-        );
+    }
+
+    #[test]
+    fn unsupported_quantities_error_and_are_noted() {
+        // The apiserver parses each of these (some it narrows to int32, some
+        // take it minutes); kube-cel refuses them, and `isQuantity` is an
+        // error, not false, so `!isQuantity(s)` cannot pass.
+        let long_fraction = format!("0.{}1", "0".repeat(1000));
+        let binary_fraction = format!("0.{}1Ki", "0".repeat(1000));
+        for s in [
+            "1e1001",
+            "1e-1001",
+            "0.1e-1000",
+            "0e2147483648",
+            "1e4294967296",
+            "0.1e-2147483647",
+            "1e2147483648",
+            "1.0e-2147483648",
+            "1000000000000000000e2147483639",
+            "12345678901234567890123456789012345678901",
+            long_fraction.as_str(),
+            binary_fraction.as_str(),
+        ] {
+            for expr in [format!("quantity('{s}')"), format!("isQuantity('{s}')")] {
+                let (result, noted) = eval_tracked(&expr);
+                assert!(result.is_err(), "{expr}: {result:?}");
+                assert!(noted, "{expr}: not noted");
+            }
+        }
+        // A sum's scale (the smaller of the two) must be in range too.
+        let (result, noted) = eval_tracked("quantity('100e1000').add(quantity('100e1000'))");
+        assert!(result.is_err() && noted, "{result:?}");
+    }
+
+    #[test]
+    fn malformed_quantities_stay_invalid() {
+        // Not a quantity for the apiserver either: false, nothing noted. An
+        // exponent past int64 is a syntax error in Go (strconv.ParseInt).
+        for s in [
+            "1e9223372036854775808",
+            "1e-9223372036854775809",
+            "1e+-5",
+            "1e",
+            "1.2.3e2000",
+        ] {
+            let (result, noted) = eval_tracked(&format!("isQuantity('{s}')"));
+            assert_eq!(result, Ok(Value::Bool(false)), "{s}");
+            assert!(!noted, "{s}");
+        }
+    }
+
+    #[test]
+    fn noted_even_when_cel_absorbs_the_error() {
+        let (result, noted) = eval_tracked("isQuantity('1e1001') || true");
+        assert_eq!(result, Ok(Value::Bool(true)));
+        assert!(noted);
+        // A call evaluation does not reach is not noted.
+        let (result, noted) = eval_tracked("true || isQuantity('1e1001')");
+        assert_eq!(result, Ok(Value::Bool(true)));
+        assert!(!noted);
     }
 
     #[test]

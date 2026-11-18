@@ -292,9 +292,20 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   longer panics in Rust's formatter (see "Strings and `format()`" above for
   what it prints). A precision past the int64 range is an error for every
   verb, as in cel-go.
-- A quantity whose exponent is near the `i32` bounds (`0.1e-2147483647`,
-  `10e2147483647`) keeps its exact value: the scale arithmetic overflowed (a
-  panic in debug builds, a wrapped scale in release).
+- Quantities have a supported range: exponents and scales (the exponent less
+  the fraction digits, with an SI or binary suffix) within ±1000, and a mantissa
+  within `i128`. The exponent is read as an int64, as in the apiserver,
+  so one past that range is not a quantity (`isQuantity` false). One within it
+  but past ±1000 (`1e1001`, `0e2147483648`), or a mantissa past `i128`, is
+  an error from `quantity()` and `isQuantity()` alike, and a rule or VAP
+  expression that reaches one fails with an `EvaluationError`, even where CEL
+  absorbs the error (`… || true`). The apiserver parses these, narrowing the
+  exponent to int32 (`quantity('1e4294967296') == quantity('1')`) and, near
+  the int32 bounds, computing for minutes or panicking: a documented
+  fail-closed limit. Before, `isQuantity` was false for an exponent past the
+  int32 range or a mantissa past `i128`, so `!isQuantity(s)` passed (a
+  **fail-open**), and an exponent near the int32 bounds overflowed the scale
+  arithmetic (a panic in debug builds, a wrapped scale in release).
 - `replace(old, new, n)` with a negative `n` replaces every match, as Go's
   `strings.Replace` does (it replaced nothing, a **fail-open**:
   `'aaa'.replace('a', 'b', -1) == 'aaa'` held). `replace`, `findAll`,
