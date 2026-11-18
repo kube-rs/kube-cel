@@ -116,7 +116,10 @@ pub enum ErrorKind {
     /// a macro's variable outside the macro, `authorizer` in a CRD rule). The
     /// apiserver rejects such a CRD at registration.
     CompilationFailure,
-    /// Malformed rule JSON.
+    /// A malformed rule: JSON that is not a rule, or a field the apiserver
+    /// refuses at registration beside the expressions (a blank or multi-line
+    /// `message`, a multi-line rule without one, an unsupported `reason`, a
+    /// blank, multi-line or invalid `fieldPath`).
     InvalidRule,
     /// Rule evaluated to `false`.
     ValidationFailure,
@@ -363,6 +366,14 @@ fn compilation_error(err: &CompilationError, path: &str) -> ValidationError {
             source: None,
         },
         CompilationError::SchemaTooDeep { .. } => schema_too_deep_error(path),
+        CompilationError::InvalidRuleField { rule, .. } => ValidationError {
+            rule: rule.clone(),
+            message: err.to_string(),
+            field_path: path.to_string(),
+            reason: None,
+            kind: ErrorKind::InvalidRule,
+            source: None,
+        },
         CompilationError::RuleInCombinator { rule, .. } => ValidationError {
             rule: rule.clone(),
             message: err.to_string(),
@@ -2051,7 +2062,7 @@ mod tests {
                         "x": {"type": "integer"}
                     },
                     "x-kubernetes-validations": [
-                        {"rule": "self.x >= 0", "message": "bad", "fieldPath": ".spec.x"}
+                        {"rule": "self.x >= 0", "message": "bad", "fieldPath": ".x"}
                     ]
                 }
             }
@@ -2059,11 +2070,13 @@ mod tests {
         let obj = json!({"spec": {"x": -1}});
         let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].field_path, "spec.spec.x");
+        assert_eq!(errors[0].field_path, "spec.x");
     }
 
+    /// A `fieldPath` starts with `.` or `[`; the apiserver refuses `name` at
+    /// registration ("must be a valid path"), so the rule is refused.
     #[test]
-    fn fieldpath_without_dot() {
+    fn fieldpath_without_dot_is_refused() {
         let schema = json!({
             "type": "object",
             "properties": {
@@ -2078,10 +2091,11 @@ mod tests {
                 }
             }
         });
-        let obj = json!({"spec": {"name": ""}});
+        let obj = json!({"spec": {"name": "ok"}});
         let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].field_path, "spec.name");
+        assert_eq!(errors[0].kind, ErrorKind::InvalidRule);
+        assert_eq!(errors[0].field_path, "spec");
     }
 
     #[test]
@@ -2092,13 +2106,13 @@ mod tests {
                 "x": {"type": "integer"}
             },
             "x-kubernetes-validations": [
-                {"rule": "self.x >= 0", "message": "bad", "fieldPath": ".spec.x"}
+                {"rule": "self.x >= 0", "message": "bad", "fieldPath": ".x"}
             ]
         });
         let obj = json!({"x": -1});
         let errors = validate(&schema, &obj, None).unwrap_err();
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].field_path, ".spec.x");
+        assert_eq!(errors[0].field_path, ".x");
     }
 
     #[test]

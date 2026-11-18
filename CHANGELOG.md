@@ -330,6 +330,21 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   by `CompiledSchema::compilation_errors()`); an empty rule list is fine.
   - Migration: move the rules onto the node the combinator sits on.
 
+- **Rule fields the apiserver refuses at registration are refused.**
+  Beside the expressions, the apiserver checks a rule's other fields when it
+  registers the CRD or policy (checked on v1.36.1): a static `message` that
+  is blank but not empty, or holds a line break once trimmed (CRD rules and
+  VAP validations); a CRD rule holding a line break without a `message`; a
+  `reason` other than `FieldValueRequired`, `FieldValueForbidden`,
+  `FieldValueInvalid` or `FieldValueDuplicate`; a `fieldPath` that is blank,
+  holds a line break or names no field of the rule's node (it starts with
+  `.` or `[`, steps through `.name` or `['name']`, and cannot index a list).
+  kube-cel accepted all of them. A CRD rule with one is now rejected on
+  every object (`ErrorKind::InvalidRule`, `CompilationError::InvalidRuleField`),
+  and a VAP expression with a refused message fails to compile (`VapError`).
+  - Migration: fix the field. A `fieldPath` names a field relative to the
+    rule's node and starts with `.`: `spec.x` on the root becomes `.spec.x`.
+
 ### Added
 - `new_env() -> cel::Env`: kube-cel's environment, the apiserver's base CEL
   environment as far as kube-cel models it: the `cel` standard library,

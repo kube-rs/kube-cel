@@ -892,13 +892,19 @@ fn compiled_schema_matches_schema_validation() {
 fn kube_core_rule_json_compatibility() {
     use kube_cel::compile_schema;
 
-    // JSON format matching kube-core's Rule serialization output
+    // JSON format matching kube-core's Rule serialization output. A
+    // `fieldPath` names a field of the rule's node, starting with `.`.
     let schema = json!({
+        "type": "object",
+        "properties": {
+            "spec": { "type": "object", "properties": { "host": { "type": "string" } } },
+            "url": { "type": "object", "properties": { "host": { "type": "string" } } }
+        },
         "x-kubernetes-validations": [
             {
                 "rule": "self.spec.host == self.url.host",
                 "message": "host must match spec.host",
-                "fieldPath": "spec.host",
+                "fieldPath": ".spec.host",
                 "reason": "FieldValueInvalid"
             },
             {
@@ -919,7 +925,7 @@ fn kube_core_rule_json_compatibility() {
     // First rule: all fields populated
     let r0 = results[0].as_ref().unwrap();
     assert_eq!(r0.rule.message.as_deref(), Some("host must match spec.host"));
-    assert_eq!(r0.rule.field_path.as_deref(), Some("spec.host"));
+    assert_eq!(r0.rule.field_path.as_deref(), Some(".spec.host"));
     assert_eq!(r0.rule.reason.as_deref(), Some("FieldValueInvalid"));
     assert!(!r0.is_transition_rule);
 

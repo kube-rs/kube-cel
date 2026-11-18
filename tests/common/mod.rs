@@ -2289,6 +2289,157 @@ pub fn cases() -> Vec<ParityCase> {
             expect: Expect::Accept,
             note: "objects differing only in a field name CEL cannot spell are not equal → accepted",
         },
+        // Rule fields the apiserver refuses at registration, beside the
+        // expressions (apiextensions validation.go): a blank or multi-line
+        // `message`, a multi-line rule without one, an unsupported `reason`,
+        // a `fieldPath` that names no field of the rule's node.
+        ParityCase {
+            kind: "PruleFieldBlankMessage",
+            plural: "prulefieldblankmessages",
+            schema: json!({
+                "type": "object",
+                "properties": { "a": { "type": "integer" } },
+                "x-kubernetes-validations": [{ "rule": "true", "message": "   " }]
+            }),
+            object: json!({ "a": 1 }),
+            expect: Expect::RegistrationRejected,
+            note: "a blank message → rejected at registration",
+        },
+        ParityCase {
+            kind: "PruleFieldMessageBreak",
+            plural: "prulefieldmessagebreaks",
+            schema: json!({
+                "type": "object",
+                "properties": { "a": { "type": "integer" } },
+                "x-kubernetes-validations": [{ "rule": "true", "message": "a\nb" }]
+            }),
+            object: json!({ "a": 1 }),
+            expect: Expect::RegistrationRejected,
+            note: "a message with a line break → rejected at registration",
+        },
+        ParityCase {
+            kind: "PruleFieldMultiline",
+            plural: "prulefieldmultilines",
+            schema: json!({
+                "type": "object",
+                "properties": { "a": { "type": "integer" } },
+                "x-kubernetes-validations": [{ "rule": "true &&\ntrue" }]
+            }),
+            object: json!({ "a": 1 }),
+            expect: Expect::RegistrationRejected,
+            note: "a multi-line rule without a message → rejected at registration",
+        },
+        ParityCase {
+            kind: "PruleFieldReason",
+            plural: "prulefieldreasons",
+            schema: json!({
+                "type": "object",
+                "properties": { "a": { "type": "integer" } },
+                "x-kubernetes-validations": [{ "rule": "true", "reason": "FieldValueTooLong" }]
+            }),
+            object: json!({ "a": 1 }),
+            expect: Expect::RegistrationRejected,
+            note: "an unsupported reason → rejected at registration",
+        },
+        ParityCase {
+            kind: "PruleFieldPathMissing",
+            plural: "prulefieldpathmissings",
+            schema: json!({
+                "type": "object",
+                "properties": { "a": { "type": "integer" } },
+                "x-kubernetes-validations": [{ "rule": "true", "fieldPath": ".nope" }]
+            }),
+            object: json!({ "a": 1 }),
+            expect: Expect::RegistrationRejected,
+            note: "a fieldPath naming no field → rejected at registration",
+        },
+        ParityCase {
+            kind: "PruleFieldPathNoDot",
+            plural: "prulefieldpathnodots",
+            schema: json!({
+                "type": "object",
+                "properties": { "a": { "type": "integer" } },
+                "x-kubernetes-validations": [{ "rule": "true", "fieldPath": "a" }]
+            }),
+            object: json!({ "a": 1 }),
+            expect: Expect::RegistrationRejected,
+            note: "a fieldPath without a leading dot → rejected at registration",
+        },
+        ParityCase {
+            kind: "PruleFieldPathNullMap",
+            plural: "prulefieldpathnullmaps",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "m": {
+                        "type": "object",
+                        "additionalProperties": null,
+                        "x-kubernetes-validations": [{ "rule": "true", "fieldPath": ".k" }]
+                    }
+                }
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "a null additionalProperties is no map, so `.k` names no field → rejected at registration",
+        },
+        ParityCase {
+            kind: "PruleFieldPathMaps",
+            plural: "prulefieldpathmaps",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "m": {
+                        "type": "object",
+                        "properties": {},
+                        "maxProperties": 3,
+                        "additionalProperties": { "type": "object", "properties": { "x": { "type": "string", "maxLength": 8 } } },
+                        "x-kubernetes-validations": [
+                            { "rule": "true", "fieldPath": ".k" },
+                            { "rule": "true", "fieldPath": ".k.x" }
+                        ]
+                    },
+                    "closed": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "x-kubernetes-validations": [{ "rule": "true", "fieldPath": ".k" }]
+                    }
+                },
+                "x-kubernetes-validations": [
+                    { "rule": "true", "fieldPath": ".m.k" },
+                    { "rule": "true", "fieldPath": ".m['k'].x" }
+                ]
+            }),
+            object: json!({ "m": { "k": { "x": "v" } } }),
+            expect: Expect::Accept,
+            note: "empty properties beside a map schema, and additionalProperties: false, still name any key → accepted",
+        },
+        ParityCase {
+            kind: "PruleFieldValid",
+            plural: "prulefieldvalids",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "a": { "type": "integer" },
+                    "m": {
+                        "type": "object",
+                        "maxProperties": 3,
+                        "additionalProperties": { "type": "object", "properties": { "x": { "type": "integer" } } }
+                    }
+                },
+                "x-kubernetes-validations": [
+                    { "rule": "true &&\ntrue", "message": "multi-line, with a message" },
+                    { "rule": "true", "message": " padded " },
+                    { "rule": "true", "message": "trailing line break\n" },
+                    { "rule": "true", "reason": "FieldValueForbidden", "fieldPath": ".a" },
+                    { "rule": "true", "fieldPath": "['a']" },
+                    { "rule": "true", "fieldPath": ".m.anykey.x" },
+                    { "rule": "true", "fieldPath": ".m['a.b'].x" }
+                ]
+            }),
+            object: json!({ "a": 1, "m": { "k": { "x": 1 } } }),
+            expect: Expect::Accept,
+            note: "valid messages, reason and fieldPaths (a property, a quoted name, a map key) → accepted",
+        },
         // ── Schema nodes the object does not reach (kube-rs/kube-cel#14) ─────
         // The apiserver compiles every rule, and checks the nesting depth, when
         // it registers the CRD, whatever objects later look like. Each row's
@@ -2465,6 +2616,7 @@ pub struct VapCase {
     /// The policy name; unique across the table.
     pub name: &'static str,
     pub expression: &'static str,
+    pub message: Option<&'static str>,
     pub message_expression: Option<&'static str>,
     pub param_kind: bool,
     pub registers: bool,
@@ -2477,6 +2629,7 @@ pub fn vap_cases() -> Vec<VapCase> {
     let case = |name, expression, message_expression, registers, note| VapCase {
         name,
         expression,
+        message: None,
         message_expression,
         param_kind: true,
         registers,
@@ -2593,6 +2746,7 @@ pub fn vap_cases() -> Vec<VapCase> {
         VapCase {
             name: "vap-params-no-paramkind",
             expression: "true || params.data.max == '1'",
+            message: None,
             message_expression: None,
             param_kind: false,
             registers: false,
@@ -2627,8 +2781,36 @@ pub fn vap_cases() -> Vec<VapCase> {
             "Struct's entry type and the duration constructor → registered",
         ),
         VapCase {
+            name: "vap-message-blank",
+            expression: "true",
+            message: Some("   "),
+            message_expression: None,
+            param_kind: true,
+            registers: false,
+            note: "a blank static message → rejected",
+        },
+        VapCase {
+            name: "vap-message-break",
+            expression: "true",
+            message: Some("a\nb"),
+            message_expression: None,
+            param_kind: true,
+            registers: false,
+            note: "a static message with a line break → rejected",
+        },
+        VapCase {
+            name: "vap-message-padded",
+            expression: "true",
+            message: Some(" x "),
+            message_expression: None,
+            param_kind: true,
+            registers: true,
+            note: "a padded static message → registered",
+        },
+        VapCase {
             name: "vap-no-paramkind",
             expression: "object.metadata.name != '' || [1].all(params, params > 0)",
+            message: None,
             message_expression: None,
             param_kind: false,
             registers: true,

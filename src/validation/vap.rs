@@ -176,6 +176,20 @@ impl std::error::Error for VapError {
     }
 }
 
+/// Why the apiserver refuses a validation's static `message` at registration,
+/// if it does: blank but not empty, or holding a line break once trimmed
+/// (checked on v1.36.1).
+fn message_error(message: &str) -> Option<&'static str> {
+    let trimmed = message.trim();
+    if !message.is_empty() && trimmed.is_empty() {
+        Some("must be non-empty if specified")
+    } else if trimmed.contains(['\n', '\r']) {
+        Some("must not contain line breaks")
+    } else {
+        None
+    }
+}
+
 /// Client-side evaluator for Kubernetes ValidatingAdmissionPolicy CEL expressions.
 ///
 /// Binds `object`, `oldObject`, `request`, `namespaceObject` and, for a
@@ -375,7 +389,9 @@ impl VapEvaluator {
     /// expression and the cause: the `cel` parse error, a call to a function
     /// outside the apiserver's base CEL environment, or an identifier a policy
     /// does not declare (`self`, a typo), even one evaluation would never
-    /// reach (via [`source`](std::error::Error::source)). A policy declares
+    /// reach (via [`source`](std::error::Error::source)), or a static
+    /// `message` the apiserver refuses (blank, or holding a line break once
+    /// trimmed). A policy declares
     /// `object`, `oldObject`, `request` and `namespaceObject`, `authorizer`
     /// in a validation expression but not in its `messageExpression`, and
     /// `params` when it has a `paramKind`
@@ -404,6 +420,16 @@ impl VapEvaluator {
         expressions
             .iter()
             .map(|expr| {
+                if let Some(detail) = expr.message.as_deref().and_then(message_error) {
+                    return Err(VapError {
+                        expression: expr.expression.clone(),
+                        source: format!(
+                            "message {:?}: {detail}",
+                            expr.message.as_deref().unwrap_or_default()
+                        )
+                        .into(),
+                    });
+                }
                 let program =
                     crate::validation::compile(&expr.expression, scope).map_err(|source| VapError {
                         expression: expr.expression.clone(),
@@ -829,6 +855,33 @@ mod tests {
             .namespace_object(json!({"metadata": {"name": "ns"}}))
             .build();
         assert!(namespaced.evaluate(&[expr("namespaceObject.metadata.name == 'ns'")])[0].passed);
+    }
+
+    /// The apiserver refuses a blank static message, or one with a line
+    /// break once trimmed, at registration; padding and a trailing line
+    /// break are fine (checked on v1.36.1).
+    #[test]
+    fn static_message_shape_is_checked() {
+        let with_message = |message: &str| VapExpression {
+            expression: "true".into(),
+            message: Some(message.into()),
+            message_expression: None,
+        };
+        let evaluator = VapEvaluator::builder().build();
+        for message in ["   ", "a\nb", "a\rb"] {
+            let compiled = evaluator.compile_expressions(&[with_message(message)]);
+            assert!(compiled[0].is_err(), "{message:?}");
+            assert!(
+                !evaluator.evaluate(&[with_message(message)])[0].passed,
+                "{message:?}"
+            );
+        }
+        for message in ["", " x ", "a\n", "\na"] {
+            assert!(
+                evaluator.compile_expressions(&[with_message(message)])[0].is_ok(),
+                "{message:?}"
+            );
+        }
     }
 
     /// `variables` comes with `spec.variables`, which kube-cel does not model.

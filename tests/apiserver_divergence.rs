@@ -376,6 +376,44 @@ fn rules_under_combinators_fail_closed() {
     );
 }
 
+/// Rule fields the apiserver refuses at registration beside the expressions
+/// (parity rows `PruleField*` and `vap-message-*`): a blank or multi-line
+/// static message, a multi-line rule without a message, an unsupported
+/// `reason`, a `fieldPath` naming no field of the rule's node. kube-cel
+/// rejects every object (`InvalidRule`), or fails to compile the policy
+/// expression; before 0.9 it accepted them.
+#[test]
+fn refused_rule_fields_fail_closed() {
+    for rule in [
+        json!({ "rule": "true", "message": "   " }),
+        json!({ "rule": "true", "message": "a\nb" }),
+        json!({ "rule": "true &&\ntrue" }),
+        json!({ "rule": "true", "reason": "FieldValueTooLong" }),
+        json!({ "rule": "true", "fieldPath": ".nope" }),
+    ] {
+        let schema = json!({
+            "type": "object",
+            "properties": { "items": { "type": "array", "items": {"type": "integer"} } },
+            "x-kubernetes-validations": [rule.clone()]
+        });
+        let errors = Validator::new()
+            .validate(&schema, &json!({"items": [3, 1, 2]}), None)
+            .unwrap_err();
+        assert!(
+            errors.iter().all(|e| e.kind == ErrorKind::InvalidRule),
+            "{rule}: {errors:?}"
+        );
+    }
+    let compiled = VapEvaluator::builder()
+        .build()
+        .compile_expressions(&[VapExpression {
+            expression: "true".into(),
+            message: Some("   ".into()),
+            message_expression: None,
+        }]);
+    assert!(compiled[0].is_err(), "a blank static message must not compile");
+}
+
 /// The apiserver has no string `reverse()` (its `reverse` is the list one):
 /// the CRD is rejected at registration ("found no matching overload"). kube-cel
 /// has no matching overload at evaluation either, so the object is rejected, as

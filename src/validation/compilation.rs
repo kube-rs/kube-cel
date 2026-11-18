@@ -104,6 +104,18 @@ pub enum CompilationError {
         /// The first rule there, as written.
         rule: String,
     },
+    /// A rule field the apiserver refuses at registration, beside the
+    /// expressions: a blank or multi-line `message`, a multi-line rule
+    /// without a `message`, an unsupported `reason`, or a blank, multi-line
+    /// or invalid `fieldPath`.
+    InvalidRuleField {
+        /// The rule, as written.
+        rule: String,
+        /// The refused field: `message`, `reason` or `fieldPath`.
+        field: String,
+        /// Why, in the apiserver's words: "must be non-empty if specified".
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for CompilationError {
@@ -131,6 +143,9 @@ impl std::fmt::Display for CompilationError {
                     "schema nesting depth {depth} exceeds the maximum of {MAX_SCHEMA_DEPTH}"
                 )
             }
+            CompilationError::InvalidRuleField { rule, field, detail } => {
+                write!(f, "invalid {field} of rule \"{rule}\": {detail}")
+            }
             CompilationError::RuleInCombinator { location, rule } => write!(
                 f,
                 "{location}.x-kubernetes-validations must be empty to be structural: the apiserver \
@@ -146,7 +161,9 @@ impl std::error::Error for CompilationError {
             CompilationError::Parse { source, .. } => Some(source.as_ref()),
             CompilationError::MessageExpressionParse { source, .. } => Some(source.as_ref()),
             CompilationError::InvalidRule(err) => Some(err),
-            CompilationError::SchemaTooDeep { .. } | CompilationError::RuleInCombinator { .. } => None,
+            CompilationError::SchemaTooDeep { .. }
+            | CompilationError::RuleInCombinator { .. }
+            | CompilationError::InvalidRuleField { .. } => None,
         }
     }
 }
@@ -204,9 +221,180 @@ pub(crate) fn compile_schema_validations(
         .iter()
         .map(|raw| {
             let rule: Rule = serde_json::from_value(raw.clone()).map_err(CompilationError::InvalidRule)?;
-            compile_rule(&rule)
+            let compiled = compile_rule(&rule)?;
+            match rule_field_error(&rule, schema) {
+                Some((field, detail)) => Err(CompilationError::InvalidRuleField {
+                    rule: rule.rule.clone(),
+                    field: field.to_owned(),
+                    detail,
+                }),
+                None => Ok(compiled),
+            }
         })
         .collect()
+}
+
+/// The `reason`s a rule may give (apiextensions `supportedValidationReason`).
+const SUPPORTED_REASONS: &[&str] = &[
+    "FieldValueDuplicate",
+    "FieldValueForbidden",
+    "FieldValueInvalid",
+    "FieldValueRequired",
+];
+
+/// Whether `s` holds a line break, as the apiserver's `hasNewlines` reads one.
+fn has_line_break(s: &str) -> bool {
+    s.contains(['\n', '\r'])
+}
+
+/// The first field of `rule`, on the schema node `schema`, the apiserver
+/// refuses at registration beside the expressions, with why (apiextensions
+/// validation.go, `x-kubernetes-validations`): a `message` that is blank but
+/// not empty, or holds a line break once trimmed; no `message` for a rule
+/// that holds a line break once trimmed; a `reason` outside
+/// [`SUPPORTED_REASONS`]; a `fieldPath` that is blank but not empty, holds a
+/// line break, or names no field of `schema` ([`valid_field_path`]). A blank
+/// rule fails to compile instead.
+pub(crate) fn rule_field_error(rule: &Rule, schema: &serde_json::Value) -> Option<(&'static str, String)> {
+    let message = rule.message.as_deref().unwrap_or_default();
+    let trimmed = message.trim();
+    if !message.is_empty() && trimmed.is_empty() {
+        return Some(("message", "must be non-empty if specified".into()));
+    }
+    if has_line_break(trimmed) {
+        return Some(("message", "must not contain line breaks".into()));
+    }
+    if has_line_break(rule.rule.trim()) && trimmed.is_empty() {
+        return Some((
+            "message",
+            "message must be specified if rule contains line breaks".into(),
+        ));
+    }
+    if let Some(reason) = rule.reason.as_deref()
+        && !SUPPORTED_REASONS.contains(&reason)
+    {
+        return Some((
+            "reason",
+            format!("unsupported value {reason:?}: supported values: {SUPPORTED_REASONS:?}"),
+        ));
+    }
+    let field_path = rule.field_path.as_deref().unwrap_or_default();
+    if !field_path.is_empty() && field_path.trim().is_empty() {
+        return Some(("fieldPath", "must be non-empty if specified".into()));
+    }
+    if has_line_break(field_path) {
+        return Some(("fieldPath", "must not contain line breaks".into()));
+    }
+    if !field_path.is_empty() && !valid_field_path(field_path, schema) {
+        return Some(("fieldPath", "must be a valid path".into()));
+    }
+    None
+}
+
+/// Whether `path` names a field below the schema node `schema`, as the
+/// apiserver's `ValidFieldPath` reads it: steps of `.name` or `['name']` (a
+/// single-quoted string with backslash escapes), each a declared property of
+/// an object, or any key of a map. List items cannot be named.
+fn valid_field_path(path: &str, schema: &serde_json::Value) -> bool {
+    let tokens = field_path_tokens(path);
+    let mut tokens = tokens.into_iter();
+    let mut node = schema;
+    while let Some(token) = tokens.next() {
+        let name = match token {
+            "[" => {
+                let Some(quoted) = tokens.next() else { return false };
+                if quoted.len() < 2 || !quoted.starts_with('\'') || !quoted.ends_with('\'') {
+                    return false;
+                }
+                let Some(name) = unescape_single_quoted(&quoted[1..quoted.len() - 1]) else {
+                    return false;
+                };
+                if tokens.next() != Some("]") {
+                    return false;
+                }
+                name
+            }
+            "." => match tokens.next() {
+                Some(name) => name.to_owned(),
+                None => return false,
+            },
+            _ => return false,
+        };
+        // As the apiserver's structural schema has them: empty `properties`
+        // are none, and a `null` `additionalProperties` is absent, while a
+        // boolean one still names any key.
+        node = if let Some(properties) = node
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .filter(|p| !p.is_empty())
+        {
+            match properties.get(&name) {
+                Some(child) => child,
+                None => return false,
+            }
+        } else if let Some(additional) = node.get("additionalProperties").filter(|a| !a.is_null()) {
+            additional
+        } else {
+            return false;
+        };
+    }
+    true
+}
+
+/// `path` split at `.`, `[` and `]`, each its own token, keeping a
+/// single-quoted string whole (up to a quote not after a backslash, or the
+/// end): the apiserver's `ValidFieldPath` scanner.
+fn field_path_tokens(path: &str) -> Vec<&str> {
+    let bytes = path.as_bytes();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let start = i;
+        if bytes[i] == b'\'' {
+            i += 1;
+            while i < bytes.len() && !(bytes[i] == b'\'' && bytes[i - 1] != b'\\') {
+                i += 1;
+            }
+            i = (i + 1).min(bytes.len());
+        } else if matches!(bytes[i], b'.' | b'[' | b']') {
+            i += 1;
+        } else {
+            while i < bytes.len() && !matches!(bytes[i], b'.' | b'[' | b']') {
+                i += 1;
+            }
+        }
+        tokens.push(&path[start..i]);
+    }
+    tokens
+}
+
+/// The contents of a single-quoted `fieldPath` string, its backslash escapes
+/// (`\a \b \f \n \r \t \v \' \\`) replaced; `None` for any other escape.
+fn unescape_single_quoted(s: &str) -> Option<String> {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('a') => out.push('\u{7}'),
+            Some('b') => out.push('\u{8}'),
+            Some('f') => out.push('\u{c}'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('v') => out.push('\u{b}'),
+            Some('\'') => out.push('\''),
+            Some('\\') => out.push('\\'),
+            // `\\.` does not match a line break, nor the end: kept as is.
+            Some('\n') => out.push_str("\\\n"),
+            None => out.push('\\'),
+            Some(_) => return None,
+        }
+    }
+    Some(out)
 }
 
 /// A pre-compiled schema tree. Compile once with [`compile_schema`], then
@@ -535,6 +723,96 @@ fn compile_schema_inner(schema: &serde_json::Value, depth: usize) -> CompiledSch
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rule fields the apiserver refuses at registration beside the
+    /// expressions (checked on v1.36.1; parity rows `PruleField*`).
+    #[test]
+    fn rule_field_errors_follow_the_apiserver() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "integer"},
+                "m": {"type": "object", "additionalProperties": {"type": "object", "properties": {"x": {"type": "integer"}}}},
+                "l": {"type": "array", "items": {"type": "integer"}},
+                // Empty `properties` are none (`NewStructural`), so the map applies.
+                "emptyProps": {"type": "object", "properties": {}, "additionalProperties": {"type": "object", "properties": {"x": {"type": "integer"}}}},
+                // A `null` `additionalProperties` is absent; a boolean one names any key.
+                "nullMap": {"type": "object", "additionalProperties": null},
+                "closedMap": {"type": "object", "additionalProperties": false},
+                "openMap": {"type": "object", "additionalProperties": true}
+            }
+        });
+        let rule = |json: serde_json::Value| -> Rule { serde_json::from_value(json).unwrap() };
+        let refused = [
+            (serde_json::json!({"rule": "true", "message": "   "}), "message"),
+            (serde_json::json!({"rule": "true", "message": "a\nb"}), "message"),
+            (serde_json::json!({"rule": "true", "message": "a\rb"}), "message"),
+            (serde_json::json!({"rule": "true &&\ntrue"}), "message"),
+            (
+                serde_json::json!({"rule": "true", "reason": "FieldValueTooLong"}),
+                "reason",
+            ),
+            (
+                serde_json::json!({"rule": "true", "fieldPath": "  "}),
+                "fieldPath",
+            ),
+            (
+                serde_json::json!({"rule": "true", "fieldPath": ".a\n"}),
+                "fieldPath",
+            ),
+            (serde_json::json!({"rule": "true", "fieldPath": "a"}), "fieldPath"),
+            (
+                serde_json::json!({"rule": "true", "fieldPath": ".nope"}),
+                "fieldPath",
+            ),
+            (
+                serde_json::json!({"rule": "true", "fieldPath": ".l[0]"}),
+                "fieldPath",
+            ),
+            (
+                serde_json::json!({"rule": "true", "fieldPath": ".m.k.nope"}),
+                "fieldPath",
+            ),
+            (
+                serde_json::json!({"rule": "true", "fieldPath": "['a"}),
+                "fieldPath",
+            ),
+            (
+                serde_json::json!({"rule": "true", "fieldPath": "['\\q']"}),
+                "fieldPath",
+            ),
+            (
+                serde_json::json!({"rule": "true", "fieldPath": ".a."}),
+                "fieldPath",
+            ),
+            (
+                serde_json::json!({"rule": "true", "fieldPath": ".nullMap.k"}),
+                "fieldPath",
+            ),
+        ];
+        for (json, field) in refused {
+            let got = rule_field_error(&rule(json.clone()), &schema);
+            assert_eq!(got.map(|(f, _)| f), Some(field), "{json}");
+        }
+        for json in [
+            serde_json::json!({"rule": "true", "message": ""}),
+            serde_json::json!({"rule": "true", "message": " x "}),
+            serde_json::json!({"rule": "true", "message": "a\n"}),
+            serde_json::json!({"rule": "true &&\ntrue", "message": "m"}),
+            serde_json::json!({"rule": "true", "reason": "FieldValueForbidden"}),
+            serde_json::json!({"rule": "true", "fieldPath": ".a"}),
+            serde_json::json!({"rule": "true", "fieldPath": "['a']"}),
+            serde_json::json!({"rule": "true", "fieldPath": ".m.anykey.x"}),
+            serde_json::json!({"rule": "true", "fieldPath": ".m['a.b'].x"}),
+            serde_json::json!({"rule": "true", "fieldPath": ".l"}),
+            serde_json::json!({"rule": "true", "fieldPath": ".emptyProps.k.x"}),
+            serde_json::json!({"rule": "true", "fieldPath": ".emptyProps['k']"}),
+            serde_json::json!({"rule": "true", "fieldPath": ".closedMap.k"}),
+            serde_json::json!({"rule": "true", "fieldPath": ".openMap.k"}),
+        ] {
+            assert_eq!(rule_field_error(&rule(json.clone()), &schema), None, "{json}");
+        }
+    }
     use serde_json::json;
 
     #[test]
@@ -898,6 +1176,8 @@ mod end_to_end_tests {
     #[test]
     fn message_and_reason_preserved() {
         let schema = json!({
+            "type": "object",
+            "properties": { "spec": { "type": "object", "properties": { "x": { "type": "integer" } } } },
             "x-kubernetes-validations": [{
                 "rule": "self.x > 0",
                 "message": "x must be positive",

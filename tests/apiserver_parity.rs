@@ -397,6 +397,9 @@ fn transition_parity_against_kind() {
 /// creation.
 fn vap_for(c: &VapCase) -> Value {
     let mut validation = json!({ "expression": c.expression });
+    if let Some(m) = c.message {
+        validation["message"] = json!(m);
+    }
     if let Some(m) = c.message_expression {
         validation["messageExpression"] = json!(m);
     }
@@ -456,7 +459,7 @@ fn vap_registration_parity_against_kind() {
         let evaluator = VapEvaluator::builder().has_param_kind(c.param_kind);
         let compiled = evaluator.build().compile_expressions(&[VapExpression {
             expression: c.expression.into(),
-            message: None,
+            message: c.message.map(Into::into),
             message_expression: c.message_expression.map(Into::into),
         }]);
         assert_eq!(
