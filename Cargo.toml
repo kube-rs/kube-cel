@@ -10,7 +10,10 @@ documentation = "https://docs.rs/kube-cel"
 homepage = "https://kube.rs"
 keywords = ["kubernetes", "cel", "kube", "validation"]
 categories = ["api-bindings"]
-exclude = ["justfile"]
+# What the crate ships: the library, its tests and examples (so `cargo test`
+# works from the package; the README points at tests/apiserver_divergence.rs),
+# and the docs. CI config, rustfmt.toml and the justfile stay in the repo.
+include = ["/src/**", "/tests/**", "/examples/**", "/README.md", "/CHANGELOG.md", "/LICENSE"]
 
 [package.metadata.docs.rs]
 all-features = true
@@ -24,13 +27,19 @@ rustdoc-args = ["--cfg", "docsrs"]
 # switch to an exact `=0.16.x` pin (it would block that patch uptake), and bump
 # the major-coupling note in the versioning policy if this constraint changes.
 cel = "0.16"
-regex = "1"
+# Lower bounds are the oldest versions that build and pass `cargo test` under
+# `cargo +nightly update -Z direct-minimal-versions`. regex 1.10.5 is cel's own
+# floor. chrono 0.4.39: cel 0.16 declares `chrono ^0.4` but uses
+# `TimeDelta::MIN`/`MAX`, which older chrono lacks. serde 1.0.103 is the first to
+# pin serde_derive exactly (older serde resolves a newer, incompatible derive);
+# serde_json 1.0.25 is the first whose `json!` works from a 2018+ edition crate.
+regex = "1.10.5"
 ipnet = { version = "2", optional = true }
 semver = { version = "1", optional = true }
 base64 = { version = "0.23", optional = true }
-serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1", optional = true }
-chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+serde = { version = "1.0.103", features = ["derive"], optional = true }
+serde_json = { version = "1.0.25", optional = true }
+chrono = { version = "0.4.39", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 # "Never panics" property tests over the string parsers (tests/never_panic.rs).
