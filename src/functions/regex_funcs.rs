@@ -43,8 +43,11 @@ fn find_all(This(this): This<Arc<String>>, Arguments(args): Arguments) -> Resolv
     let re = Regex::new(&pattern)
         .map_err(|e| ExecutionError::function_error("findAll", format!("invalid regex: {e}")))?;
 
+    // Go's `FindAllString` takes a negative limit as "no limit". Narrowed with
+    // `try_from`, not `as`: on a 32-bit target `n as usize` truncates
+    // (4294967296 → 0) and would return no matches.
     let limit = match args.get(1) {
-        Some(Value::Int(n)) => Some(*n as usize),
+        Some(Value::Int(n)) if *n >= 0 => Some(usize::try_from(*n).unwrap_or(usize::MAX)),
         _ => None,
     };
 
@@ -124,6 +127,17 @@ mod tests {
     #[test]
     fn test_find_all_no_matches() {
         assert_eq!(eval("'12345'.findAll('[a-z]+')"), Value::List(Arc::new(vec![])));
+    }
+
+    #[test]
+    fn test_find_all_negative_limit_is_unlimited() {
+        // Go FindAllString: n < 0 returns every match.
+        let n = |expr: &str| match eval(expr) {
+            Value::List(l) => l.len(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(n("'aaa'.findAll('a', -1)"), 3);
+        assert_eq!(n("'aaa'.findAll('a', 4294967296)"), 3);
     }
 
     #[test]

@@ -21,10 +21,15 @@ use crate::functions::Registrar;
 /// Stored as `mantissa * 10^scale` to allow exact decimal arithmetic.
 /// Binary SI suffixes (Ki, Mi, …) are converted to their decimal value at
 /// parse time so that all quantities share a common representation.
+///
+/// `scale` is an `i64` although a parsed exponent fits `i32`: the decimal
+/// places and the suffix are added to it, and `simplify` raises it, so an
+/// exponent near the `i32` bounds (`0.01e-2147483647`) stays exact instead of
+/// overflowing.
 #[derive(Debug, Clone, Eq)]
 pub struct KubeQuantity {
     mantissa: i128,
-    scale: i32,
+    scale: i64,
 }
 
 impl PartialEq for KubeQuantity {
@@ -51,14 +56,14 @@ fn cmp_digits(a: &KubeQuantity, b: &KubeQuantity) -> Ordering {
     if by_sign != Ordering::Equal || a.mantissa == 0 {
         return by_sign;
     }
-    let min_scale = i64::from(a.scale.min(b.scale));
+    let min_scale = a.scale.min(b.scale);
     let (da, db) = (
         a.mantissa.unsigned_abs().to_string(),
         b.mantissa.unsigned_abs().to_string(),
     );
     // Digit count once both are written at `min_scale`: the mantissa's digits
     // plus the zeros its larger scale adds.
-    let width = |d: &str, q: &KubeQuantity| d.len() as i64 + i64::from(q.scale) - min_scale;
+    let width = |d: &str, q: &KubeQuantity| d.len() as i64 + q.scale - min_scale;
     let magnitude = width(&da, a).cmp(&width(&db, b)).then_with(|| {
         // Same width: compare digit by digit; past a mantissa's end its digits are 0.
         let n = da.len().max(db.len());
@@ -92,7 +97,7 @@ impl fmt::Display for KubeQuantity {
             }
             write!(f, "{s}")
         } else {
-            let abs_scale = (-self.scale) as usize;
+            let abs_scale = usize::try_from(self.scale.unsigned_abs()).unwrap_or(usize::MAX);
             let sign = if self.mantissa < 0 { "-" } else { "" };
             let abs_mantissa = self.mantissa.unsigned_abs();
             let digits = abs_mantissa.to_string();
@@ -114,7 +119,7 @@ impl Opaque for KubeQuantity {
 }
 
 impl KubeQuantity {
-    fn new(mantissa: i128, scale: i32) -> Self {
+    fn new(mantissa: i128, scale: i64) -> Self {
         let mut q = KubeQuantity { mantissa, scale };
         q.simplify();
         q
@@ -145,8 +150,7 @@ impl KubeQuantity {
             return true;
         }
         // Check if mantissa is divisible by 10^(-scale)
-        let divisor = 10i128.checked_pow((-self.scale) as u32);
-        match divisor {
+        match pow10(-self.scale) {
             Some(d) => self.mantissa % d == 0,
             None => false,
         }
@@ -154,7 +158,7 @@ impl KubeQuantity {
 
     fn as_integer(&self) -> Result<i64, ExecutionError> {
         if self.scale >= 0 {
-            let multiplier = 10i128.checked_pow(self.scale as u32).ok_or_else(|| {
+            let multiplier = pow10(self.scale).ok_or_else(|| {
                 ExecutionError::function_error("asInteger", "quantity too large for integer")
             })?;
             let val = self.mantissa.checked_mul(multiplier).ok_or_else(|| {
@@ -163,7 +167,7 @@ impl KubeQuantity {
             i64::try_from(val)
                 .map_err(|_| ExecutionError::function_error("asInteger", "quantity too large for integer"))
         } else {
-            let divisor = 10i128.checked_pow((-self.scale) as u32).ok_or_else(|| {
+            let divisor = pow10(-self.scale).ok_or_else(|| {
                 ExecutionError::function_error("asInteger", "quantity too large for integer")
             })?;
             if self.mantissa % divisor != 0 {
@@ -179,7 +183,9 @@ impl KubeQuantity {
     }
 
     fn as_approximate_float(&self) -> f64 {
-        self.mantissa as f64 * 10f64.powi(self.scale)
+        // Past the i32 range the power is 0 or infinite either way.
+        let exp = i32::try_from(self.scale).unwrap_or(if self.scale < 0 { i32::MIN } else { i32::MAX });
+        self.mantissa as f64 * 10f64.powi(exp)
     }
 
     fn add(&self, other: &KubeQuantity) -> Option<KubeQuantity> {
@@ -197,16 +203,19 @@ impl KubeQuantity {
     }
 }
 
+/// `10^exp` in `i128`, `None` when `exp` is negative or the power overflows.
+fn pow10(exp: i64) -> Option<i128> {
+    10i128.checked_pow(u32::try_from(exp).ok()?)
+}
+
 /// Scale a mantissa from `from_scale` down to `to_scale` (to_scale <= from_scale).
 /// Returns `None` if the scaled value would overflow `i128` (magnitude > ~10^38).
-fn scale_mantissa(mantissa: i128, from_scale: i32, to_scale: i32) -> Option<i128> {
+fn scale_mantissa(mantissa: i128, from_scale: i64, to_scale: i64) -> Option<i128> {
     let diff = from_scale - to_scale;
     if diff <= 0 {
         Some(mantissa)
     } else {
-        10i128
-            .checked_pow(diff as u32)
-            .and_then(|p| mantissa.checked_mul(p))
+        pow10(diff).and_then(|p| mantissa.checked_mul(p))
     }
 }
 
@@ -274,7 +283,10 @@ fn parse_quantity(s: &str) -> Result<KubeQuantity, String> {
         Ok(KubeQuantity::new(m, decimal_shift))
     } else {
         // Decimal SI or exponent: combine scales.
-        Ok(KubeQuantity::new(mantissa, decimal_shift + suffix_scale))
+        Ok(KubeQuantity::new(
+            mantissa,
+            decimal_shift + i64::from(suffix_scale),
+        ))
     }
 }
 
@@ -283,7 +295,7 @@ fn parse_quantity(s: &str) -> Result<KubeQuantity, String> {
 /// "1.5" → (15, -1): represents 15 * 10^-1
 /// "100" → (100, 0)
 /// "1e3" → (1, 3): represents 1 * 10^3
-fn parse_number(s: &str) -> Result<(i128, i32), String> {
+fn parse_number(s: &str) -> Result<(i128, i64), String> {
     // Handle scientific notation.
     if let Some(e_pos) = s.find(['e', 'E']) {
         let base_str = &s[..e_pos];
@@ -292,18 +304,18 @@ fn parse_number(s: &str) -> Result<(i128, i32), String> {
         let exp: i32 = exp_str
             .parse()
             .map_err(|_| format!("invalid exponent in '{s}'"))?;
-        return Ok((base_mantissa, base_shift + exp));
+        return Ok((base_mantissa, base_shift + i64::from(exp)));
     }
 
     parse_decimal(s)
 }
 
 /// Parse a decimal number (no exponent), returning (mantissa, decimal_shift).
-fn parse_decimal(s: &str) -> Result<(i128, i32), String> {
+fn parse_decimal(s: &str) -> Result<(i128, i64), String> {
     if let Some(dot_pos) = s.find('.') {
         let int_part = &s[..dot_pos];
         let frac_part = &s[dot_pos + 1..];
-        let decimal_places = frac_part.len() as i32;
+        let decimal_places = i64::try_from(frac_part.len()).map_err(|_| format!("invalid number: '{s}'"))?;
 
         let combined = format!("{int_part}{frac_part}");
         let mantissa: i128 = combined.parse().map_err(|_| format!("invalid number: '{s}'"))?;
@@ -511,6 +523,46 @@ mod tests {
         );
         // A tiny fractional part against a huge integer.
         assert_eq!(eval("quantity('1e40').compareTo(quantity('1n'))"), Value::Int(1));
+    }
+
+    #[test]
+    fn exponent_at_i32_bounds_stays_exact() {
+        // 0.1e-2147483647 is 1 * 10^i32::MIN: negating the scale overflowed
+        // i32 (a debug panic, a wrapped value in release). With a second
+        // decimal place the parse itself overflowed.
+        assert_eq!(
+            eval("quantity('0.1e-2147483647').isInteger()"),
+            Value::Bool(false)
+        );
+        assert_eq!(eval("quantity('0.01e-2147483647').sign()"), Value::Int(1));
+        assert_eq!(
+            eval("quantity('0.1e-2147483647').asApproximateFloat()"),
+            Value::Float(0.0)
+        );
+        assert!(crate::functions::eval("quantity('0.1e-2147483647').asInteger()").is_err());
+        assert_eq!(
+            eval("quantity('0.1e-2147483647').compareTo(quantity('1n'))"),
+            Value::Int(-1)
+        );
+        // Trailing zeros raise the scale past i32::MAX in `simplify`.
+        assert_eq!(eval("quantity('10e2147483647').sign()"), Value::Int(1));
+        assert_eq!(
+            eval("quantity('10e2147483647').compareTo(quantity('1e2147483647'))"),
+            Value::Int(1)
+        );
+        assert_eq!(
+            eval("quantity('10e2147483647').asApproximateFloat()"),
+            Value::Float(f64::INFINITY)
+        );
+        assert!(crate::functions::eval("quantity('10e2147483647').asInteger()").is_err());
+        assert!(
+            crate::functions::eval("quantity('10e2147483647').add(quantity('0.1e-2147483647'))").is_err()
+        );
+        // The smallest exponent plus a decimal place goes past i32::MIN.
+        assert_eq!(
+            eval("quantity('0.1e-2147483648').compareTo(quantity('0.1e-2147483647'))"),
+            Value::Int(-1)
+        );
     }
 
     #[test]

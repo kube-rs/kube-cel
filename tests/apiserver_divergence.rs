@@ -624,6 +624,35 @@ fn quantity_arithmetic_past_i128_fails_closed() {
     }
 }
 
+// ── `format()` `%f` / `%e` precision past 65535 — fails CLOSED ──────────────
+// apiserver: formats the value; its locale printer (golang.org/x/text) keeps
+//            only part of such a precision (`'%.65536f'.format([1.5])` is `2`,
+//            k8s.io/apiserver v0.36.1 `MustBaseEnvSet(1.36)`).
+// kube-cel:  Rust's formatter panics past `u16::MAX`, so `%f` / `%e` refuse
+//            such a precision with an EvaluationError. Verbs that ignore the
+//            precision (`%s`, `%d`, ..) take any int64 one, as cel-go does.
+
+#[test]
+#[cfg(feature = "format")]
+fn format_float_precision_past_u16_fails_closed() {
+    for rule in [
+        "'%.65536f'.format([1.5]) != 'x'",
+        "'%.65536e'.format([1.5]) != 'x'",
+    ] {
+        let errors = run_rule(rule).unwrap_err();
+        assert!(
+            errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
+            "{rule}: {errors:?}"
+        );
+    }
+    for rule in [
+        "'%.65536s'.format(['hello']) == 'hello'",
+        "'%.65536d'.format([12]) == '12'",
+    ] {
+        assert!(run_rule(rule).is_ok(), "{rule}");
+    }
+}
+
 // ── `oldSelf` registration rules — fail CLOSED since 0.9; used to fail OPEN ──
 // apiserver: rejects the CRD at registration for a rule reading `oldSelf` in
 //            the items of a non-map list ("oldSelf cannot be used on the

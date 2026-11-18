@@ -385,6 +385,7 @@ divergences are pinned by
 | `lists.range(-1)`; `sort()` on a list holding a NaN (`[double('NaN')].sort()`) | evaluates: `lists.range(-1)` is `[]`, and the list sorts | `EvaluationError` | fail-closed |
 | `<IP>.string()`, `<CIDR>.string()` | rejects the CRD at registration (no matching overload; only `string(<IP>)`) | `UnsupportedReference` | fail-closed |
 | A rule reading `oldSelf` in the items of a list that is not `x-kubernetes-list-type: map`, or `optionalOldSelf` on a rule that does not read `oldSelf` | rejects the CRD at registration | `CompilationFailure` | fail-closed |
+| `format()` `%f` / `%e` with a precision past 65535 (`'%.65536f'.format([1.5])`) | formats the value (its locale printer keeps only part of such a precision) | `EvaluationError` (precision too large) | fail-closed |
 | Quantity `add` / `sub` past `i128` (`quantity('2e38').add(quantity('1'))`) | exact (`inf.Dec`), so `….isGreaterThan(quantity('2e38'))` holds | `EvaluationError` (quantity overflow) | fail-closed |
 | An object reaching more than 64 levels of schema nesting | no nesting limit; evaluates rules at any depth | `SchemaTooDeep` error | fail-closed |
 | Rule whose `messageExpression` does not compile (a syntax error, or a call refused above) | rejects the CRD at registration | `CompilationFailure` (the rule is rejected, not just its message) | fail-closed |

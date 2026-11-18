@@ -916,6 +916,23 @@ pub fn cases() -> Vec<ParityCase> {
             expect: Expect::Accept,
             note: "lenient semver: lowercase v only, no fourth component → ACCEPT",
         },
+        // A non-ASCII character inside the seconds field is an invalid
+        // date-time; kube-cel sliced the time on byte offsets and panicked.
+        ParityCase {
+            kind: "PfmtDatetimeNonAscii",
+            plural: "pfmtdatetimenonasciis",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "format.datetime().validate('2024-01-15T12:30:0é:00Z').hasValue() && format.datetime().validate('2024-01-15T12:3é:00Z').hasValue()",
+                    "message": "datetime"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "non-ASCII in a date-time time field is invalid, not a panic → ACCEPT",
+        },
         // ── strings / format vs cel-go v0.26 ──────────────────────────────────
         // kube-cel keeps its own strings and format libraries; the apiserver's
         // are cel-go v0.26 `ext.Strings`.
@@ -930,7 +947,7 @@ pub fn cases() -> Vec<ParityCase> {
                 "type": "object",
                 "properties": {},
                 "x-kubernetes-validations": [{
-                    "rule": "'hello'.lastIndexOf('o', 5) == -1 && 'hello'.indexOf('', -5) == -5 && 'hello'.lastIndexOf('', 100) == 100 && 'hello'.lastIndexOf('', -3) == -3 && 'hello'.lastIndexOf('o', 4) == 4 && 'hello'.lastIndexOf('') == 5 && 'héllo'.lastIndexOf('l', 2) == 2",
+                    "rule": "'hello'.lastIndexOf('o', 5) == -1 && 'hello'.indexOf('', -5) == -5 && 'hello'.lastIndexOf('', 100) == 100 && 'hello'.lastIndexOf('', -3) == -3 && 'hello'.lastIndexOf('o', 4) == 4 && 'hello'.lastIndexOf('') == 5 && 'héllo'.lastIndexOf('l', 2) == 2 && 'abc'.indexOf('b', 4294967296) == -1",
                     "message": "index"
                 }]
             }),
@@ -970,6 +987,24 @@ pub fn cases() -> Vec<ParityCase> {
             object: json!({}),
             expect: Expect::Accept,
             note: "%s renders doubles and nested values like cel-go v0.26 → ACCEPT",
+        },
+        // A negative count means no limit: Go's `strings.Replace` and
+        // `FindAllString` take `n < 0` as "all". kube-cel clamped `replace`'s
+        // count to 0 and replaced nothing.
+        ParityCase {
+            kind: "PstrNegativeCount",
+            plural: "pstrnegativecounts",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "'aaa'.replace('a', 'b', -1) == 'bbb' && 'aaa'.replace('a', 'b', 0) == 'aaa' && 'aaa'.replace('a', 'b', 9223372036854775807) == 'bbb' && 'aaa'.findAll('a', -1).size() == 3 && 'aaa'.findAll('a', 0).size() == 0",
+                    "message": "count"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "replace/findAll with a negative count apply to every match → ACCEPT",
         },
         // ── cel 0.16 validation environment (kube-rs/kube-cel#14) ─────────────
         // The validation env enables `cel`'s upstream `lists` extension and the

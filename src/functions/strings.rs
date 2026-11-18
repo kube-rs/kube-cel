@@ -33,16 +33,17 @@ pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
 /// If `idx == len`, returns `""` (matching cel-go behavior).
 fn char_at(This(this): This<Arc<String>>, idx: i64) -> ResolveResult {
     let chars: Vec<char> = this.chars().collect();
-    if idx < 0 || idx as usize > chars.len() {
+    // `try_from`, not `as`: on a 32-bit target `idx as usize` truncates
+    // (4294967296 → 0) and would read the wrong character.
+    let Some(i) = usize::try_from(idx).ok().filter(|&i| i <= chars.len()) else {
         return Err(ExecutionError::function_error(
             "charAt",
             format!("index {idx} out of range for string of length {}", chars.len()),
         ));
-    }
-    if idx as usize == chars.len() {
-        return Ok(Value::String(Arc::new(String::new())));
-    }
-    Ok(Value::String(Arc::new(chars[idx as usize].to_string())))
+    };
+    Ok(Value::String(Arc::new(
+        chars.get(i).map(char::to_string).unwrap_or_default(),
+    )))
 }
 
 /// `<string>.indexOf(<string>) -> <int>`
@@ -67,14 +68,17 @@ pub(crate) fn string_index_of(This(this): This<Arc<String>>, Arguments(args): Ar
         return Ok(Value::Int(offset));
     }
     // Otherwise a negative offset errors (it does NOT clamp to 0), and one past
-    // the end falls through to an empty scan → -1.
+    // the end falls through to an empty scan → -1. A positive offset past
+    // `usize` (on a 32-bit target) is past the end too.
     if offset < 0 {
         return Err(ExecutionError::function_error(
             "indexOf",
             format!("index out of range: {offset}"),
         ));
     }
-    let offset = offset as usize;
+    let Ok(offset) = usize::try_from(offset) else {
+        return Ok(Value::Int(-1));
+    };
 
     let chars: Vec<char> = this.chars().collect();
     let search_chars: Vec<char> = search.chars().collect();
@@ -177,8 +181,15 @@ fn string_replace(This(this): This<Arc<String>>, Arguments(args): Arguments) -> 
         }
     };
 
+    // Go's `strings.Replace` takes a negative count as "no limit" (cel-go v0.26
+    // passes it through). Narrowed with `try_from`, not `as`: a count past
+    // `usize::MAX` on a 32-bit target is still "every match".
     let result = match args.get(2) {
-        Some(Value::Int(n)) => this.replacen(from.as_str(), to.as_str(), (*n).max(0) as usize),
+        Some(Value::Int(n)) if *n >= 0 => this.replacen(
+            from.as_str(),
+            to.as_str(),
+            usize::try_from(*n).unwrap_or(usize::MAX),
+        ),
         _ => this.replace(from.as_str(), to.as_str()),
     };
     Ok(Value::String(Arc::new(result)))
@@ -261,27 +272,29 @@ fn substring(This(this): This<Arc<String>>, Arguments(args): Arguments) -> Resol
     let chars: Vec<char> = this.chars().collect();
     let len = chars.len();
 
-    if start < 0 || start as usize > len {
+    // Indices narrowed with `try_from`, not `as`: on a 32-bit target `as usize`
+    // truncates (4294967296 → 0) and would cut the wrong range.
+    let Some(begin) = usize::try_from(start).ok().filter(|&b| b <= len) else {
         return Err(ExecutionError::function_error(
             "substring",
             format!("start index {start} out of range for string of length {len}"),
         ));
-    }
+    };
 
     let end = match args.get(1) {
-        Some(Value::Int(n)) => {
-            if *n < start || *n as usize > len {
+        Some(Value::Int(n)) => match usize::try_from(*n).ok().filter(|&e| e >= begin && e <= len) {
+            Some(e) => e,
+            None => {
                 return Err(ExecutionError::function_error(
                     "substring",
                     format!("end index {n} out of range"),
                 ));
             }
-            *n as usize
-        }
+        },
         _ => len,
     };
 
-    let result: String = chars[start as usize..end].iter().collect();
+    let result: String = chars[begin..end].iter().collect();
     Ok(Value::String(Arc::new(result)))
 }
 
@@ -440,6 +453,8 @@ mod tests {
     fn test_char_at_out_of_bounds() {
         eval_err("'hello'.charAt(-1)");
         eval_err("'hello'.charAt(6)");
+        // Past u32::MAX: `as usize` truncated this to 0 on a 32-bit target.
+        eval_err("'hello'.charAt(4294967296)");
     }
 
     #[test]
@@ -546,6 +561,13 @@ mod tests {
         eval_err("'hello'.substring(10)");
         eval_err("'hello'.substring(3, 2)"); // end < start
         eval_err("'hello'.substring(0, 10)"); // end > len
+        // Past u32::MAX: `as usize` truncated these on a 32-bit target.
+        eval_err("'hello'.substring(4294967296)");
+        eval_err("'hello'.substring(0, 4294967297)");
+        eval_err("'hello'.indexOf('h', -4294967296)");
+        // A positive offset past u32::MAX is past the end: -1, not an error
+        // (on a 32-bit target it does not fit a usize).
+        assert_eq!(eval("'abc'.indexOf('b', 4294967296)"), Value::Int(-1));
     }
 
     #[test]
@@ -559,6 +581,15 @@ mod tests {
             eval("'aaa'.replace('a', 'b', 0)"),
             Value::String(Arc::new("aaa".into()))
         );
+        // A negative count replaces every match (Go strings.Replace), as does
+        // one past u32::MAX (it used to be narrowed with `as usize`).
+        for n in ["-1", "-9223372036854775808", "4294967296", "9223372036854775807"] {
+            assert_eq!(
+                eval(&format!("'aaa'.replace('a', 'b', {n})")),
+                Value::String(Arc::new("bbb".into())),
+                "count {n}"
+            );
+        }
     }
 
     #[test]

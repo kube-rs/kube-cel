@@ -33,6 +33,11 @@ serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["alloc"], optional = true }
 
+[dev-dependencies]
+# "Never panics" property tests over the string parsers (tests/never_panic.rs).
+# proptest 1.12's rust-version is 1.88, our MSRV.
+proptest = { version = "1.12", default-features = false, features = ["std"] }
+
 [lints.rust]
 unsafe_code = "forbid"
 

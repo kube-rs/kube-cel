@@ -665,7 +665,11 @@ fn validate_time_str(s: &str) -> bool {
     if bytes[2] != b':' || bytes[5] != b':' {
         return false;
     }
-    if !all_ascii_digits(&s[0..2]) || !all_ascii_digits(&s[3..5]) || !all_ascii_digits(&s[6..8]) {
+    // Check the digits as bytes: a multi-byte character can straddle byte 8,
+    // and slicing the `str` there would panic. Once they are ASCII digits the
+    // `str` slices below fall on character boundaries.
+    let digits = |r: std::ops::Range<usize>| bytes[r].iter().all(u8::is_ascii_digit);
+    if !digits(0..2) || !digits(3..5) || !digits(6..8) {
         return false;
     }
     let Ok(hour) = s[0..2].parse::<u32>() else {
@@ -1017,6 +1021,14 @@ mod tests {
         assert_invalid("format.datetime().validate('2024-01-15T23:59:60Z')"); // sec == 60
         // '+'-prefixed time component (Rust parse accepts, strfmt regex rejects).
         assert_invalid("format.datetime().validate('2024-01-15T+1:30:00Z')"); // '+' hour
+    }
+
+    #[test]
+    fn test_datetime_non_ascii_time_is_invalid() {
+        // 'é' straddles byte 8 of the time; slicing the str there panicked.
+        assert_invalid("format.datetime().validate('2024-01-15T12:30:0é:00Z')");
+        assert_invalid("format.datetime().validate('2024-01-15T12:30:00é00Z')");
+        assert_invalid("format.datetime().validate('2024-01-15T1é:30:00Z')");
     }
 
     // -- format.named() --

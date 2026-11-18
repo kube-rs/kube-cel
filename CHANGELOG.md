@@ -272,6 +272,21 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
 - Quantity `add` / `sub` past the `i128` range is an error instead of a panic
   or a wrapped result (the apiserver's quantities are exact, so this is a
   documented fail-closed limit).
+- `format.datetime().validate(..)` on a time with a multi-byte character in
+  the seconds (`'2024-01-15T12:30:0é:00Z'`) reports an invalid date-time
+  instead of panicking.
+- `format()`'s `%f` / `%e` with a precision past 65535 (`'%.65536f'`) are an
+  evaluation error instead of a panic in Rust's formatter (the apiserver
+  formats the value: a documented fail-closed limit). A precision past the
+  int64 range is an error for every verb, as in cel-go.
+- A quantity whose exponent is near the `i32` bounds (`0.1e-2147483647`,
+  `10e2147483647`) keeps its exact value: the scale arithmetic overflowed (a
+  panic in debug builds, a wrapped scale in release).
+- `replace(old, new, n)` with a negative `n` replaces every match, as Go's
+  `strings.Replace` does (it replaced nothing, a **fail-open**:
+  `'aaa'.replace('a', 'b', -1) == 'aaa'` held). `replace`, `findAll`,
+  `charAt`, `indexOf` and `substring` no longer narrow an `int` with `as
+  usize`, which truncated values past `u32::MAX` on 32-bit targets.
 - A schema `format: duration` parses as the apiserver's
   `strfmt.ParseDuration`: Go's `time.ParseDuration` exactly (`µs` / `μs`, a
   `+` sign, every overflow refused), then strfmt's word units (`1d`,

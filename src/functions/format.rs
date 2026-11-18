@@ -64,7 +64,9 @@ fn format_string(This(fmt): This<Arc<String>>, args: Value) -> ResolveResult {
                     break;
                 }
             }
-            let prec: usize = prec_str.parse().map_err(|_| {
+            // Go's `strconv.Atoi`: a precision past the int64 range is an error
+            // for every verb, including those that ignore it.
+            let prec: i64 = prec_str.parse().map_err(|_| {
                 ExecutionError::function_error("format", "invalid precision in format string")
             })?;
             let v = chars.next().ok_or_else(|| {
@@ -92,8 +94,8 @@ fn format_string(This(fmt): This<Arc<String>>, args: Value) -> ResolveResult {
         match verb {
             's' => format_s(arg, &mut result)?,
             'd' => format_d(arg, &mut result)?,
-            'f' => format_f(arg, precision.unwrap_or(6), &mut result)?,
-            'e' => format_e(arg, precision.unwrap_or(6), &mut result)?,
+            'f' => format_f(arg, float_precision(precision)?, &mut result)?,
+            'e' => format_e(arg, float_precision(precision)?, &mut result)?,
             'b' => format_b(arg, &mut result)?,
             'o' => format_o(arg, &mut result)?,
             'x' => format_hex(arg, false, &mut result)?,
@@ -380,6 +382,18 @@ fn format_d(val: &Value, out: &mut String) -> Result<(), ExecutionError> {
     Ok(())
 }
 
+/// The precision `%f` / `%e` pass to Rust's formatter, 6 when none is given.
+/// Rust's formatter panics past `u16::MAX`, so a larger one is an error; the
+/// apiserver formats it (a documented fail-closed difference).
+fn float_precision(precision: Option<i64>) -> Result<usize, ExecutionError> {
+    match precision {
+        None => Ok(6),
+        Some(p) => u16::try_from(p)
+            .map(usize::from)
+            .map_err(|_| ExecutionError::function_error("format", format!("precision {p} is too large"))),
+    }
+}
+
 /// %f — fixed-point float.
 fn format_f(val: &Value, precision: usize, out: &mut String) -> Result<(), ExecutionError> {
     let f = extract_float(val, 'f')?;
@@ -528,6 +542,20 @@ mod tests {
     fn test_format_f() {
         assert_eq!(eval_str("'pi: %.2f'.format([3.14159])"), "pi: 3.14");
         assert_eq!(eval_str("'val: %f'.format([1.5])"), "val: 1.500000");
+    }
+
+    #[test]
+    fn test_format_precision_past_u16_is_an_error() {
+        // Rust's `{:.N}` panics ("Formatting argument out of range") once N
+        // exceeds u16::MAX; found by the fuzz sweep.
+        assert_eq!(eval_str("'%.65535f'.format([1.5])").len(), 65537);
+        assert!(crate::functions::eval("'%.65536f'.format([1.5])").is_err());
+        assert!(crate::functions::eval("'%.4294967296e'.format([1.5])").is_err());
+        // Verbs that ignore the precision take any int64 one, as in cel-go.
+        assert_eq!(eval_str("'%.65536s'.format(['hello'])"), "hello");
+        assert_eq!(eval_str("'%.9223372036854775807d'.format([12])"), "12");
+        // Past int64 it is an error for every verb (Go strconv.Atoi).
+        assert!(crate::functions::eval("'%.9223372036854775808s'.format(['a'])").is_err());
     }
 
     #[test]
