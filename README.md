@@ -418,7 +418,8 @@ divergences are pinned by
 | Quantity `add` / `sub` past `i128` (`quantity('2e38').add(quantity('1'))`) | exact (`inf.Dec`), so `….isGreaterThan(quantity('2e38'))` holds | `EvaluationError` (quantity overflow), even where CEL absorbs the error (`… \|\| true`) | fail-closed |
 | A quantity past kube-cel's supported range: an exponent or scale outside ±1000, before or after trailing zeros are moved into it (`1e1001`, `10e1000`, `1e4294967296`, the sum `5e1000 + 5e1000`), or a mantissa past the `i128` range | parses it: narrows the exponent to int32 (`quantity('1e4294967296') == quantity('1')`), and near the int32 bounds computes a power of ten of hundreds of MiB or panics | `EvaluationError` for a rule or VAP expression that reaches it, even where CEL absorbs the error (`… \|\| true`); `quantity()` / `isQuantity()` error | fail-closed |
 | A quantity `add` / `sub` / `compareTo` / `isGreaterThan` / `isLessThan` on a quantity held by a variable (a comprehension's, or reached through `dyn(..)`, `[q][0]`, ..) in a call's receiver or arguments next to a part that could fail or read a quantity, or in the second operand of a two-operand call whose first could fail (`[quantity('1')].all(q, sign(q) > q.compareTo(quantity('2')))`), reached or not; names are matched without types, so a semver's `compareTo` there too | evaluates: a call's receiver before its arguments, both operands even when the first fails, and its quantities share state (`add` / `sub` write into the receiver, the comparisons can turn it into an `inf.Dec`), which the order can show | `CompilationFailure` (`cel` evaluates arguments first and skips the second operand after a failure); not refused: an update of a new quantity (`quantity(s)`, `add` / `sub` on one), one next to parts that can neither fail nor read a quantity (a comprehension variable, a literal, `quantity(<literal>)`), one where both orders agree (`&&`, `\|\|`, `?:`, list literals, indexing) | fail-closed |
-| A regular expression RE2 takes that the `regex` crate does not compile: `\Q..\E`, an octal escape (`\012`), a `{` that starts no repetition (`a{`, `a{,5}`, `a{01}`), the empty flag group `(?)`, a `[` inside a class (`[a[]`), a class escape starting a range (`[\d-z]`), `\p{^Greek}`, `\x{D800}`, a group name used twice, nesting past 250 levels | compiles and matches it (Go's `regexp`) | `CompilationFailure` for a pattern the apiserver compiles at registration (the constant pattern of `matches`, `find` or `findAll`, a literal or a conversion of one such as `dyn('..')`, and the literal first argument of `matches`); otherwise an `EvaluationError` when it runs, even where CEL absorbs the error (`… \|\| true`) | fail-closed |
+| A regular expression past the `regex` crate's limits once translated: nesting past about 250 levels (Go takes 1000), or a compiled size past 128 MiB, which a Unicode class repeated up to Go's 1000 stays under but four of them do not (`\pL{1000}` four times) | compiles and matches it (Go's `regexp`) | `CompilationFailure` for a pattern the apiserver compiles at registration (the constant pattern of `matches`, `find` or `findAll`, a literal or a conversion of one such as `dyn('..')`, and the literal first argument of `matches`); otherwise an `EvaluationError` when it runs, even where CEL absorbs the error (`… \|\| true`) | fail-closed |
+| A Unicode class in a regular expression (`\pL`, `\p{Greek}`, a case-folded class) on a code point Unicode 15.0 does not have (`'\u1C89'.matches('\\pL')`, a letter since Unicode 16.0) | reads Go's Unicode 15.0.0 tables: not a letter, `false` | reads the `regex` crate's newer tables: `true`; the translation cannot carry tables over | fail-open (and fail-closed for `\P..`) |
 | The standard `timestamp(string)` conversion with a zone offset of 24 hours or more (`+24:00`, `+23:60`, `-24:00`; Go takes up to `+24:60`) | parses it (Go's `time.Parse`) | `EvaluationError`, even where CEL absorbs the error (`… \|\| true`); a literal one compiles | fail-closed |
 | A URL component that is not UTF-8 once unescaped (`url('http://h%80x/').getHost()`) | returns the bytes as a string | `EvaluationError` (a CEL string here must be UTF-8), even where CEL absorbs the error (`… \|\| true`) | fail-closed |
 | An object reaching more than 64 levels of schema nesting | no nesting limit; evaluates rules at any depth | `SchemaTooDeep` error | fail-closed |
@@ -469,11 +470,14 @@ ones (Go's `time.ParseDuration` and `time.Parse(time.RFC3339, ..)`, a duration
 within int64 nanoseconds, `string(<duration>)` in float64 seconds,
 `string(<timestamp>)` in its own offset), and evaluates `or` / `orValue` on
 an optional lazily, as cel-go does. Regular expressions are RE2's: `matches`,
-`find` and `findAll` check a pattern with a port of Go's `regexp/syntax`
-before the `regex` crate compiles it, and refuse what Go refuses (`\u0041`,
-`(?x)`, `a**`, `a{1001}`, `[a--b]`, `\p{Emoji}`, which the `regex` crate
-takes); a pattern the apiserver compiles at registration (see the table)
-fails to compile, reached or not, as there. The apiserver also folds a type
+`find` and `findAll` parse a pattern with a port of Go's `regexp/syntax`,
+refuse what Go refuses (`\u0041`, `(?x)`, `a**`, `a{1001}`, `[a--b]`,
+`\p{Emoji}`, which the `regex` crate takes), and translate the rest into the
+`regex` crate's syntax with Go's meaning (ASCII `\d`, `\w`, `\s`, `\b`;
+literal `\<`, `\>` and `&&`, `--`, `~~`, `[` inside a class; `\Q..\E`,
+octal escapes and a literal `{`, which the crate lacks); a pattern the
+apiserver compiles at registration (see the table) fails to compile, reached
+or not, as there. The apiserver also folds a type
 conversion of a constant when it builds the program (cel-go's
 `OptOptimize`), so one that fails (`int('x')`, `uint(-1)`, `string(b'\xff')`)
 rejects the CRD at registration; kube-cel evaluates such a conversion when it

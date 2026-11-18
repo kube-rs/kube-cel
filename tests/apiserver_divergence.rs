@@ -16,6 +16,8 @@
 //!   schema-bound one, see [`cel_built_operand_until_cel_rust_462`], and until
 //!   it carries cel-rust#460 (before 0.9.0), the timestamp getters without a
 //!   time zone, see [`timestamp_getters_without_a_zone_until_cel_rust_460`].
+//!   And regular expressions read Unicode classes with the `regex` crate's
+//!   tables, not Go's Unicode 15.0.0, see [`regex_unicode_tables_fail_open`].
 //!   Rules on schema nodes the object does not reach used to be another, and
 //!   `format()`'s output a third; since 0.9 every rule in the schema is
 //!   compiled before the object is walked, and `format()` ports cel-go v0.26's
@@ -1305,43 +1307,49 @@ fn quantity_past_supported_range_fails_closed() {
     assert_eq!(passed, [false, true]);
 }
 
-// ── A regular expression the regex crate cannot compile — fails CLOSED ────
-// apiserver: compiles regular expressions with Go's `regexp` (RE2 syntax),
-//            which takes `\Q..\E`, octal escapes, a `{` that starts no
-//            repetition, `(?)`, a `[` inside a class (k8s.io/apiserver v0.36.1
+// ── A regular expression past the regex crate's limits — fails CLOSED ─────
+// apiserver: compiles regular expressions with Go's `regexp`, whose size and
+//            nesting limits are higher (k8s.io/apiserver v0.36.1
 //            `MustBaseEnvSet(1.36)`).
-// kube-cel:  checks a pattern with a port of Go's parser, so it refuses what Go
-//            refuses, then compiles it with the `regex` crate, which does not
-//            take these: a pattern the apiserver compiles at registration (a
-//            constant pattern of `matches` / `find` / `findAll`, the literal
-//            first argument of `matches`) is a CompilationFailure; any other an
-//            EvaluationError when it runs, even where CEL absorbs the error.
+// kube-cel:  parses a pattern with a port of Go's parser and translates it for
+//            the `regex` crate, which refuses a nesting past about 250 levels
+//            and a compiled size past 128 MiB: a pattern the apiserver compiles
+//            at registration (a constant pattern of `matches` / `find` /
+//            `findAll`, the literal first argument of `matches`) is a
+//            CompilationFailure; any other an EvaluationError when it runs,
+//            even where CEL absorbs the error.
 
 #[test]
-fn regex_the_regex_crate_cannot_compile_fails_closed() {
-    for rule in [
-        "true || 'a'.matches('\\\\Qa\\\\E')",
-        "true || 'a'.matches('a{,5}')",
-        "true || 'a'.find(dyn('\\\\012')) == ''",
-        "true || 'a'.findAll('[a[]').size() == 0",
-        "matches('(?)', 'a') || true",
-    ] {
+fn regex_past_the_regex_crate_s_limits_fails_closed() {
+    let deep = format!("true || 'a'.matches('{}a{}')", "(".repeat(260), ")".repeat(260));
+    let big = "\\\\pL{1000}".repeat(4);
+    let refused = format!("true || 'a'.matches('{big}')");
+    for rule in [refused.as_str(), deep.as_str()] {
         assert_refused(rule);
     }
-    for rule in [
-        "['\\\\Qa\\\\E'].all(p, 'a'.matches(p))",
-        "['a{,5}'].all(p, 'a'.matches(p) || true)",
-        #[cfg(feature = "regex_funcs")]
-        "['\\\\p{^Greek}'].all(p, 'a'.find(p) == '' || true)",
-    ] {
-        let errors = run_rule(rule).unwrap_err();
-        assert!(
-            errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
-            "{rule}: {errors:?}"
-        );
-    }
+    let errors = run_rule(&format!("['{big}'].all(p, 'a'.matches(p) || true)")).unwrap_err();
+    assert!(
+        errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
+        "{errors:?}"
+    );
     // A pattern Go refuses is an error both ways, which CEL can absorb.
     assert_passes("['a**'].all(p, 'a'.matches(p) || true)");
+    // A Unicode class repeated as often as Go allows compiles.
+    assert_passes("'ab'.matches('^[\\\\p{L}]{1,1000}$') && 'a_1'.matches('^[\\\\p{L}\\\\p{N}_-]{1,253}$')");
+}
+
+// ── Unicode classes in a regular expression — fail OPEN ────────────────────
+// apiserver: Go's `regexp` reads Unicode classes with Go's Unicode 15.0.0
+//            tables (go1.26.2).
+// kube-cel:  translates Go's syntax and meaning for the `regex` crate, but not
+//            its tables: the crate's are newer, so a code point assigned since
+//            Unicode 15.0 (U+1C89, a letter since 16.0) is in `\pL` here.
+
+#[test]
+fn regex_unicode_tables_fail_open() {
+    // The apiserver evaluates each to false.
+    assert_passes("'\\u1C89'.matches('\\\\pL')");
+    assert_passes("!'\\u1C89'.matches('\\\\PL')");
 }
 
 // ── A timestamp offset of a day or more — fails CLOSED ─────────────────────

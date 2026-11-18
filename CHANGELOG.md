@@ -305,11 +305,21 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     constant pattern of `matches`, `find` and `findAll`, a literal or a
     conversion of one (`dyn('..')`), which the apiserver compiles when it
     builds the program.
-  - A pattern Go takes that the `regex` crate cannot compile (`\Q..\E`, an
-    octal escape, a `{` that starts no repetition, `(?)`, a `[` inside a
-    class, `\p{^Greek}`) fails to compile where the apiserver compiles it at
-    registration, and is an error noted as unsupported at evaluation
-    (fail-closed).
+  - A pattern matches what Go matches with it: it is translated into the
+    `regex` crate's syntax with Go's meaning. `\d`, `\w`, `\s` and `\b` are
+    ASCII (`\s` without `\v`), `\<` and `\>` literals, `&&`, `--`, `~~` and
+    `[` inside a class literals; the crate read them as Unicode classes, word
+    boundaries and class operations, so `'٣'.matches('\\d')` held, a
+    **fail-open**, now closed. Go's `\Q..\E`, octal escapes, a `{` that
+    starts no repetition, `(?)`, repeated flags (`(?ii)`, `(?i-i)`),
+    `\p{^Greek}`, `\p{Cs}`, a group name starting with a digit or used twice,
+    which the crate refused, are carried over, and the crate may compile up
+    to 128 MiB (it stopped at 10 MiB, short of `^[\p{L}\p{N}_-]{1,253}$`).
+    A translation past the crate's limits (nesting past about 250 levels; a
+    size past 128 MiB, `\pL{1000}` four times) fails to compile where the
+    apiserver compiles it at registration, and is an error noted as
+    unsupported at evaluation (fail-closed); Unicode classes read the crate's
+    newer tables, not Go's Unicode 15.0.0.
   - Migration: none for rules the apiserver accepts.
 - **A type conversion of a constant that fails is refused at compile time**
   (`CompilationFailure`, reached or not): `int('x')`, `uint(-1)`,
@@ -325,10 +335,11 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   `compareTo`, `isGreaterThan` or `isLessThan` on a quantity held by a
   variable (a comprehension's, or reached through `dyn(..)` or `[q][0]`) in a
   call's receiver or arguments, or in the second operand of a two-operand
-  call, next to a part that could fail or read a quantity. The apiserver's quantities share state, and `cel` evaluates a call's
-  arguments before its receiver and skips a second operand after a failure,
-  where cel-go does neither; such a rule could pass client-side where the
-  apiserver rejects it. Fail-closed: an update of a new quantity
+  call, next to a part that could fail or read a quantity. The apiserver's
+  quantities share state, and `cel` evaluates a call's arguments before its
+  receiver and skips a second operand after a failure, where cel-go does
+  neither; such a rule could pass client-side where the apiserver rejects
+  it. Fail-closed: an update of a new quantity
   (`quantity(s)`, `add` / `sub` on one), one next to parts that can neither
   fail nor read a quantity (a comprehension variable, a literal,
   `quantity(<literal>)`) and one where both orders agree (`&&`, `||`) are not

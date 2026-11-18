@@ -1460,6 +1460,21 @@ pub fn cases() -> Vec<ParityCase> {
             note: "dyn() of a literal folds into a constant pattern find compiles at registration → rejected at registration",
         },
         ParityCase {
+            kind: "PregexMeaning",
+            plural: "pregexmeanings",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "!'٣'.matches('\\\\d') && !'é'.matches('^\\\\w$') && !'\\v'.matches('\\\\s') && '&'.matches('[a&&b]') && '[]'.matches('^[a[b]]$') && '<'.matches('\\\\<') && 'a{'.matches('^a{$') && 'a'.matches('\\\\Qa\\\\E') && 'caféx'.find('\\\\b\\\\w+\\\\b') == 'caf'",
+                    "message": "pregexmeanings"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "patterns match as Go's regexp reads them (ASCII classes, literal && and [) → ACCEPT",
+        },
+        ParityCase {
             kind: "PregexDynamic",
             plural: "pregexdynamics",
             schema: json!({

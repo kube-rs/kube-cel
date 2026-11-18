@@ -1,14 +1,21 @@
-//! Go's `regexp/syntax` parser (go1.26.2), for what it accepts: the regular
-//! expressions `regexp.Compile` takes, which the apiserver's `matches`,
-//! `find` and `findAll` use.
+//! Go's `regexp/syntax` parser (go1.26.2): the regular expressions
+//! `regexp.Compile` takes, which the apiserver's `matches`, `find` and
+//! `findAll` use, and what they match.
 //!
-//! [`check`] is a port of `syntax.Parse` with the flags `regexp.Compile`
-//! passes (`syntax.Perl`: Perl classes and flags, Unicode classes), keeping
-//! only what decides whether the parse fails and with which error; it builds
-//! no program. It leaves out the parser's resource limits (`expression too
-//! large`, `expression nests too deeply`, a character-class rune budget),
-//! which the `regex` crate's own limits are below; callers compile with it as
-//! well.
+//! [`translate`] is a port of `syntax.Parse` with the flags `regexp.Compile`
+//! passes (`syntax.Perl`: Perl classes and flags, Unicode classes): it fails
+//! where Go fails, with Go's error, and otherwise writes the pattern in the
+//! `regex` crate's syntax so that it matches what Go matches. The two
+//! syntaxes share most of their spelling but not its meaning: Go's `\d`,
+//! `\w`, `\s` and `\b` are ASCII (its `\s` without `\v`), its `\<` and
+//! `\>` are literals, `&&`, `--`, `~~` and `[` inside a class are literals;
+//! the `regex` crate has them Unicode, as word boundaries and as class
+//! operations. What the translation cannot carry over is Unicode itself: Go's
+//! tables are Unicode 15.0.0, the crate's newer.
+//!
+//! It leaves out the parser's resource limits (`expression too large`,
+//! `expression nests too deeply`, a character-class rune budget), which the
+//! `regex` crate's own limits are below; callers compile its output with it.
 //!
 //! Its errors read as `regexp.Compile`'s: ``error parsing regexp: <code>:
 //! `<expr>` ``.
@@ -62,212 +69,213 @@ fn next_rune(s: &str) -> (char, &str) {
     }
 }
 
-/// The names `\p{..}` takes after Go's `canonicalName`: `Any`, `Assigned`,
-/// `Ascii`, `Lc`, the general categories, the scripts and category aliases
-/// whose canonical form is a key of Go's `unicode` tables (Unicode 15.0.0). A
-/// script whose name has an underscore (`Old_Italic`) is not among them: Go
-/// looks up its canonical form (`Olditalic`), which is no key.
-const UNICODE_CLASSES: &[&str] = &[
-    "Adlam",
-    "Ahom",
-    "Any",
-    "Arabic",
-    "Armenian",
-    "Ascii",
-    "Assigned",
-    "Avestan",
-    "Balinese",
-    "Bamum",
-    "Batak",
-    "Bengali",
-    "Bhaiksuki",
-    "Bopomofo",
-    "Brahmi",
-    "Braille",
-    "Buginese",
-    "Buhid",
-    "C",
-    "Carian",
-    "Casedletter",
-    "Cc",
-    "Cf",
-    "Chakma",
-    "Cham",
-    "Cherokee",
-    "Chorasmian",
-    "Closepunctuation",
-    "Cn",
-    "Cntrl",
-    "Co",
-    "Combiningmark",
-    "Common",
-    "Connectorpunctuation",
-    "Control",
-    "Coptic",
-    "Cs",
-    "Cuneiform",
-    "Currencysymbol",
-    "Cypriot",
-    "Cyrillic",
-    "Dashpunctuation",
-    "Decimalnumber",
-    "Deseret",
-    "Devanagari",
-    "Digit",
-    "Dogra",
-    "Duployan",
-    "Elbasan",
-    "Elymaic",
-    "Enclosingmark",
-    "Ethiopic",
-    "Finalpunctuation",
-    "Format",
-    "Georgian",
-    "Glagolitic",
-    "Gothic",
-    "Grantha",
-    "Greek",
-    "Gujarati",
-    "Gurmukhi",
-    "Han",
-    "Hangul",
-    "Hanunoo",
-    "Hatran",
-    "Hebrew",
-    "Hiragana",
-    "Inherited",
-    "Initialpunctuation",
-    "Javanese",
-    "Kaithi",
-    "Kannada",
-    "Katakana",
-    "Kawi",
-    "Kharoshthi",
-    "Khmer",
-    "Khojki",
-    "Khudawadi",
-    "L",
-    "Lao",
-    "Latin",
-    "Lc",
-    "Lepcha",
-    "Letter",
-    "Letternumber",
-    "Limbu",
-    "Lineseparator",
-    "Lisu",
-    "Ll",
-    "Lm",
-    "Lo",
-    "Lowercaseletter",
-    "Lt",
-    "Lu",
-    "Lycian",
-    "Lydian",
-    "M",
-    "Mahajani",
-    "Makasar",
-    "Malayalam",
-    "Mandaic",
-    "Manichaean",
-    "Marchen",
-    "Mark",
-    "Mathsymbol",
-    "Mc",
-    "Me",
-    "Medefaidrin",
-    "Miao",
-    "Mn",
-    "Modi",
-    "Modifierletter",
-    "Modifiersymbol",
-    "Mongolian",
-    "Mro",
-    "Multani",
-    "Myanmar",
-    "N",
-    "Nabataean",
-    "Nandinagari",
-    "Nd",
-    "Newa",
-    "Nko",
-    "Nl",
-    "No",
-    "Nonspacingmark",
-    "Number",
-    "Nushu",
-    "Ogham",
-    "Openpunctuation",
-    "Oriya",
-    "Osage",
-    "Osmanya",
-    "Other",
-    "Otherletter",
-    "Othernumber",
-    "Otherpunctuation",
-    "Othersymbol",
-    "P",
-    "Palmyrene",
-    "Paragraphseparator",
-    "Pc",
-    "Pd",
-    "Pe",
-    "Pf",
-    "Phoenician",
-    "Pi",
-    "Po",
-    "Privateuse",
-    "Ps",
-    "Punct",
-    "Punctuation",
-    "Rejang",
-    "Runic",
-    "S",
-    "Samaritan",
-    "Saurashtra",
-    "Sc",
-    "Separator",
-    "Sharada",
-    "Shavian",
-    "Siddham",
-    "Sinhala",
-    "Sk",
-    "Sm",
-    "So",
-    "Sogdian",
-    "Soyombo",
-    "Spaceseparator",
-    "Spacingmark",
-    "Sundanese",
-    "Surrogate",
-    "Symbol",
-    "Syriac",
-    "Tagalog",
-    "Tagbanwa",
-    "Takri",
-    "Tamil",
-    "Tangsa",
-    "Tangut",
-    "Telugu",
-    "Thaana",
-    "Thai",
-    "Tibetan",
-    "Tifinagh",
-    "Tirhuta",
-    "Titlecaseletter",
-    "Toto",
-    "Ugaritic",
-    "Unassigned",
-    "Uppercaseletter",
-    "Vai",
-    "Vithkuqi",
-    "Wancho",
-    "Yezidi",
-    "Yi",
-    "Z",
-    "Zl",
-    "Zp",
-    "Zs",
+/// The names `\p{..}` takes after Go's `canonicalName`, each with the name of
+/// the same class in the `regex` crate: `Any`, `Assigned`, `Ascii`, `Lc`, the
+/// general categories, the scripts and the category aliases whose canonical
+/// form is a key of Go's `unicode` tables (Unicode 15.0.0). A script whose
+/// name has an underscore (`Old_Italic`) is not among them: Go looks up its
+/// canonical form (`Olditalic`), which is no key.
+const UNICODE_CLASSES: &[(&str, &str)] = &[
+    ("Adlam", "Adlam"),
+    ("Ahom", "Ahom"),
+    ("Any", "Any"),
+    ("Arabic", "Arabic"),
+    ("Armenian", "Armenian"),
+    ("Ascii", "ASCII"),
+    ("Assigned", "Assigned"),
+    ("Avestan", "Avestan"),
+    ("Balinese", "Balinese"),
+    ("Bamum", "Bamum"),
+    ("Batak", "Batak"),
+    ("Bengali", "Bengali"),
+    ("Bhaiksuki", "Bhaiksuki"),
+    ("Bopomofo", "Bopomofo"),
+    ("Brahmi", "Brahmi"),
+    ("Braille", "Braille"),
+    ("Buginese", "Buginese"),
+    ("Buhid", "Buhid"),
+    ("C", "C"),
+    ("Carian", "Carian"),
+    ("Casedletter", "LC"),
+    ("Cc", "Cc"),
+    ("Cf", "Cf"),
+    ("Chakma", "Chakma"),
+    ("Cham", "Cham"),
+    ("Cherokee", "Cherokee"),
+    ("Chorasmian", "Chorasmian"),
+    ("Closepunctuation", "Pe"),
+    ("Cn", "Cn"),
+    ("Cntrl", "Cc"),
+    ("Co", "Co"),
+    ("Combiningmark", "M"),
+    ("Common", "Common"),
+    ("Connectorpunctuation", "Pc"),
+    ("Control", "Cc"),
+    ("Coptic", "Coptic"),
+    ("Cs", "Cs"),
+    ("Cuneiform", "Cuneiform"),
+    ("Currencysymbol", "Sc"),
+    ("Cypriot", "Cypriot"),
+    ("Cyrillic", "Cyrillic"),
+    ("Dashpunctuation", "Pd"),
+    ("Decimalnumber", "Nd"),
+    ("Deseret", "Deseret"),
+    ("Devanagari", "Devanagari"),
+    ("Digit", "Nd"),
+    ("Dogra", "Dogra"),
+    ("Duployan", "Duployan"),
+    ("Elbasan", "Elbasan"),
+    ("Elymaic", "Elymaic"),
+    ("Enclosingmark", "Me"),
+    ("Ethiopic", "Ethiopic"),
+    ("Finalpunctuation", "Pf"),
+    ("Format", "Cf"),
+    ("Georgian", "Georgian"),
+    ("Glagolitic", "Glagolitic"),
+    ("Gothic", "Gothic"),
+    ("Grantha", "Grantha"),
+    ("Greek", "Greek"),
+    ("Gujarati", "Gujarati"),
+    ("Gurmukhi", "Gurmukhi"),
+    ("Han", "Han"),
+    ("Hangul", "Hangul"),
+    ("Hanunoo", "Hanunoo"),
+    ("Hatran", "Hatran"),
+    ("Hebrew", "Hebrew"),
+    ("Hiragana", "Hiragana"),
+    ("Inherited", "Inherited"),
+    ("Initialpunctuation", "Pi"),
+    ("Javanese", "Javanese"),
+    ("Kaithi", "Kaithi"),
+    ("Kannada", "Kannada"),
+    ("Katakana", "Katakana"),
+    ("Kawi", "Kawi"),
+    ("Kharoshthi", "Kharoshthi"),
+    ("Khmer", "Khmer"),
+    ("Khojki", "Khojki"),
+    ("Khudawadi", "Khudawadi"),
+    ("L", "L"),
+    ("Lao", "Lao"),
+    ("Latin", "Latin"),
+    ("Lc", "LC"),
+    ("Lepcha", "Lepcha"),
+    ("Letter", "L"),
+    ("Letternumber", "Nl"),
+    ("Limbu", "Limbu"),
+    ("Lineseparator", "Zl"),
+    ("Lisu", "Lisu"),
+    ("Ll", "Ll"),
+    ("Lm", "Lm"),
+    ("Lo", "Lo"),
+    ("Lowercaseletter", "Ll"),
+    ("Lt", "Lt"),
+    ("Lu", "Lu"),
+    ("Lycian", "Lycian"),
+    ("Lydian", "Lydian"),
+    ("M", "M"),
+    ("Mahajani", "Mahajani"),
+    ("Makasar", "Makasar"),
+    ("Malayalam", "Malayalam"),
+    ("Mandaic", "Mandaic"),
+    ("Manichaean", "Manichaean"),
+    ("Marchen", "Marchen"),
+    ("Mark", "M"),
+    ("Mathsymbol", "Sm"),
+    ("Mc", "Mc"),
+    ("Me", "Me"),
+    ("Medefaidrin", "Medefaidrin"),
+    ("Miao", "Miao"),
+    ("Mn", "Mn"),
+    ("Modi", "Modi"),
+    ("Modifierletter", "Lm"),
+    ("Modifiersymbol", "Sk"),
+    ("Mongolian", "Mongolian"),
+    ("Mro", "Mro"),
+    ("Multani", "Multani"),
+    ("Myanmar", "Myanmar"),
+    ("N", "N"),
+    ("Nabataean", "Nabataean"),
+    ("Nandinagari", "Nandinagari"),
+    ("Nd", "Nd"),
+    ("Newa", "Newa"),
+    ("Nko", "Nko"),
+    ("Nl", "Nl"),
+    ("No", "No"),
+    ("Nonspacingmark", "Mn"),
+    ("Number", "N"),
+    ("Nushu", "Nushu"),
+    ("Ogham", "Ogham"),
+    ("Openpunctuation", "Ps"),
+    ("Oriya", "Oriya"),
+    ("Osage", "Osage"),
+    ("Osmanya", "Osmanya"),
+    ("Other", "C"),
+    ("Otherletter", "Lo"),
+    ("Othernumber", "No"),
+    ("Otherpunctuation", "Po"),
+    ("Othersymbol", "So"),
+    ("P", "P"),
+    ("Palmyrene", "Palmyrene"),
+    ("Paragraphseparator", "Zp"),
+    ("Pc", "Pc"),
+    ("Pd", "Pd"),
+    ("Pe", "Pe"),
+    ("Pf", "Pf"),
+    ("Phoenician", "Phoenician"),
+    ("Pi", "Pi"),
+    ("Po", "Po"),
+    ("Privateuse", "Co"),
+    ("Ps", "Ps"),
+    ("Punct", "P"),
+    ("Punctuation", "P"),
+    ("Rejang", "Rejang"),
+    ("Runic", "Runic"),
+    ("S", "S"),
+    ("Samaritan", "Samaritan"),
+    ("Saurashtra", "Saurashtra"),
+    ("Sc", "Sc"),
+    ("Separator", "Z"),
+    ("Sharada", "Sharada"),
+    ("Shavian", "Shavian"),
+    ("Siddham", "Siddham"),
+    ("Sinhala", "Sinhala"),
+    ("Sk", "Sk"),
+    ("Sm", "Sm"),
+    ("So", "So"),
+    ("Sogdian", "Sogdian"),
+    ("Soyombo", "Soyombo"),
+    ("Spaceseparator", "Zs"),
+    ("Spacingmark", "Mc"),
+    ("Sundanese", "Sundanese"),
+    ("Surrogate", "Cs"),
+    ("Symbol", "S"),
+    ("Syriac", "Syriac"),
+    ("Tagalog", "Tagalog"),
+    ("Tagbanwa", "Tagbanwa"),
+    ("Takri", "Takri"),
+    ("Tamil", "Tamil"),
+    ("Tangsa", "Tangsa"),
+    ("Tangut", "Tangut"),
+    ("Telugu", "Telugu"),
+    ("Thaana", "Thaana"),
+    ("Thai", "Thai"),
+    ("Tibetan", "Tibetan"),
+    ("Tifinagh", "Tifinagh"),
+    ("Tirhuta", "Tirhuta"),
+    ("Titlecaseletter", "Lt"),
+    ("Toto", "Toto"),
+    ("Ugaritic", "Ugaritic"),
+    ("Unassigned", "Cn"),
+    ("Uppercaseletter", "Lu"),
+    ("Vai", "Vai"),
+    ("Vithkuqi", "Vithkuqi"),
+    ("Wancho", "Wancho"),
+    ("Yezidi", "Yezidi"),
+    ("Yi", "Yi"),
+    ("Z", "Z"),
+    ("Zl", "Zl"),
+    ("Zp", "Zp"),
+    ("Zs", "Zs"),
 ];
 
 /// Go's `canonicalName`: underscores, hyphens and spaces dropped, the first
@@ -293,39 +301,74 @@ const POSIX_CLASSES: &[&str] = &[
     "upper", "word", "xdigit",
 ];
 
+/// A class that matches nothing: what a class of surrogates (which no UTF-8
+/// text holds) comes to.
+const NEVER: &str = r"[^\x{0}-\x{10FFFF}]";
+
+/// The flags `regexp.Compile` starts with (`syntax.Perl`) and `(?imsU)`
+/// change: what they change is written into each atom, so the `regex` crate
+/// needs none of its own.
+#[derive(Debug, Clone, Copy, Default)]
+struct Flags {
+    /// `i`: case folding.
+    fold: bool,
+    /// `m`: `^` and `$` at line ends (Go's `OneLine` off).
+    multi_line: bool,
+    /// `s`: `.` takes `\n`.
+    dot_nl: bool,
+    /// `U`: repetitions lazy unless followed by `?`.
+    non_greedy: bool,
+}
+
 /// A node of the parse: what `repeatIsValid` walks, and the parser's two
 /// pseudo-operators.
 #[derive(Debug)]
 enum Node {
-    /// `(`, capturing or not.
-    LeftParen,
+    /// `(`, capturing or not, with the flags to restore at its `)`.
+    LeftParen(Flags),
     /// `|`.
     VerticalBar,
     /// Anything else: a repetition carries its bounds, every node its
-    /// sub-expressions.
+    /// sub-expressions, and its translation into the `regex` crate's syntax,
+    /// which is `single` when a repetition operator applies to all of it.
     Expr {
         repeat: Option<(i32, i32)>,
         subs: Vec<Node>,
+        out: String,
+        single: bool,
     },
 }
 
 impl Node {
-    fn leaf() -> Node {
+    fn atom(out: String) -> Node {
         Node::Expr {
             repeat: None,
             subs: Vec::new(),
+            out,
+            single: true,
         }
     }
 
     fn is_pseudo(&self) -> bool {
         !matches!(self, Node::Expr { .. })
     }
+
+    fn out(&self) -> &str {
+        match self {
+            Node::Expr { out, .. } => out,
+            _ => "",
+        }
+    }
+
+    fn single(&self) -> bool {
+        matches!(self, Node::Expr { single: true, .. })
+    }
 }
 
 /// Go's `repeatIsValid`: the repetition and those inside it make at most `n`
 /// copies of the innermost thing.
 fn repeat_is_valid(node: &Node, mut n: i32) -> bool {
-    let Node::Expr { repeat, subs } = node else {
+    let Node::Expr { repeat, subs, .. } = node else {
         return true;
     };
     if let Some((min, max)) = *repeat {
@@ -346,9 +389,74 @@ fn repeat_is_valid(node: &Node, mut n: i32) -> bool {
     subs.iter().all(|sub| repeat_is_valid(sub, n))
 }
 
+/// A rune for the `regex` crate: an ASCII letter or digit as it is, any other
+/// as `\x{..}`.
+fn rune(r: u32) -> String {
+    match char::from_u32(r) {
+        Some(c) if c.is_ascii_alphanumeric() => c.to_string(),
+        _ => format!(r"\x{{{r:X}}}"),
+    }
+}
+
+/// The class items for the runes `lo..=hi`, without the surrogates, which no
+/// UTF-8 text holds and the `regex` crate cannot name.
+fn range_items(lo: u32, hi: u32) -> String {
+    let mut out = String::new();
+    for (lo, hi) in [(lo, hi.min(0xD7FF)), (lo.max(0xE000), hi)] {
+        if lo <= hi {
+            out.push_str(&rune(lo));
+            if lo < hi {
+                out.push('-');
+                out.push_str(&rune(hi));
+            }
+        }
+    }
+    out
+}
+
+/// A class of `items` (none matches nothing), case-folded under `i`.
+fn class(items: &str, negated: bool, flags: Flags) -> String {
+    let class = match (items.is_empty(), negated) {
+        (true, false) => NEVER.to_owned(),
+        (true, true) => r"[\x{0}-\x{10FFFF}]".to_owned(),
+        (false, false) => format!("[{items}]"),
+        (false, true) => format!("[^{items}]"),
+    };
+    folded(class, flags)
+}
+
+fn folded(atom: String, flags: Flags) -> String {
+    if flags.fold { format!("(?i:{atom})") } else { atom }
+}
+
+/// The class items of a Perl class `\d`, `\s`, `\w` (ASCII, as in Go, whose
+/// `\s` is `[\t\n\f\r ]`) or their negations.
+fn perl_items(c: u8) -> &'static str {
+    match c {
+        b'd' => "0-9",
+        b'D' => "[^0-9]",
+        b's' => r"\x{9}\x{A}\x{C}\x{D}\x{20}",
+        b'S' => r"[^\x{9}\x{A}\x{C}\x{D}\x{20}]",
+        b'w' => "0-9A-Za-z_",
+        _ => "[^0-9A-Za-z_]",
+    }
+}
+
+/// The class items of a Unicode class by its `regex` crate name. Surrogates
+/// (`Cs`), which the crate cannot name, match nothing in UTF-8 text.
+fn unicode_items(name: &str, negated: bool) -> String {
+    match (name, negated) {
+        ("Cs", false) => String::new(),
+        ("Cs", true) => r"\x{0}-\x{10FFFF}".to_owned(),
+        (name, false) => format!(r"\p{{{name}}}"),
+        (name, true) => format!(r"\P{{{name}}}"),
+    }
+}
+
 #[derive(Default)]
 struct Parser {
     stack: Vec<Node>,
+    flags: Flags,
 }
 
 impl Parser {
@@ -356,21 +464,43 @@ impl Parser {
         self.stack.push(node);
     }
 
+    /// A literal rune under the current flags.
+    fn literal(&mut self, r: u32) {
+        let atom = if (0xD800..=0xDFFF).contains(&r) {
+            NEVER.to_owned()
+        } else {
+            folded(rune(r), self.flags)
+        };
+        self.push(Node::atom(atom));
+    }
+
+    /// The expressions above the topmost pseudo-operator, joined by `sep`.
+    fn collapse(&mut self, sep: &str) {
+        let i = self.stack.iter().rposition(Node::is_pseudo).map_or(0, |i| i + 1);
+        let subs = self.stack.split_off(i);
+        let single = subs.len() == 1 && subs[0].single();
+        let out = subs.iter().map(Node::out).collect::<Vec<_>>().join(sep);
+        self.push(Node::Expr {
+            repeat: None,
+            subs,
+            out,
+            single,
+        });
+    }
+
     /// Go's `concat`: the expressions above the topmost pseudo-operator
     /// become one.
     fn concat(&mut self) {
-        let i = self.stack.iter().rposition(Node::is_pseudo).map_or(0, |i| i + 1);
-        let subs = self.stack.split_off(i);
-        self.push(Node::Expr { repeat: None, subs });
+        self.collapse("");
     }
 
     /// Go's `alternate`, the same over `|`.
     fn alternate(&mut self) {
-        self.concat();
+        self.collapse("|");
     }
 
     /// Go's `swapVerticalBar`: a `|` below the top moves to the top (Go merges
-    /// two character classes around it instead, which leaves the same shape).
+    /// two character classes around it instead, which matches the same).
     fn swap_vertical_bar(&mut self) -> bool {
         let n = self.stack.len();
         if n >= 2 && matches!(self.stack[n - 2], Node::VerticalBar) {
@@ -394,14 +524,18 @@ impl Parser {
         }
         self.alternate();
         let n = self.stack.len();
-        if n < 2 || !matches!(self.stack[n - 2], Node::LeftParen) {
+        let Some(Node::LeftParen(flags)) = n.checked_sub(2).map(|i| &self.stack[i]) else {
             return Err(error(UNEXPECTED_PAREN, whole));
-        }
+        };
+        self.flags = *flags;
         let inner = self.stack.pop().expect("n >= 2");
         self.stack.pop();
+        let out = format!("(?:{})", inner.out());
         self.push(Node::Expr {
             repeat: None,
             subs: vec![inner],
+            out,
+            single: true,
         });
         Ok(())
     }
@@ -411,13 +545,16 @@ impl Parser {
     /// `after` follows it; returns `after` past a non-greedy `?`.
     fn repeat<'a>(
         &mut self,
+        op: &str,
         bounds: Option<(i32, i32)>,
         before: &str,
         mut after: &'a str,
         last_repeat: &str,
     ) -> Result<&'a str, Re2Error> {
+        let mut lazy = self.flags.non_greedy;
         if let Some(rest) = after.strip_prefix('?') {
             after = rest;
+            lazy = !lazy;
         }
         if !last_repeat.is_empty() {
             return Err(error(INVALID_REPEAT_OP, prefix(last_repeat, after)));
@@ -428,9 +565,20 @@ impl Parser {
         if sub.is_pseudo() {
             return Err(error(MISSING_REPEAT_ARGUMENT, prefix(before, after)));
         }
+        let mut out = if sub.single() {
+            sub.out().to_owned()
+        } else {
+            format!("(?:{})", sub.out())
+        };
+        out.push_str(op);
+        if lazy {
+            out.push('?');
+        }
         let node = Node::Expr {
             repeat: bounds,
             subs: vec![sub],
+            out,
+            single: false,
         };
         if let Some((min, max)) = bounds
             && (min >= 2 || max >= 2)
@@ -444,7 +592,21 @@ impl Parser {
 }
 
 /// Whether Go's `regexp.Compile` parses `pattern`, and if not its error.
+#[cfg(test)]
 pub(crate) fn check(pattern: &str) -> Result<(), Re2Error> {
+    translate(pattern).map(|_| ())
+}
+
+/// `pattern` in the `regex` crate's syntax, matching what Go's `regexp`
+/// matches with it (but for Unicode tables: Go has Unicode 15.0.0), or Go's
+/// error. Every atom is written out with the flags it was parsed under: a
+/// literal or class in `(?i:..)` under `i`, `^` / `$` as `\A` / `\z` or
+/// `(?m:^)` / `(?m:$)`, `.` as `[^\n]` or `(?s:.)`, a repetition greedy or
+/// lazy; Perl classes and word boundaries ASCII, as Go's are; every literal
+/// rune of a class escaped (Go's `&&`, `--`, `~~` and `[` in a class are
+/// literals); groups non-capturing (only whole matches count, and Go allows a
+/// group name twice).
+pub(crate) fn translate(pattern: &str) -> Result<String, Re2Error> {
     let mut p = Parser::default();
     let mut t = pattern;
     let mut last_repeat: &str = "";
@@ -456,7 +618,7 @@ pub(crate) fn check(pattern: &str) -> Result<(), Re2Error> {
                 if b.get(1) == Some(&b'?') {
                     t = parse_perl_flags(&mut p, t)?;
                 } else {
-                    p.push(Node::LeftParen);
+                    p.push(Node::LeftParen(p.flags));
                     t = &t[1..];
                 }
             }
@@ -468,36 +630,54 @@ pub(crate) fn check(pattern: &str) -> Result<(), Re2Error> {
                 p.parse_right_paren(pattern)?;
                 t = &t[1..];
             }
-            b'^' | b'$' | b'.' => {
-                p.push(Node::leaf());
+            b'^' => {
+                let atom = if p.flags.multi_line { "(?m:^)" } else { r"\A" };
+                p.push(Node::atom(atom.to_owned()));
+                t = &t[1..];
+            }
+            b'$' => {
+                let atom = if p.flags.multi_line { "(?m:$)" } else { r"\z" };
+                p.push(Node::atom(atom.to_owned()));
+                t = &t[1..];
+            }
+            b'.' => {
+                let atom = if p.flags.dot_nl { "(?s:.)" } else { r"[^\n]" };
+                p.push(Node::atom(atom.to_owned()));
                 t = &t[1..];
             }
             b'[' => t = parse_class(&mut p, t)?,
-            b'*' | b'+' | b'?' => {
+            c @ (b'*' | b'+' | b'?') => {
                 let before = t;
-                t = p.repeat(None, before, &t[1..], last_repeat)?;
+                let op = char::from(c).to_string();
+                t = p.repeat(&op, None, before, &t[1..], last_repeat)?;
                 repeat = before;
             }
             b'{' => {
                 let before = t;
                 match parse_repeat(t) {
                     None => {
-                        p.push(Node::leaf());
+                        p.literal(u32::from('{'));
                         t = &t[1..];
                     }
                     Some((min, max, after)) => {
                         if !(0..=1000).contains(&min) || max > 1000 || (max >= 0 && min > max) {
                             return Err(error(INVALID_REPEAT_SIZE, prefix(before, after)));
                         }
-                        t = p.repeat(Some((min, max)), before, after, last_repeat)?;
+                        let op = match max {
+                            -1 => format!("{{{min},}}"),
+                            max if max == min => format!("{{{min}}}"),
+                            max => format!("{{{min},{max}}}"),
+                        };
+                        t = p.repeat(&op, Some((min, max)), before, after, last_repeat)?;
                         repeat = before;
                     }
                 }
             }
             b'\\' => t = parse_backslash(&mut p, t)?,
             _ => {
-                p.push(Node::leaf());
-                t = next_rune(t).1;
+                let (c, rest) = next_rune(t);
+                p.literal(u32::from(c));
+                t = rest;
             }
         }
         last_repeat = repeat;
@@ -510,39 +690,46 @@ pub(crate) fn check(pattern: &str) -> Result<(), Re2Error> {
     if p.stack.len() != 1 {
         return Err(error(MISSING_PAREN, pattern));
     }
-    Ok(())
+    Ok(p.stack[0].out().to_owned())
 }
 
 /// A `\` outside a class: `\A`, `\b`, `\B`, `\z`, `\Q..\E`, a Unicode or Perl
 /// class, or a single-character escape.
 fn parse_backslash<'a>(p: &mut Parser, t: &'a str) -> Result<&'a str, Re2Error> {
+    let atom = match t.as_bytes().get(1) {
+        Some(b'A') => Some(r"\A"),
+        Some(b'b') => Some(r"(?-u:\b)"),
+        Some(b'B') => Some(r"(?-u:\B)"),
+        Some(b'z') => Some(r"\z"),
+        _ => None,
+    };
+    if let Some(atom) = atom {
+        p.push(Node::atom(atom.to_owned()));
+        return Ok(&t[2..]);
+    }
     match t.as_bytes().get(1) {
-        Some(b'A' | b'b' | b'B' | b'z') => {
-            p.push(Node::leaf());
-            return Ok(&t[2..]);
-        }
         // Any byte: not supported.
         Some(b'C') => return Err(error(INVALID_ESCAPE, &t[..2])),
         Some(b'Q') => {
             // `\Q ... \E`: the ... is always literals.
             let (lit, rest) = t[2..].split_once("\\E").unwrap_or((&t[2..], ""));
-            for _ in lit.chars() {
-                p.push(Node::leaf());
+            for c in lit.chars() {
+                p.literal(u32::from(c));
             }
             return Ok(rest);
         }
         _ => {}
     }
-    if let Some(rest) = parse_unicode_class(t)? {
-        p.push(Node::leaf());
+    if let Some((items, rest)) = parse_unicode_class(t)? {
+        p.push(Node::atom(class(&items, false, p.flags)));
         return Ok(rest);
     }
-    if let Some(rest) = parse_perl_class_escape(t) {
-        p.push(Node::leaf());
+    if let Some((items, rest)) = parse_perl_class_escape(t) {
+        p.push(Node::atom(class(items, false, p.flags)));
         return Ok(rest);
     }
-    let (_, rest) = parse_escape(t)?;
-    p.push(Node::leaf());
+    let (r, rest) = parse_escape(t)?;
+    p.literal(r);
     Ok(rest)
 }
 
@@ -615,30 +802,38 @@ fn parse_perl_flags<'a>(p: &mut Parser, s: &'a str) -> Result<&'a str, Re2Error>
         if name.is_empty() || !name.bytes().all(|c| c == b'_' || c.is_ascii_alphanumeric()) {
             return Err(error(INVALID_NAMED_CAPTURE, &s[..=end]));
         }
-        p.push(Node::LeftParen);
+        p.push(Node::LeftParen(p.flags));
         return Ok(&s[end + 1..]);
     }
 
     let mut t = &s[2..];
-    let mut negated = false;
+    let mut flags = p.flags;
+    // Under `-`, a flag turns off.
+    let mut on = true;
     let mut saw_flag = false;
     while !t.is_empty() {
         let (c, rest) = next_rune(t);
         t = rest;
         match c {
-            'i' | 'm' | 's' | 'U' => saw_flag = true,
-            '-' if !negated => {
-                negated = true;
+            'i' => flags.fold = on,
+            'm' => flags.multi_line = on,
+            's' => flags.dot_nl = on,
+            'U' => flags.non_greedy = on,
+            '-' if on => {
+                on = false;
                 saw_flag = false;
+                continue;
             }
-            ':' | ')' if !negated || saw_flag => {
+            ':' | ')' if on || saw_flag => {
                 if c == ':' {
-                    p.push(Node::LeftParen);
+                    p.push(Node::LeftParen(p.flags));
                 }
+                p.flags = flags;
                 return Ok(t);
             }
             _ => break,
         }
+        saw_flag = true;
     }
     Err(error(INVALID_PERL_OP, prefix(s, t)))
 }
@@ -718,20 +913,22 @@ fn parse_escape(s: &str) -> Result<(u32, &str), Re2Error> {
     Err(error(INVALID_ESCAPE, prefix(s, t)))
 }
 
-/// Go's `parsePerlClassEscape`: `\d`, `\D`, `\s`, `\S`, `\w`, `\W`.
-fn parse_perl_class_escape(s: &str) -> Option<&str> {
+/// Go's `parsePerlClassEscape`: `\d`, `\D`, `\s`, `\S`, `\w`, `\W`, as class
+/// items.
+fn parse_perl_class_escape(s: &str) -> Option<(&'static str, &str)> {
     let b = s.as_bytes();
     (b.len() >= 2 && b[0] == b'\\' && matches!(b[1], b'd' | b'D' | b's' | b'S' | b'w' | b'W'))
-        .then(|| &s[2..])
+        .then(|| (perl_items(b[1]), &s[2..]))
 }
 
 /// Go's `parseUnicodeClass`: a `\pN`, `\p{Name}` or `\P..` at the start of
-/// `s`; `None` if `s` starts with none.
-fn parse_unicode_class(s: &str) -> Result<Option<&str>, Re2Error> {
+/// `s`, as class items; `None` if `s` starts with none.
+fn parse_unicode_class(s: &str) -> Result<Option<(String, &str)>, Re2Error> {
     let b = s.as_bytes();
     if b.len() < 2 || b[0] != b'\\' || (b[1] != b'p' && b[1] != b'P') {
         return Ok(None);
     }
+    let mut negated = b[1] == b'P';
     let (c, t) = next_rune(&s[2..]);
     let (seq, name, rest) = if c != '{' {
         // A one-letter name.
@@ -744,19 +941,23 @@ fn parse_unicode_class(s: &str) -> Result<Option<&str>, Re2Error> {
         (&s[..=end], &s[3..end], &s[end + 1..])
     };
     // A leading `^` negates: `\p{^Han}` is `\P{Han}`.
-    let name = name.strip_prefix('^').unwrap_or(name);
-    if UNICODE_CLASSES
-        .binary_search(&canonical_name(name).as_str())
-        .is_err()
-    {
+    let name = match name.strip_prefix('^') {
+        Some(name) => {
+            negated = !negated;
+            name
+        }
+        None => name,
+    };
+    let canonical = canonical_name(name);
+    let Ok(i) = UNICODE_CLASSES.binary_search_by(|(go, _)| go.cmp(&canonical.as_str())) else {
         return Err(error(INVALID_CHAR_CLASS_RANGE, seq));
-    }
-    Ok(Some(rest))
+    };
+    Ok(Some((unicode_items(UNICODE_CLASSES[i].1, negated), rest)))
 }
 
 /// Go's `parseNamedClass`: a POSIX class `[:alnum:]` (or `[:^alnum:]`) at the
-/// start of `s`; `None` if `s` starts with no `[:..:]`.
-fn parse_named_class(s: &str) -> Result<Option<&str>, Re2Error> {
+/// start of `s`, as a class item; `None` if `s` starts with no `[:..:]`.
+fn parse_named_class(s: &str) -> Result<Option<(&str, &str)>, Re2Error> {
     if !s.starts_with("[:") {
         return Ok(None);
     }
@@ -770,7 +971,8 @@ fn parse_named_class(s: &str) -> Result<Option<&str>, Re2Error> {
     if !POSIX_CLASSES.contains(&inner) {
         return Err(error(INVALID_CHAR_CLASS_RANGE, name));
     }
-    Ok(Some(rest))
+    // The `regex` crate has the same ASCII POSIX classes, in the same syntax.
+    Ok(Some((name, rest)))
 }
 
 /// Go's `parseClassChar`: one character of a class, escaped or not.
@@ -788,41 +990,49 @@ fn parse_class_char<'a>(s: &'a str, whole: &str) -> Result<(u32, &'a str), Re2Er
 /// Go's `parseClass`: a `[..]` class at the start of `s`.
 fn parse_class<'a>(p: &mut Parser, s: &'a str) -> Result<&'a str, Re2Error> {
     let mut t = &s[1..];
-    if let Some(rest) = t.strip_prefix('^') {
-        t = rest;
+    let negated = t.starts_with('^');
+    if negated {
+        t = &t[1..];
     }
+    let mut items = String::new();
     // `]` (and `-`) may come first.
     let mut first = true;
     while t.is_empty() || !t.starts_with(']') || first {
         first = false;
         if t.len() > 2
-            && let Some(rest) = parse_named_class(t)?
+            && let Some((item, rest)) = parse_named_class(t)?
         {
+            items.push_str(item);
             t = rest;
             continue;
         }
-        if let Some(rest) = parse_unicode_class(t)? {
+        if let Some((item, rest)) = parse_unicode_class(t)? {
+            items.push_str(&item);
             t = rest;
             continue;
         }
-        if let Some(rest) = parse_perl_class_escape(t) {
+        if let Some((item, rest)) = parse_perl_class_escape(t) {
+            items.push_str(item);
             t = rest;
             continue;
         }
         let range = t;
         let (lo, rest) = parse_class_char(t, s)?;
         t = rest;
+        let mut hi = lo;
         // `[a-]` is `a` or `-`: a range only before something other than `]`.
         let b = t.as_bytes();
         if b.len() >= 2 && b[0] == b'-' && b[1] != b']' {
-            let (hi, rest) = parse_class_char(&t[1..], s)?;
+            let (h, rest) = parse_class_char(&t[1..], s)?;
             t = rest;
-            if hi < lo {
+            if h < lo {
                 return Err(error(INVALID_CHAR_CLASS_RANGE, prefix(range, t)));
             }
+            hi = h;
         }
+        items.push_str(&range_items(lo, hi));
     }
-    p.push(Node::leaf());
+    p.push(Node::atom(class(&items, negated, p.flags)));
     Ok(&t[1..])
 }
 
@@ -991,6 +1201,27 @@ mod tests {
                 Err(e) => e.to_string(),
             };
             assert_eq!(&got, want, "{pattern}");
+        }
+    }
+
+    /// The translation spells out Go's meaning for the `regex` crate.
+    #[test]
+    fn translations_carry_go_s_meaning() {
+        for (pattern, want) in [
+            (r"\d\w\s", r"[0-9][0-9A-Za-z_][\x{9}\x{A}\x{C}\x{D}\x{20}]"),
+            (r"\b\B", r"(?-u:\b)(?-u:\B)"),
+            (r"[a&&[b]", r"[a\x{26}\x{26}\x{5B}b]"),
+            (r"\<", r"\x{3C}"),
+            (r"^.$", r"\A[^\n]\z"),
+            (r"(?ms)^.$", r"(?m:^)(?s:.)(?m:$)"),
+            (r"(?i)a(?-i)b", r"(?i:a)b"),
+            (r"(?U)a*b*?", r"a*?b*"),
+            (r"a(?i)*", r"a*"),
+            (r"(?P<x>a)|b{2,}", r"(?:a)|b{2,}"),
+            (r"\p{^Greek}\p{Letter}\p{Ascii}", r"[\P{Greek}][\p{L}][\p{ASCII}]"),
+            (r"\x{D800}a{", r"[^\x{0}-\x{10FFFF}]a\x{7B}"),
+        ] {
+            assert_eq!(super::translate(pattern).as_deref(), Ok(want), "{pattern}");
         }
     }
 

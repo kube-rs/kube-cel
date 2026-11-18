@@ -249,8 +249,8 @@ mod tests {
         assert_eq!(s("url('/a b').getEscapedPath()"), "/a%20b");
         assert_eq!(s("url('/café').getEscapedPath()"), "/caf%C3%A9");
         assert_eq!(
-            s("url('http://h/?q=a+b%20c&q=%2B').getQuery()['q'].join('|')"),
-            "a b c|+"
+            eval("url('http://h/?q=a+b%20c&q=%2B').getQuery()['q'] == ['a b c', '+']"),
+            Value::Bool(true)
         );
         assert_eq!(s("url('mailto:user@example.com').getHost()"), "");
         assert_eq!(s("url('http://h:/').getPort()"), "");
