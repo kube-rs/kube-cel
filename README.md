@@ -367,7 +367,10 @@ Two stability tiers, by surface:
 ## apiserver divergence
 
 The validation pipeline aims to return the same verdict the Kubernetes API
-server would, client-side. Where it cannot today, it diverges **fail-closed** —
+server would, client-side, for the CEL rules; OpenAPI value validation is out
+of scope (a value of the wrong type, a `null` list item, a missing `required`
+field, an `enum`, `pattern` or length bound pass client-side unless a rule
+catches them). Where it cannot today, it diverges **fail-closed** —
 it reports an error rather than silently accepting — so a passing result is as
 strict as the API server, with two exception classes (the last two rows below),
 which stay until `cel` ships the missing piece. `cel` has no type checker yet
@@ -390,6 +393,7 @@ divergences are pinned by
 | Global `min(..)` / `max(..)` | rejects the CRD at registration (only `<list>.min()` / `<list>.max()`) | `CompilationFailure` | fail-closed |
 | `variables` in a VAP with `spec.variables` (`variables.foo == 1`) | evaluates the policy's variables | `VapError`: kube-cel does not model `spec.variables`, so `variables` is never declared | fail-closed |
 | Names `cel` cannot evaluate: type names with no `cel` value (`net.IP`, `net.CIDR`, `google.protobuf.Empty`), `google.protobuf.NullValue.NULL_VALUE`, a message construction (`google.protobuf.Duration{seconds: 1}`) | evaluates (`type(ip('1.2.3.4')) == net.IP` holds) | compiles; `UnsupportedReference` where evaluation reaches it (`EvaluationError` for the construction) | fail-closed |
+| `.self` / `.oldSelf` in a CRD rule (`.self.kind == self.kind`) | evaluates: the leading dot names the rule's `self` | compiles; `UnsupportedReference` where evaluation reaches it: kube-cel binds `self` per schema node in an inner scope, and `cel` looks a leading-dot name up at the root only (a policy's `.object` evaluates) | fail-closed |
 | `.x` naming a macro's variable `x` (`[1].all(x, .x > 0)`, `[dyn(1)].all(namespaceObject, .namespaceObject == null)`) | reads the macro's `x` (the second is false) | `CompilationFailure`: `cel` looks a leading-dot name up outside the macros (where a policy's `namespaceObject` is null), so it cannot evaluate it alike | fail-closed |
 | String `reverse()` (`'abc'.reverse()`) | rejects the CRD at registration (no matching overload) | `EvaluationError` | fail-closed |
 | `<IP>.string()`, `<CIDR>.string()` | rejects the CRD at registration (no matching overload; only `string(<IP>)`) | `UnsupportedReference` | fail-closed |

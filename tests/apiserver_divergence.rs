@@ -258,6 +258,43 @@ fn dotted_macro_variable_fails_closed() {
     );
 }
 
+/// `.self` and `.oldSelf` in a CRD rule: the leading dot names the rule's
+/// `self` / `oldSelf`, and the apiserver evaluates `.self.kind == self.kind`
+/// to true (Go oracle, v0.36.1). kube-cel binds them per schema node, in an
+/// inner scope of its shared root context, and `cel` looks a leading-dot name
+/// up at the root only, so evaluation reaching one fails with
+/// `UnsupportedReference`. (A policy's variables are bound at the root, so
+/// `.object` evaluates.)
+#[test]
+fn dotted_self_fails_closed() {
+    let errors = run_rule(".self.items.size() == 3").unwrap_err();
+    assert!(
+        errors.iter().all(|e| e.kind == ErrorKind::UnsupportedReference),
+        ".self: {errors:?}"
+    );
+    let schema = json!({
+        "type": "object",
+        "properties": { "n": { "type": "integer" } },
+        "x-kubernetes-validations": [{ "rule": ".oldSelf.n <= self.n" }]
+    });
+    let errors = Validator::new()
+        .validate(&schema, &json!({"n": 2}), Some(&json!({"n": 1})))
+        .unwrap_err();
+    assert!(
+        errors.iter().all(|e| e.kind == ErrorKind::UnsupportedReference),
+        ".oldSelf: {errors:?}"
+    );
+    let results = VapEvaluator::builder()
+        .object(json!({"x": 1}))
+        .build()
+        .evaluate(&[VapExpression {
+            expression: ".object.x == object.x".into(),
+            message: None,
+            message_expression: None,
+        }]);
+    assert!(results[0].passed, ".object evaluates in a policy");
+}
+
 /// `variables` is declared for a policy with `spec.variables` only
 /// (`undeclared reference to 'variables'` without, checked on v1.36.1).
 /// kube-cel does not model `spec.variables`, so it refuses every expression

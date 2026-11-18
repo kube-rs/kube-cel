@@ -15,6 +15,11 @@
 /// Apply schema `default` values to a JSON value, returning a new value with
 /// missing fields filled in.
 ///
+/// As the apiserver does before defaulting, it first drops the `null`s it
+/// prunes: a field or map value that is `null` under a schema node that is
+/// neither `nullable` nor has a `default` (`PruneNonNullableNullsWithoutDefaults`).
+/// A `null` list item stays.
+///
 /// This is a recursive pre-processing pass. It does not modify the input.
 ///
 /// # Limits
@@ -27,7 +32,92 @@
 /// at the same boundary.
 #[must_use]
 pub fn apply_defaults(schema: &serde_json::Value, value: &serde_json::Value) -> serde_json::Value {
-    apply_defaults_inner(schema, value, 0)
+    apply_defaults_inner(schema, &prune_nulls(schema, value, 0), 0)
+}
+
+/// `value` without the `null`s the apiserver prunes before defaulting
+/// (defaulting/prunenulls.go `PruneNonNullableNullsWithoutDefaults`): a field,
+/// or a map value, that is `null` under a schema node neither `nullable` nor
+/// with a non-null `default`. A node without a schema prunes nothing below it,
+/// and list items are never pruned (only walked).
+fn prune_nulls(schema: &serde_json::Value, value: &serde_json::Value, depth: usize) -> serde_json::Value {
+    if depth > crate::validation::compilation::MAX_SCHEMA_DEPTH {
+        return value.clone();
+    }
+    match value {
+        serde_json::Value::Object(obj) => {
+            let props = schema.get("properties").and_then(|p| p.as_object());
+            let additional = schema.get("additionalProperties").filter(|a| a.is_object());
+            let mut result = serde_json::Map::with_capacity(obj.len());
+            for (key, child) in obj {
+                match props.and_then(|p| p.get(key)).or(additional) {
+                    Some(child_schema)
+                        if child.is_null()
+                            && is_non_nullable_null(child, child_schema)
+                            && default_of(child_schema).is_none() => {}
+                    Some(child_schema) => {
+                        result.insert(key.clone(), prune_nulls(child_schema, child, depth + 1));
+                    }
+                    None => {
+                        result.insert(key.clone(), child.clone());
+                    }
+                }
+            }
+            serde_json::Value::Object(result)
+        }
+        serde_json::Value::Array(items) => match schema.get("items") {
+            Some(items_schema) => serde_json::Value::Array(
+                items
+                    .iter()
+                    .map(|item| prune_nulls(items_schema, item, depth + 1))
+                    .collect(),
+            ),
+            None => value.clone(),
+        },
+        _ => value.clone(),
+    }
+}
+
+/// [`prune_nulls`] over a pre-compiled schema tree.
+fn prune_nulls_compiled(
+    compiled: &crate::validation::compilation::CompiledSchema,
+    value: &serde_json::Value,
+    depth: usize,
+) -> serde_json::Value {
+    if depth > crate::validation::compilation::MAX_SCHEMA_DEPTH {
+        return value.clone();
+    }
+    match value {
+        serde_json::Value::Object(obj) => {
+            let mut result = serde_json::Map::with_capacity(obj.len());
+            for (key, child) in obj {
+                match compiled
+                    .properties
+                    .get(key)
+                    .or(compiled.additional_properties.as_deref())
+                {
+                    Some(node) if child.is_null() && !node.nullable && node.default.is_none() => {}
+                    Some(node) => {
+                        result.insert(key.clone(), prune_nulls_compiled(node, child, depth + 1));
+                    }
+                    None => {
+                        result.insert(key.clone(), child.clone());
+                    }
+                }
+            }
+            serde_json::Value::Object(result)
+        }
+        serde_json::Value::Array(items) => match &compiled.items {
+            Some(node) => serde_json::Value::Array(
+                items
+                    .iter()
+                    .map(|item| prune_nulls_compiled(node, item, depth + 1))
+                    .collect(),
+            ),
+            None => value.clone(),
+        },
+        _ => value.clone(),
+    }
 }
 
 /// A schema node's `default`, unless it is `null`: the apiserver skips a nil
@@ -58,17 +148,9 @@ fn apply_defaults_inner(
             let props = schema.get("properties").and_then(|p| p.as_object());
 
             // A map node defaults INTO its existing values (it never invents map
-            // entries from a default). Skipped when preserve-unknown-fields is set,
-            // matching the validator's walk.
-            let preserve_unknown = schema
-                .get("x-kubernetes-preserve-unknown-fields")
-                .and_then(|v| v.as_bool())
-                == Some(true);
-            let additional = if preserve_unknown {
-                None
-            } else {
-                schema.get("additionalProperties").filter(|a| a.is_object())
-            };
+            // entries from a default), `x-kubernetes-preserve-unknown-fields`
+            // or not, as the apiserver does.
+            let additional = schema.get("additionalProperties").filter(|a| a.is_object());
 
             let empty = serde_json::Map::new();
             let props = props.unwrap_or(&empty);
@@ -146,7 +228,7 @@ pub(crate) fn apply_defaults_compiled(
     compiled: &crate::validation::compilation::CompiledSchema,
     value: &serde_json::Value,
 ) -> serde_json::Value {
-    apply_defaults_compiled_inner(compiled, value, 0)
+    apply_defaults_compiled_inner(compiled, &prune_nulls_compiled(compiled, value, 0), 0)
 }
 
 fn apply_defaults_compiled_inner(
@@ -160,11 +242,7 @@ fn apply_defaults_compiled_inner(
 
     match value {
         serde_json::Value::Object(obj) => {
-            let additional = if compiled.preserve_unknown_fields {
-                None
-            } else {
-                compiled.additional_properties.as_deref()
-            };
+            let additional = compiled.additional_properties.as_deref();
             if compiled.properties.is_empty() && additional.is_none() {
                 return value.clone();
             }
@@ -229,6 +307,38 @@ fn apply_defaults_compiled_inner(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The apiserver prunes a `null` field or map value under a node neither
+    /// `nullable` nor defaulted before it defaults (checked on v1.36.1; parity
+    /// rows `PnullPrune*`); a `nullable` one, a defaulted one and a list item
+    /// keep it.
+    #[test]
+    fn non_nullable_nulls_without_default_are_pruned() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "gone": {"type": "integer"},
+                "kept": {"type": "integer", "nullable": true},
+                "defaulted": {"type": "integer", "default": 5},
+                "nullDefault": {"type": "integer", "default": null},
+                "o": {"type": "object", "properties": {"gone": {"type": "string"}}},
+                "m": {"type": "object", "additionalProperties": {"type": "integer"}},
+                "l": {"type": "array", "items": {"type": "integer"}},
+                "free": {"type": "object", "x-kubernetes-preserve-unknown-fields": true}
+            }
+        });
+        let value = json!({
+            "gone": null, "kept": null, "defaulted": null, "nullDefault": null,
+            "o": {"gone": null}, "m": {"a": null, "b": 1}, "l": [null], "free": {"x": null}
+        });
+        let want = json!({
+            "kept": null, "defaulted": 5,
+            "o": {}, "m": {"b": 1}, "l": [null], "free": {"x": null}
+        });
+        assert_eq!(apply_defaults(&schema, &value), want);
+        let compiled = crate::validation::compilation::compile_schema(&schema);
+        assert_eq!(apply_defaults_compiled(&compiled, &value), want);
+    }
 
     #[test]
     fn null_default_is_skipped() {
@@ -343,8 +453,11 @@ mod tests {
         assert_eq!(result, json!({ "a": { "x": "d" }, "b": { "x": "keep" } }));
     }
 
+    /// The apiserver defaults into map values under
+    /// `x-kubernetes-preserve-unknown-fields` too (checked on v1.36.1; parity
+    /// row `PpresApDefault`).
     #[test]
-    fn apply_defaults_skips_additional_properties_under_preserve_unknown() {
+    fn apply_defaults_fills_additional_properties_under_preserve_unknown() {
         let schema = json!({
             "type": "object",
             "x-kubernetes-preserve-unknown-fields": true,
@@ -354,8 +467,11 @@ mod tests {
             }
         });
         let value = json!({ "a": {} });
-        // preserve-unknown: not a structural map → do not default into values.
-        assert_eq!(apply_defaults(&schema, &value), json!({ "a": {} }));
+        assert_eq!(apply_defaults(&schema, &value), json!({ "a": { "x": "d" } }));
+        assert_eq!(
+            apply_defaults_compiled(&crate::validation::compilation::compile_schema(&schema), &value),
+            json!({ "a": { "x": "d" } })
+        );
     }
 
     #[test]

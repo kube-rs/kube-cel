@@ -2156,6 +2156,139 @@ pub fn cases() -> Vec<ParityCase> {
             expect: Expect::Accept,
             note: "combinators without rules (or with an empty list) beside a root rule → accepted",
         },
+        // ── Schema and value fidelity ─────────────────────────────────────
+        // `x-kubernetes-preserve-unknown-fields` does not stop the apiserver
+        // from defaulting into, and evaluating the rules under,
+        // `additionalProperties`; kube-cel skipped both.
+        ParityCase {
+            kind: "PpresApDefault",
+            plural: "ppresapdefaults",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "m": {
+                        "type": "object",
+                        "x-kubernetes-preserve-unknown-fields": true,
+                        "additionalProperties": {
+                            "type": "object",
+                            "properties": { "x": { "type": "integer", "default": 5 } }
+                        }
+                    }
+                },
+                "x-kubernetes-validations": [{ "rule": "self.m.a.x == 5", "message": "defaulted" }]
+            }),
+            object: json!({ "m": { "a": {} } }),
+            expect: Expect::Accept,
+            note: "a default under additionalProperties with preserve-unknown-fields is applied → accepted",
+        },
+        ParityCase {
+            kind: "PpresApRule",
+            plural: "ppresaprules",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "m": {
+                        "type": "object",
+                        "x-kubernetes-preserve-unknown-fields": true,
+                        "maxProperties": 3,
+                        "additionalProperties": {
+                            "type": "integer",
+                            "x-kubernetes-validations": [{ "rule": "self >= 0", "message": "non-negative" }]
+                        }
+                    }
+                }
+            }),
+            object: json!({ "m": { "a": -1 } }),
+            expect: Expect::Reject,
+            note: "a rule under additionalProperties with preserve-unknown-fields is evaluated → rejected",
+        },
+        // A `null` the apiserver prunes before defaulting: a field or map value
+        // under a node neither `nullable` nor defaulted. And nothing is
+        // evaluated at a null node.
+        ParityCase {
+            kind: "PnullPruneField",
+            plural: "pnullprunefields",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "x": { "type": "integer" },
+                    "o": { "type": "object", "properties": { "y": { "type": "integer" } } }
+                },
+                "x-kubernetes-validations": [{ "rule": "!has(self.x) && !has(self.o.y)", "message": "pruned" }]
+            }),
+            object: json!({ "x": null, "o": { "y": null } }),
+            expect: Expect::Accept,
+            note: "a non-nullable null field without a default is pruned → accepted",
+        },
+        ParityCase {
+            kind: "PnullPruneMap",
+            plural: "pnullprunemaps",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "m": { "type": "object", "maxProperties": 3, "additionalProperties": { "type": "integer" } }
+                },
+                "x-kubernetes-validations": [{ "rule": "self.m.size() == 1 && !('a' in self.m)", "message": "pruned" }]
+            }),
+            object: json!({ "m": { "a": null, "b": 1 } }),
+            expect: Expect::Accept,
+            note: "a non-nullable null map value without a default is pruned → accepted",
+        },
+        ParityCase {
+            kind: "PnullPruneDefault",
+            plural: "pnullprunedefaults",
+            schema: json!({
+                "type": "object",
+                "properties": { "x": { "type": "integer", "default": 5 } },
+                "x-kubernetes-validations": [{ "rule": "self.x == 5", "message": "defaulted" }]
+            }),
+            object: json!({ "x": null }),
+            expect: Expect::Accept,
+            note: "a non-nullable null with a default takes the default → accepted",
+        },
+        ParityCase {
+            kind: "PnullNode",
+            plural: "pnullnodes",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "o": {
+                        "type": "object",
+                        "nullable": true,
+                        "properties": {
+                            "a": { "type": "integer", "x-kubernetes-validations": [{ "rule": "false", "message": "a" }] }
+                        },
+                        "x-kubernetes-validations": [{ "rule": "false", "message": "o" }]
+                    }
+                }
+            }),
+            object: json!({ "o": null }),
+            expect: Expect::Accept,
+            note: "no rule runs at a null node, nor below it → accepted",
+        },
+        // A field name CEL cannot spell (`1abc`, `a b`) is left out of the
+        // apiserver's declarations, but still compared in object equality.
+        ParityCase {
+            kind: "PfieldUnspellable",
+            plural: "pfieldunspellables",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "l": {
+                        "type": "array",
+                        "maxItems": 3,
+                        "items": {
+                            "type": "object",
+                            "properties": { "1abc": { "type": "integer" }, "a b": { "type": "integer" }, "ok": { "type": "integer" } }
+                        }
+                    }
+                },
+                "x-kubernetes-validations": [{ "rule": "self.l[0] != self.l[1] && self.l[1] != self.l[2]", "message": "eq" }]
+            }),
+            object: json!({ "l": [{ "1abc": 1, "ok": 1 }, { "1abc": 2, "ok": 1 }, { "1abc": 2, "a b": 1, "ok": 1 }] }),
+            expect: Expect::Accept,
+            note: "objects differing only in a field name CEL cannot spell are not equal → accepted",
+        },
         // ── Schema nodes the object does not reach (kube-rs/kube-cel#14) ─────
         // The apiserver compiles every rule, and checks the nesting depth, when
         // it registers the CRD, whatever objects later look like. Each row's

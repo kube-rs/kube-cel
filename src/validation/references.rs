@@ -467,10 +467,17 @@ impl<'e> Checker<'e> {
                             let qualified = qualified_name(target).map(|q| format!("{q}.{name}"));
                             match qualified {
                                 Some(qualified) if self.known(&qualified) => {}
+                                // Only a declared namespace function leaves
+                                // its receiver unread: when collecting, an
+                                // unknown function's receiver is still read,
+                                // as cel-go reports `missing` in
+                                // `[missing].noSuchFunction()` (and `math` in
+                                // `math.greatest(..)`).
                                 qualified if !self.known(name) => {
                                     self.refuse(UndeclaredReference::Function(
                                         qualified.unwrap_or_else(|| name.to_owned()),
                                     ))?;
+                                    self.walk(target)?;
                                 }
                                 _ => self.walk(target)?,
                             }

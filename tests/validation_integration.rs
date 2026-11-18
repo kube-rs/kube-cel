@@ -358,17 +358,20 @@ fn empty_array_no_item_validation() {
 
 #[test]
 fn null_field_value() {
+    // `self.name == null` would not type-check on the apiserver (string vs
+    // null); a null non-nullable field without a default is pruned instead,
+    // so the rule sees it absent.
     let schema = json!({
         "type": "object",
         "x-kubernetes-validations": [
-            {"rule": "self.name == null || self.name.size() > 0", "message": "name must be null or non-empty"}
+            {"rule": "!has(self.name) || self.name.size() > 0", "message": "name must be absent or non-empty"}
         ],
         "properties": {
             "name": {"type": "string"}
         }
     });
 
-    // null name: passes the rule
+    // null name: pruned, so it passes the rule
     let obj = json!({"name": null});
     assert!(validate(&schema, &obj, None).is_ok());
 }

@@ -725,6 +725,11 @@ impl Validator {
         base_ctx: &Context<'_, '_>,
         depth: usize,
     ) {
+        // The apiserver evaluates nothing at a null node, nor below it
+        // (schema/cel/validation.go `validate`).
+        if value.is_null() {
+            return;
+        }
         if depth > crate::validation::compilation::MAX_SCHEMA_DEPTH {
             errors.push(schema_too_deep_error(&path));
             return;
@@ -790,17 +795,12 @@ impl Validator {
             }
         }
 
-        let preserve_unknown = schema
-            .get("x-kubernetes-preserve-unknown-fields")
-            .and_then(|v| v.as_bool())
-            == Some(true);
-
-        if !preserve_unknown
-            && let (Some(additional_schema), Some(obj)) = (
-                schema.get("additionalProperties").filter(|a| a.is_object()),
-                value.as_object(),
-            )
-        {
+        // `x-kubernetes-preserve-unknown-fields` does not stop it: the
+        // apiserver evaluates the rules under `additionalProperties` either way.
+        if let (Some(additional_schema), Some(obj)) = (
+            schema.get("additionalProperties").filter(|a| a.is_object()),
+            value.as_object(),
+        ) {
             let known: std::collections::HashSet<&str> = schema
                 .get("properties")
                 .and_then(|p| p.as_object())
@@ -869,6 +869,10 @@ impl Validator {
         base_ctx: &Context<'_, '_>,
         depth: usize,
     ) {
+        // Nothing is evaluated at a null node, as in `walk_schema`.
+        if value.is_null() {
+            return;
+        }
         if depth > crate::validation::compilation::MAX_SCHEMA_DEPTH {
             errors.push(schema_too_deep_error(&path));
             return;
@@ -925,10 +929,8 @@ impl Validator {
             }
         }
 
-        if !compiled.preserve_unknown_fields
-            && let (Some(additional_compiled), Some(obj)) =
-                (&compiled.additional_properties, value.as_object())
-        {
+        // Preserve-unknown-fields or not, as in `walk_schema`.
+        if let (Some(additional_compiled), Some(obj)) = (&compiled.additional_properties, value.as_object()) {
             for (key, val) in obj {
                 if compiled.properties.contains_key(key) {
                     continue;
@@ -2248,8 +2250,11 @@ mod tests {
 
     // ── x-kubernetes-preserve-unknown-fields tests ──────────────────
 
+    /// The apiserver evaluates the rules under `additionalProperties` with
+    /// `x-kubernetes-preserve-unknown-fields` too (checked on v1.36.1; parity
+    /// row `PpresApRule`).
     #[test]
-    fn preserve_unknown_fields_skips_additional_properties_walk() {
+    fn preserve_unknown_fields_still_walks_additional_properties() {
         let schema = json!({
             "type": "object",
             "x-kubernetes-preserve-unknown-fields": true,
@@ -2261,7 +2266,13 @@ mod tests {
             }
         });
         let obj = json!({"unknown_field": -1});
-        assert!(validate(&schema, &obj, None).is_ok());
+        for errors in [
+            validate(&schema, &obj, None).unwrap_err(),
+            validate_compiled(&compile_schema(&schema), &obj, None).unwrap_err(),
+        ] {
+            assert_eq!(errors.len(), 1);
+            assert_eq!(errors[0].field_path, "unknown_field");
+        }
     }
 
     #[test]

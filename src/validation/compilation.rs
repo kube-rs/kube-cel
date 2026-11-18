@@ -251,7 +251,7 @@ pub struct CompiledSchema {
     /// `maxProperties` from the schema (for cost estimation).
     pub max_properties: Option<u64>,
     /// Whether `x-kubernetes-preserve-unknown-fields: true` is set on this node.
-    /// When true, `additionalProperties` walking is skipped.
+    /// It does not stop `additionalProperties` from being walked or defaulted.
     pub preserve_unknown_fields: bool,
     /// Whether `x-kubernetes-embedded-resource: true` is set on this node.
     /// When true, `apiVersion`, `kind`, and `metadata` keys are injected with

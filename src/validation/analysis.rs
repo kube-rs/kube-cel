@@ -326,6 +326,24 @@ mod tests {
         assert!(warnings[0].message.contains("'x'"));
     }
 
+    /// The receiver of an unknown member function is still read, as cel-go
+    /// reports `missing` in `[missing].noSuchFunction()`.
+    #[test]
+    fn scope_check_reads_the_receiver_of_an_unknown_function() {
+        for scope in [ScopeContext::CrdValidation, ScopeContext::AdmissionPolicy] {
+            for rule in [
+                "[missing].noSuchFunction() == true",
+                "optional.of(missing).noSuchFunction() == true",
+            ] {
+                let warnings = check_rule_scope(rule, scope);
+                assert_eq!(warnings.len(), 1, "{rule}: {warnings:?}");
+                assert!(warnings[0].message.contains("'missing'"), "{rule}");
+            }
+            let warnings = check_rule_scope("missing.mystery(other) == true", scope);
+            assert_eq!(warnings.len(), 2, "{warnings:?}");
+        }
+    }
+
     /// A policy's `params` and `variables` depend on its spec, so both are
     /// taken.
     #[test]

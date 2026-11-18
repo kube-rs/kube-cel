@@ -389,6 +389,16 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
 - VAP `object` / `oldObject` / `params` / `namespaceObject` are bound without
   field-name escaping, so `object.metadata.labels['app.kubernetes.io/name']`
   resolves.
+- A `null` field or map value under a schema node that is neither
+  `nullable` nor has a `default` is pruned before defaulting and before the
+  rules run, as the apiserver does (`apply_defaults` included): a rule sees
+  it absent (`!has(self.x)` holds). A `null` list item stays. And no rule
+  runs at a null node, nor below it; kube-cel used to evaluate the rules of
+  a nullable object that was `null` with `self == null`.
+- Under `x-kubernetes-preserve-unknown-fields`, the rules under
+  `additionalProperties` are evaluated and its `default`s applied, as the
+  apiserver does. Both used to be skipped, so an object breaking such a rule
+  passed (fail-open) and a rule reading such a default failed.
 - VAP `namespaceObject` is `null` when no namespace object is set (a
   cluster-scoped request), as on the apiserver; `namespaceObject == null`
   used to fail as an unresolved reference.
