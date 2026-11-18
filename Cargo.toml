@@ -24,7 +24,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 # switch to an exact `=0.16.x` pin (it would block that patch uptake), and bump
 # the major-coupling note in the versioning policy if this constraint changes.
 cel = "0.16"
-regex = { version = "1", optional = true }
+regex = "1"
 ipnet = { version = "2", optional = true }
 semver = { version = "1", optional = true }
 base64 = { version = "0.23", optional = true }
@@ -45,7 +45,7 @@ default = ["strings", "lists", "sets", "regex_funcs", "urls", "ip", "semver_func
 strings = []
 lists = []
 sets = []
-regex_funcs = ["dep:regex"]
+regex_funcs = []
 urls = []
 ip = ["dep:ipnet"]
 semver_funcs = ["dep:semver"]

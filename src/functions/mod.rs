@@ -22,10 +22,14 @@
 #[cfg(feature = "semver_funcs")] mod semver_funcs;
 
 mod cel_optional;
+mod cel_regex;
 mod cel_time;
 #[cfg(feature = "validation")] pub(crate) use cel_time::go_parse_duration;
 #[cfg(feature = "format")] mod format;
 mod go_float;
+mod re2;
+#[cfg(feature = "validation")]
+pub(crate) use cel_regex::pattern_error as regex_pattern_error;
 #[cfg(any(feature = "format", feature = "urls", feature = "named_format"))]
 mod go_isprint;
 #[cfg(feature = "lists")] mod go_sort;
@@ -114,11 +118,13 @@ impl<'c, 'p, 'v> Registrar<'c, 'p, 'v> {
 /// - with the `ip` feature, `string(<IP>)` and `string(<CIDR>)`: `string` is a
 ///   standard-library overload, which `cel` refuses as a context function;
 /// - cel-go's standard time conversions and duration arithmetic, in front of
-///   `cel`'s (see `cel_time`), and its short-circuiting `or` / `orValue` on
-///   optionals (see `cel_optional`).
+///   `cel`'s (see `cel_time`), its short-circuiting `or` / `orValue` on
+///   optionals (see `cel_optional`), and `matches` checked against RE2's
+///   syntax (see `cel_regex`).
 pub(crate) fn declare_env(env: &mut cel::Env) -> Result<(), cel::DeclarationError> {
     cel_time::declare(env)?;
     cel_optional::declare(env)?;
+    cel_regex::declare(env)?;
     #[cfg(feature = "lists")]
     lists_ext::declare(env)?;
     env.add_extension(cel::extensions::two_var_comprehensions)?;

@@ -1305,6 +1305,45 @@ fn quantity_past_supported_range_fails_closed() {
     assert_eq!(passed, [false, true]);
 }
 
+// ── A regular expression the regex crate cannot compile — fails CLOSED ────
+// apiserver: compiles regular expressions with Go's `regexp` (RE2 syntax),
+//            which takes `\Q..\E`, octal escapes, a `{` that starts no
+//            repetition, `(?)`, a `[` inside a class (k8s.io/apiserver v0.36.1
+//            `MustBaseEnvSet(1.36)`).
+// kube-cel:  checks a pattern with a port of Go's parser, so it refuses what Go
+//            refuses, then compiles it with the `regex` crate, which does not
+//            take these: a pattern the apiserver compiles at registration (a
+//            constant pattern of `matches` / `find` / `findAll`, the literal
+//            first argument of `matches`) is a CompilationFailure; any other an
+//            EvaluationError when it runs, even where CEL absorbs the error.
+
+#[test]
+fn regex_the_regex_crate_cannot_compile_fails_closed() {
+    for rule in [
+        "true || 'a'.matches('\\\\Qa\\\\E')",
+        "true || 'a'.matches('a{,5}')",
+        "true || 'a'.find(dyn('\\\\012')) == ''",
+        "true || 'a'.findAll('[a[]').size() == 0",
+        "matches('(?)', 'a') || true",
+    ] {
+        assert_refused(rule);
+    }
+    for rule in [
+        "['\\\\Qa\\\\E'].all(p, 'a'.matches(p))",
+        "['a{,5}'].all(p, 'a'.matches(p) || true)",
+        #[cfg(feature = "regex_funcs")]
+        "['\\\\p{^Greek}'].all(p, 'a'.find(p) == '' || true)",
+    ] {
+        let errors = run_rule(rule).unwrap_err();
+        assert!(
+            errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
+            "{rule}: {errors:?}"
+        );
+    }
+    // A pattern Go refuses is an error both ways, which CEL can absorb.
+    assert_passes("['a**'].all(p, 'a'.matches(p) || true)");
+}
+
 // ── A timestamp offset of a day or more — fails CLOSED ─────────────────────
 // apiserver: cel-go parses `timestamp(string)` with Go's
 //            `time.Parse(time.RFC3339, ..)`, which takes a zone offset up to

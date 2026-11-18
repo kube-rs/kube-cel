@@ -1,17 +1,17 @@
 //! Kubernetes CEL regex extension functions.
 //!
 //! Provides `find` and `findAll` regex functions,
-//! matching `k8s.io/apiserver/pkg/cel/library/regex.go`.
+//! matching `k8s.io/apiserver/pkg/cel/library/regex.go`. Patterns are RE2's,
+//! checked before the `regex` crate compiles them (see `cel_regex`).
 
 use cel::{
     ExecutionError, ResolveResult,
     extractors::{Arguments, This},
     objects::Value,
 };
-use regex::Regex;
 use std::sync::Arc;
 
-use crate::functions::Registrar;
+use crate::functions::{Registrar, cel_regex};
 
 /// Register all regex extension functions.
 pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
@@ -21,8 +21,7 @@ pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
 
 /// `<string>.find(<string>) -> <string>`
 fn find(This(this): This<Arc<String>>, pattern: Arc<String>) -> ResolveResult {
-    let re = Regex::new(&pattern)
-        .map_err(|e| ExecutionError::function_error("find", format!("invalid regex: {e}")))?;
+    let re = cel_regex::compile("find", &pattern)?;
     let result = re.find(&this).map(|m| m.as_str().to_string()).unwrap_or_default();
     Ok(Value::String(Arc::new(result)))
 }
@@ -40,8 +39,7 @@ fn find_all(This(this): This<Arc<String>>, Arguments(args): Arguments) -> Resolv
         }
     };
 
-    let re = Regex::new(&pattern)
-        .map_err(|e| ExecutionError::function_error("findAll", format!("invalid regex: {e}")))?;
+    let re = cel_regex::compile("findAll", &pattern)?;
 
     // Go's `FindAllString` takes a negative limit as "no limit". Narrowed with
     // `try_from`, not `as`: on a 32-bit target `n as usize` truncates

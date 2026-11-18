@@ -1380,6 +1380,83 @@ pub fn cases() -> Vec<ParityCase> {
             expect: Expect::Accept,
             note: "a local year of 10000 prints without a sign, as Go's RFC3339Nano → ACCEPT",
         },
+        // Regular expressions are RE2's (src/functions/re2.rs, cel_regex.rs): the apiserver
+        // checks matches' literal first argument and compiles constant patterns at registration.
+        ParityCase {
+            kind: "PregexLiteral",
+            plural: "pregexliterals",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "true || 'a'.matches('a**')",
+                    "message": "pregexliterals"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "a literal pattern RE2 refuses (the regex crate takes a**) fails to compile → rejected at registration",
+        },
+        ParityCase {
+            kind: "PregexGlobalString",
+            plural: "pregexglobalstrings",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "matches('(', 'x') || true",
+                    "message": "pregexglobalstrings"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "cel-go checks the first argument of the global matches(s, p), the string → rejected at registration",
+        },
+        ParityCase {
+            kind: "PregexGlobalPattern",
+            plural: "pregexglobalpatterns",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "true || matches('a', '\\\\u0041')",
+                    "message": "pregexglobalpatterns"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "the constant pattern of the global matches is compiled when the program is built → rejected at registration",
+        },
+        ParityCase {
+            kind: "PregexFindFolded",
+            plural: "pregexfindfoldeds",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "true || 'a'.find(dyn('(?x)a')) == ''",
+                    "message": "pregexfindfoldeds"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "dyn() of a literal folds into a constant pattern find compiles at registration → rejected at registration",
+        },
+        ParityCase {
+            kind: "PregexDynamic",
+            plural: "pregexdynamics",
+            schema: json!({
+                "type": "object",
+                "properties": { "s": { "type": "string", "maxLength": 8 }, "p": { "type": "string", "maxLength": 8 } },
+                "x-kubernetes-validations": [{
+                    "rule": "self.s.matches(self.p) || true",
+                    "message": "pregexdynamics"
+                }]
+            }),
+            object: json!({ "s": "a", "p": "a**" }),
+            expect: Expect::Accept,
+            note: "a pattern RE2 refuses at evaluation is an error CEL can absorb → ACCEPT",
+        },
         ParityCase {
             kind: "PstringDouble",
             plural: "pstringdoubles",

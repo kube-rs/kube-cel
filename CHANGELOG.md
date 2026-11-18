@@ -291,6 +291,26 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     holding no value (`optional.of(1).orValue(1 / 0)` is `1`, it was an
     error), and return an `x` that is not an optional as it is.
   - Migration: none for rules the apiserver accepts.
+- **Regular expressions are RE2's**, as in the apiserver (Go's `regexp`):
+  `matches`, `find` and `findAll` check a pattern with a port of Go's
+  `regexp/syntax` before the `regex` crate compiles it (each checked live on
+  v1.36.1).
+  - A pattern Go refuses and the `regex` crate takes (`\u0041`, `(?x)`, `a**`,
+    `a{1001}`, `[a--b]`, `[[:foo:]]`, `\p{Emoji}`, `\p{sc=Greek}`, a Unicode 16
+    script, `\p{Old_Italic}`) is an error; it matched, a **fail-open**, now
+    closed.
+  - A pattern the apiserver compiles at registration fails to compile, reached
+    or not: the literal first argument of `matches` (cel-go's
+    `ValidateRegexLiterals`; in the global `matches(s, p)` that is `s`), and the
+    constant pattern of `matches`, `find` and `findAll`, a literal or a
+    conversion of one (`dyn('..')`), which the apiserver compiles when it
+    builds the program.
+  - A pattern Go takes that the `regex` crate cannot compile (`\Q..\E`, an
+    octal escape, a `{` that starts no repetition, `(?)`, a `[` inside a
+    class, `\p{^Greek}`) fails to compile where the apiserver compiles it at
+    registration, and is an error noted as unsupported at evaluation
+    (fail-closed).
+  - Migration: none for rules the apiserver accepts.
 - **A quantity update whose result depends on evaluation order is refused**
   at compile time (`CompilationFailure`, reached or not): an `add`, `sub`,
   `compareTo`, `isGreaterThan` or `isLessThan` on a quantity held by a
@@ -491,6 +511,8 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   ([#17](https://github.com/kube-rs/kube-cel/issues/17)).
 
 ### Changed
+- `regex` is a dependency whatever the features (it was one of
+  `regex_funcs`): `matches` compiles with it. `cel` depends on it already.
 - `chrono` is a dependency whatever the features (it was one of `validation`):
   the standard time conversions build `cel`'s time values. `cel` depends on it
   already.

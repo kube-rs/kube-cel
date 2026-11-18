@@ -312,12 +312,16 @@ mod tests {
             "[quantity('1')].all(q, sign(q) == 1 ? q.add(1).isInteger() : false)",
             "[quantity('1')].all(q, optional.of(q.add(1)).hasValue())",
             "[quantity('1')].all(q, optional.of(sign(q)).orValue(q.compareTo(quantity('2'))) == 1)",
-            "[quantity('2'), quantity('1')].sortBy(q, q.compareTo(quantity('1'))).size() == 2",
             "[quantity('1')].map(q, q.add(1)).size() == 1",
             // The call's own update comes after both parts, in either order.
             "[quantity('1')].all(q, [q][0].isLessThan(quantity('1').add(sign(q))))",
         ] {
             assert!(!refused(expr), "{expr}");
         }
+        // `sortBy` is a macro of the `lists` feature; it binds its receiver.
+        #[cfg(feature = "lists")]
+        assert!(!refused(
+            "[quantity('2'), quantity('1')].sortBy(q, q.compareTo(quantity('1'))).size() == 2"
+        ));
     }
 }
