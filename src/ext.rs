@@ -161,7 +161,9 @@ const ENV_LIBRARY: &str = "kube-cel.env";
 /// them (see `functions::declare_env`).
 ///
 /// A named [`cel::Library`], so an environment records that it has the whole
-/// of it: `cel` adds the name only once the library registered without error.
+/// of it: `cel` adds the name before the library registers and removes it if
+/// registering fails, so once [`Env::add_library`] returns, the name stands for
+/// a complete registration.
 struct EnvLibrary;
 
 impl cel::Library for EnvLibrary {
@@ -274,7 +276,8 @@ pub fn new_env() -> Env {
 ///
 /// Whether `env` starts from [`new_env`] is told by the name kube-cel's `Env`
 /// part is added under (`"kube-cel.env"`, see [`Env::has_library`]), which
-/// `cel` records only once all of that part registered. The check catches an
+/// `cel` keeps only when all of that part registered: it adds the name before
+/// registering and removes it on failure. The check catches an
 /// environment that does not start from [`new_env`]; it does not stop a
 /// [`cel::Library`] of your own added under that name to get past it, which
 /// leaves the context without kube-cel's `Env` part. (`cel` exposes overloads

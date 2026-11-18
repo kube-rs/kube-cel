@@ -22,7 +22,8 @@
 #[cfg(feature = "semver_funcs")] mod semver_funcs;
 
 #[cfg(feature = "format")] mod format;
-#[cfg(feature = "format")] mod go_isprint;
+#[cfg(any(feature = "format", feature = "urls", feature = "named_format"))]
+mod go_isprint;
 #[cfg(feature = "lists")] mod go_sort;
 #[cfg(feature = "lists")] mod lists_ext;
 

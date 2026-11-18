@@ -337,6 +337,23 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   rule reaching it is refused. `sign()` is a global function only, as in the
   apiserver (`quantity(..).sign()` is an error). Each of these differed, most
   of them **fail-open**.
+- `format.uri().validate(s)` reports Go's `*url.Error` text, as the apiserver
+  does: `parse "<s>": <reason>`, with Go's `%q` quoting (non-printable
+  characters and bytes that are not UTF-8 escaped as Go escapes them) and,
+  for a bracketed host, `netip.ParseAddr`'s reason
+  (`invalid host: ParseAddr("x"): unable to parse IP`). Before, the
+  `parse "<s>": ` part and the `ParseAddr` reason were missing and Rust
+  quoting was used.
+- The name formats (`format.dns1123Label()`, `dns1123Subdomain`,
+  `dns1035Label`, their `*Prefix` forms, `qualifiedName` and `labelValue`)
+  are ports of k8s.io/apimachinery's validators, which the apiserver calls,
+  and `.validate(s)` reports their messages verbatim; before, every message
+  differed (a rule reading `.validate(s).value()` could pass where the
+  apiserver rejects). The `*Prefix` forms mask a trailing `-` as
+  apimachinery does, so `format.dns1035LabelPrefix().validate('')` is
+  invalid (was valid: **fail-open**). `format.uuid()` is strfmt's `IsUUID`,
+  whose dashes are each optional (`550e8400e29b41d4a716446655440000` is
+  valid, was refused), with the apiserver's message.
 - `format.datetime()` follows kube-openapi's `strfmt.IsDateTime`, which the
   apiserver calls, instead of RFC 3339: the offset is not range-checked
   (`+99:99`), any character may stand before the fraction digits

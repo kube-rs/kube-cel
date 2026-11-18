@@ -299,33 +299,9 @@ fn format_map(map: &Map, out: &mut String) -> Result<(), ExecutionError> {
     Ok(())
 }
 
-/// Go's `%q` (`strconv.Quote`): double quotes, `\"` and `\\`, what
-/// [`go_isprint::is_print`] accepts as is, the C escapes, `\xNN` below space
-/// and for DEL, and `\uNNNN` / `\UNNNNNNNN` for the rest.
+/// Go's `%q` (`strconv.Quote`), see [`go_isprint::quote`].
 fn go_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' | '\\' => {
-                out.push('\\');
-                out.push(c);
-            }
-            c if go_isprint::is_print(c) => out.push(c),
-            '\u{07}' => out.push_str("\\a"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0c}' => out.push_str("\\f"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{0b}' => out.push_str("\\v"),
-            c if c < ' ' || c == '\u{7f}' => out.push_str(&format!("\\x{:02x}", u32::from(c))),
-            c if u32::from(c) < 0x10000 => out.push_str(&format!("\\u{:04x}", u32::from(c))),
-            c => out.push_str(&format!("\\U{:08x}", u32::from(c))),
-        }
-    }
-    out.push('"');
-    out
+    go_isprint::quote(s.as_bytes())
 }
 
 /// Bytes as UTF-8 text, as cel-go's `ConvertToType(StringType)` requires.

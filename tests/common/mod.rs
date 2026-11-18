@@ -951,6 +951,40 @@ pub fn cases() -> Vec<ParityCase> {
             expect: Expect::Accept,
             note: "non-ASCII in a date-time time field is invalid, not a panic → ACCEPT",
         },
+        // The name formats are apimachinery's validators, messages verbatim
+        // (`.validate(s).value()` reads them); uuid is strfmt's IsUUID.
+        ParityCase {
+            kind: "PfmtNameMessages",
+            plural: "pfmtnamemessages",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "format.dns1035LabelPrefix().validate('').hasValue() && !format.uuid().validate('550e8400e29b41d4a716446655440000').hasValue() && !format.dns1123SubdomainPrefix().validate('a.b-').hasValue() && format.dns1123Label().validate('a.b').value() == ['must not contain dots'] && format.qualifiedName().validate('/x').value() == ['prefix part must be non-empty'] && format.uuid().validate('x').value() == ['does not match the UUID format'] && format.labelValue().validate('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa').value() == ['must be no more than 63 bytes'] && format.dns1123Label().validate('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa').value() == ['must be no more than 63 characters'] && format.dns1123Label().validate('A').value() == [\"a lowercase RFC 1123 label must consist of lower case alphanumeric characters or '-', and must start and end with an alphanumeric character (e.g. 'my-name',  or '123-abc', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?')\"]",
+                    "message": "names"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "name formats validate and word errors as apimachinery → ACCEPT",
+        },
+        // format.uri() reports Go's *url.Error from ParseRequestURI: `parse
+        // "<s>": <why>`, `%q`-quoted parts, netip's ParseAddr errors.
+        ParityCase {
+            kind: "PfmtUriMessages",
+            plural: "pfmturimessages",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "format.uri().validate('foo').value() == ['parse \"foo\": invalid URI for request'] && format.uri().validate('http://[x]/').value() == ['parse \"http://[x]/\": invalid host: ParseAddr(\"x\"): unable to parse IP'] && format.uri().validate('http://[1.2.3.4]/').value() == ['parse \"http://[1.2.3.4]/\": invalid IP-literal'] && format.uri().validate('http://h:x/').value() == ['parse \"http://h:x/\": invalid port \":x\" after host'] && format.uri().validate('http://a b/').value() == ['parse \"http://a b/\": invalid character \" \" in host name'] && format.uri().validate('/%zz').value() == ['parse \"/%zz\": invalid URL escape \"%zz\"'] && !format.uri().validate('http://[fe80::1%25en0]:8080/').hasValue()",
+                    "message": "uri"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "format.uri() words errors as Go's url.ParseRequestURI → ACCEPT",
+        },
         // format.datetime() is kube-openapi's strfmt.IsDateTime: split on every
         // `t` (two pieces read), `.` before the fraction digits is any
         // character, the offset is not range-checked; apiserver messages.

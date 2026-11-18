@@ -189,14 +189,14 @@ pub(crate) fn format_validate(This(this): This<Value>, s: Arc<String>) -> Resolv
 
 fn validate_format(kind: &FormatKind, s: &str) -> Vec<String> {
     match kind {
-        FormatKind::Dns1123Label => validate_dns1123_label(s),
-        FormatKind::Dns1123Subdomain => validate_dns1123_subdomain(s),
-        FormatKind::Dns1035Label => validate_dns1035_label(s),
-        FormatKind::Dns1035LabelPrefix => validate_dns1035_label_prefix(s),
-        FormatKind::Dns1123LabelPrefix => validate_dns1123_label_prefix(s),
-        FormatKind::Dns1123SubdomainPrefix => validate_dns1123_subdomain_prefix(s),
-        FormatKind::QualifiedName => validate_qualified_name(s),
-        FormatKind::LabelValue => validate_label_value(s),
+        FormatKind::Dns1123Label => is_dns1123_label(s.as_bytes()),
+        FormatKind::Dns1123Subdomain => is_dns1123_subdomain(s.as_bytes(), "characters"),
+        FormatKind::Dns1035Label => is_dns1035_label(s.as_bytes()),
+        FormatKind::Dns1035LabelPrefix => is_dns1035_label(&mask_trailing_dash(s)),
+        FormatKind::Dns1123LabelPrefix => is_dns1123_label(&mask_trailing_dash(s)),
+        FormatKind::Dns1123SubdomainPrefix => is_dns1123_subdomain(&mask_trailing_dash(s), "characters"),
+        FormatKind::QualifiedName => is_label_key(s),
+        FormatKind::LabelValue => is_label_value(s),
         FormatKind::Uri => validate_uri(s),
         FormatKind::Uuid => validate_uuid(s),
         FormatKind::Byte => validate_byte(s),
@@ -205,271 +205,235 @@ fn validate_format(kind: &FormatKind, s: &str) -> Vec<String> {
     }
 }
 
-// -- DNS 1123 Label --
+// -- Kubernetes names --
+//
+// k8s.io/apimachinery v0.36.1, messages verbatim: `pkg/util/validation`'s
+// `IsDNS1123Label`, `IsDNS1123Subdomain` and `IsDNS1035Label` (behind
+// `pkg/api/validation`'s `NameIs*`, which the apiserver's formats call), and
+// `pkg/api/validate/content`'s `IsLabelKey` (`IsQualifiedName`) and
+// `IsLabelValue`. The two packages word a length error differently
+// ("characters", "bytes"). Every pattern is ASCII, so the checks run on bytes:
+// a non-ASCII character never matches, as in Go's regexp.
 
-fn validate_dns1123_label(s: &str) -> Vec<String> {
-    let mut errors = Vec::new();
-    if s.is_empty() {
-        errors.push("must be non-empty".to_string());
-        return errors;
-    }
-    if s.len() > 63 {
-        errors.push(format!("must be no more than 63 characters (is {})", s.len()));
-    }
-    if !is_dns1123_label_char_set(s) {
-        errors.push("must consist of lower case alphanumeric characters or '-'".to_string());
-    }
-    if s.starts_with('-') || s.ends_with('-') {
-        errors.push("must start and end with an alphanumeric character".to_string());
-    }
-    errors
+const DNS1123_LABEL_FMT: &str = "[a-z0-9]([-a-z0-9]*[a-z0-9])?";
+const DNS1123_LABEL_ERR_MSG: &str = "a lowercase RFC 1123 label must consist of lower case alphanumeric \
+                                     characters or '-', and must start and end with an alphanumeric character";
+const DNS1123_SUBDOMAIN_FMT: &str = "[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*";
+const DNS1123_SUBDOMAIN_ERR_MSG: &str = "a lowercase RFC 1123 subdomain must consist of lower case alphanumeric \
+                                         characters, '-' or '.', and must start and end with an alphanumeric \
+                                         character";
+const DNS1035_LABEL_FMT: &str = "[a-z]([-a-z0-9]*[a-z0-9])?";
+const DNS1035_LABEL_ERR_MSG: &str = "a DNS-1035 label must consist of lower case alphanumeric characters or '-', \
+                                     start with an alphabetic character, and end with an alphanumeric character";
+const LABEL_KEY_FMT: &str = "([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]";
+const LABEL_KEY_ERR_MSG: &str = "must consist of alphanumeric characters, '-', '_' or '.', and must start and end \
+                                 with an alphanumeric character";
+const LABEL_KEY_EXAMPLES: [&str; 3] = ["MyName", "my.name", "123-abc"];
+const LABEL_VALUE_FMT: &str = "(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?";
+const LABEL_VALUE_ERR_MSG: &str = "a valid label must be an empty string or consist of alphanumeric characters, \
+                                   '-', '_' or '.', and must start and end with an alphanumeric character";
+
+/// `MaxLenError`: `unit` is "characters" in `pkg/util/validation`, "bytes" in
+/// `pkg/api/validate/content`.
+fn max_len_error(length: usize, unit: &str) -> String {
+    format!("must be no more than {length} {unit}")
 }
 
-fn is_dns1123_label_char_set(s: &str) -> bool {
-    s.chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+/// `RegexError` with examples (every caller passes some).
+fn regex_error(msg: &str, re: &str, examples: &[&str]) -> String {
+    let examples: Vec<String> = examples.iter().map(|e| format!("'{e}', ")).collect();
+    format!(
+        "{msg} (e.g. {}regex used for validation is '{re}')",
+        examples.join(" or ")
+    )
 }
 
-// -- DNS 1035 Label --
-
-fn validate_dns1035_label(s: &str) -> Vec<String> {
-    let mut errors = Vec::new();
-    if s.is_empty() {
-        errors.push("must be non-empty".to_string());
-        return errors;
-    }
-    if s.len() > 63 {
-        errors.push(format!("must be no more than 63 characters (is {})", s.len()));
-    }
-    if !is_dns1035_char_set(s) {
-        errors.push("must consist of lower case alphanumeric characters or '-'".to_string());
-    }
-    if !s.starts_with(|c: char| c.is_ascii_lowercase()) {
-        errors.push("must start with a lowercase alphabetic character".to_string());
-    }
-    if s.ends_with('-') {
-        errors.push("must end with an alphanumeric character".to_string());
-    }
-    errors
+fn is_lower_alnum(b: u8) -> bool {
+    b.is_ascii_lowercase() || b.is_ascii_digit()
 }
 
-fn is_dns1035_char_set(s: &str) -> bool {
-    s.chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+/// `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+fn matches_dns1123_label(s: &[u8]) -> bool {
+    matches!((s.first(), s.last()), (Some(&f), Some(&l)) if is_lower_alnum(f) && is_lower_alnum(l))
+        && s.iter().all(|&b| is_lower_alnum(b) || b == b'-')
 }
 
-// -- DNS 1035 Label Prefix --
-
-fn validate_dns1035_label_prefix(s: &str) -> Vec<String> {
-    let mut errors = Vec::new();
-    // Empty string is valid for prefix
-    if s.is_empty() {
-        return errors;
-    }
-    if s.len() > 63 {
-        errors.push(format!("must be no more than 63 characters (is {})", s.len()));
-    }
-    if !is_dns1035_char_set(s) {
-        errors.push("must consist of lower case alphanumeric characters or '-'".to_string());
-    }
-    // Must start with a lowercase alphabetic character
-    if !s.starts_with(|c: char| c.is_ascii_lowercase()) {
-        errors.push("must start with a lowercase alphabetic character".to_string());
-    }
-    // Trailing hyphen is allowed (prefix), so no end check
-    errors
+/// The subdomain pattern: labels joined by dots.
+fn matches_dns1123_subdomain(s: &[u8]) -> bool {
+    s.split(|&b| b == b'.').all(matches_dns1123_label)
 }
 
-// -- DNS 1123 Subdomain --
-
-fn validate_dns1123_subdomain(s: &str) -> Vec<String> {
-    let mut errors = Vec::new();
-    if s.is_empty() {
-        errors.push("must be non-empty".to_string());
-        return errors;
-    }
-    if s.len() > 253 {
-        errors.push(format!("must be no more than 253 characters (is {})", s.len()));
-    }
-    for part in s.split('.') {
-        let part_errors = validate_dns1123_label(part);
-        errors.extend(part_errors);
-    }
-    errors
+/// `^[a-z]([-a-z0-9]*[a-z0-9])?$`
+fn matches_dns1035_label(s: &[u8]) -> bool {
+    matches!((s.first(), s.last()), (Some(f), Some(&l)) if f.is_ascii_lowercase() && is_lower_alnum(l))
+        && s.iter().all(|&b| is_lower_alnum(b) || b == b'-')
 }
 
-// -- DNS 1123 Label Prefix --
-
-fn validate_dns1123_label_prefix(s: &str) -> Vec<String> {
-    let mut errors = Vec::new();
-    if s.is_empty() {
-        errors.push("must be non-empty".to_string());
-        return errors;
-    }
-    if s.len() > 63 {
-        errors.push(format!("must be no more than 63 characters (is {})", s.len()));
-    }
-    if !is_dns1123_label_char_set(s) {
-        errors.push("must consist of lower case alphanumeric characters or '-'".to_string());
-    }
-    // Like dns1123Label but trailing hyphen is allowed
-    if s.starts_with('-') {
-        errors.push("must start with an alphanumeric character".to_string());
-    }
-    errors
+/// `^([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]$`
+fn matches_label_key(s: &[u8]) -> bool {
+    matches!((s.first(), s.last()), (Some(f), Some(l)) if f.is_ascii_alphanumeric() && l.is_ascii_alphanumeric())
+        && s.iter()
+            .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
-// -- DNS 1123 Subdomain Prefix --
-
-fn validate_dns1123_subdomain_prefix(s: &str) -> Vec<String> {
-    let mut errors = Vec::new();
-    if s.is_empty() {
-        errors.push("must be non-empty".to_string());
-        return errors;
+/// `validation.IsDNS1123Label`.
+fn is_dns1123_label(value: &[u8]) -> Vec<String> {
+    let mut errs = Vec::new();
+    if value.len() > 63 {
+        errs.push(max_len_error(63, "characters"));
     }
-    if s.len() > 253 {
-        errors.push(format!("must be no more than 253 characters (is {})", s.len()));
-    }
-    let parts: Vec<&str> = s.split('.').collect();
-    for (i, part) in parts.iter().enumerate() {
-        if i == parts.len() - 1 {
-            // Last label uses prefix rules (trailing hyphen allowed)
-            let part_errors = validate_dns1123_label_prefix(part);
-            errors.extend(part_errors);
+    if !matches_dns1123_label(value) {
+        // A valid subdomain but not a label: having passed the length check,
+        // it has dots.
+        errs.push(if matches_dns1123_subdomain(value) {
+            "must not contain dots".to_owned()
         } else {
-            let part_errors = validate_dns1123_label(part);
-            errors.extend(part_errors);
-        }
+            regex_error(DNS1123_LABEL_ERR_MSG, DNS1123_LABEL_FMT, &["my-name", "123-abc"])
+        });
     }
-    errors
+    errs
 }
 
-// -- Qualified Name --
-
-fn validate_qualified_name(s: &str) -> Vec<String> {
-    let mut errors = Vec::new();
-    if s.is_empty() {
-        errors.push("must be non-empty".to_string());
-        return errors;
+/// `validation.IsDNS1123Subdomain` (`unit` "characters") or
+/// `content.IsDNS1123Subdomain` ("bytes").
+fn is_dns1123_subdomain(value: &[u8], unit: &str) -> Vec<String> {
+    let mut errs = Vec::new();
+    if value.len() > 253 {
+        errs.push(max_len_error(253, unit));
     }
+    if !matches_dns1123_subdomain(value) {
+        errs.push(regex_error(DNS1123_SUBDOMAIN_ERR_MSG, DNS1123_SUBDOMAIN_FMT, &[
+            "example.com",
+        ]));
+    }
+    errs
+}
 
-    let (prefix, name) = if let Some(slash_pos) = s.rfind('/') {
-        let prefix = &s[..slash_pos];
-        let name = &s[slash_pos + 1..];
-        if prefix.is_empty() {
-            errors.push("prefix must be non-empty".to_string());
-        } else {
-            let prefix_errors = validate_dns1123_subdomain(prefix);
-            for e in prefix_errors {
-                errors.push(format!("prefix: {e}"));
+/// `validation.IsDNS1035Label`.
+fn is_dns1035_label(value: &[u8]) -> Vec<String> {
+    let mut errs = Vec::new();
+    if value.len() > 63 {
+        errs.push(max_len_error(63, "characters"));
+    }
+    if !matches_dns1035_label(value) {
+        errs.push(regex_error(DNS1035_LABEL_ERR_MSG, DNS1035_LABEL_FMT, &[
+            "my-name", "abc-123",
+        ]));
+    }
+    errs
+}
+
+/// `maskTrailingDash`, which the `*Prefix` formats apply first: a trailing `-`
+/// and the byte before it become one `a` (`ab-` is checked as `aa`), so a
+/// prefix may end in `-`. The byte before may be part of a character; the
+/// result is checked as bytes.
+fn mask_trailing_dash(name: &str) -> std::borrow::Cow<'_, [u8]> {
+    let b = name.as_bytes();
+    if b.len() > 1 && b.ends_with(b"-") {
+        let mut masked = b[..b.len() - 2].to_vec();
+        masked.push(b'a');
+        masked.into()
+    } else {
+        b.into()
+    }
+}
+
+/// `content.IsLabelKey` (`validation.IsQualifiedName`): an optional DNS
+/// subdomain prefix and `/`, then a name.
+fn is_label_key(value: &str) -> Vec<String> {
+    let mut errs = Vec::new();
+    let parts: Vec<&str> = value.split('/').collect();
+    let name = match parts.as_slice() {
+        [name] => *name,
+        [prefix, name] => {
+            if prefix.is_empty() {
+                errs.push("prefix part must be non-empty".to_owned());
+            } else {
+                errs.extend(
+                    is_dns1123_subdomain(prefix.as_bytes(), "bytes")
+                        .into_iter()
+                        .map(|m| format!("prefix part {m}")),
+                );
             }
+            *name
         }
-        (Some(prefix), name)
-    } else {
-        (None, s)
+        _ => {
+            errs.push(format!(
+                "a valid label key {} with an optional DNS subdomain prefix and '/' (e.g. 'example.com/MyName')",
+                regex_error(LABEL_KEY_ERR_MSG, LABEL_KEY_FMT, &LABEL_KEY_EXAMPLES)
+            ));
+            return errs;
+        }
     };
-
-    let name_errors = validate_qualified_name_local(name);
-    if prefix.is_some() {
-        for e in name_errors {
-            errors.push(format!("name: {e}"));
-        }
-    } else {
-        errors.extend(name_errors);
+    if name.is_empty() {
+        errs.push("name part must be non-empty".to_owned());
+    } else if name.len() > 63 {
+        errs.push(format!("name part {}", max_len_error(63, "bytes")));
     }
-
-    errors
+    if !matches_label_key(name.as_bytes()) {
+        errs.push(format!(
+            "name part {}",
+            regex_error(LABEL_KEY_ERR_MSG, LABEL_KEY_FMT, &LABEL_KEY_EXAMPLES)
+        ));
+    }
+    errs
 }
 
-fn validate_qualified_name_local(s: &str) -> Vec<String> {
-    let mut errors = Vec::new();
-    if s.is_empty() {
-        errors.push("must be non-empty".to_string());
-        return errors;
+/// `content.IsLabelValue`: empty, or a label key's name.
+fn is_label_value(value: &str) -> Vec<String> {
+    let mut errs = Vec::new();
+    if value.len() > 63 {
+        errs.push(max_len_error(63, "bytes"));
     }
-    if s.len() > 63 {
-        errors.push(format!("must be no more than 63 characters (is {})", s.len()));
+    if !(value.is_empty() || matches_label_key(value.as_bytes())) {
+        errs.push(regex_error(LABEL_VALUE_ERR_MSG, LABEL_VALUE_FMT, &[
+            "MyValue", "my_value", "12345",
+        ]));
     }
-    if !is_qualified_name_char_set(s) {
-        errors.push("must consist of alphanumeric characters, '-', '_', or '.'".to_string());
-    }
-    if !s.starts_with(|c: char| c.is_ascii_alphanumeric()) {
-        errors.push("must start with an alphanumeric character".to_string());
-    }
-    if !s.ends_with(|c: char| c.is_ascii_alphanumeric()) {
-        errors.push("must end with an alphanumeric character".to_string());
-    }
-    errors
-}
-
-fn is_qualified_name_char_set(s: &str) -> bool {
-    s.chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-}
-
-// -- Label Value --
-
-fn validate_label_value(s: &str) -> Vec<String> {
-    let mut errors = Vec::new();
-    // Empty string is valid for label values
-    if s.is_empty() {
-        return errors;
-    }
-    if s.len() > 63 {
-        errors.push(format!("must be no more than 63 characters (is {})", s.len()));
-    }
-    if !is_label_value_char_set(s) {
-        errors.push("must consist of alphanumeric characters, '-', '_', or '.'".to_string());
-    }
-    if !s.starts_with(|c: char| c.is_ascii_alphanumeric()) {
-        errors.push("must start with an alphanumeric character".to_string());
-    }
-    if !s.ends_with(|c: char| c.is_ascii_alphanumeric()) {
-        errors.push("must end with an alphanumeric character".to_string());
-    }
-    errors
-}
-
-fn is_label_value_char_set(s: &str) -> bool {
-    s.chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    errs
 }
 
 // -- URI --
 
 fn validate_uri(s: &str) -> Vec<String> {
     // apiserver `format.uri()` is Go's `url.ParseRequestURI` (absolute URI or
-    // absolute path), reporting its error.
+    // absolute path), reporting its error, a `*url.Error`: `parse "<s>": <why>`.
     match crate::functions::go_url::parse_request_uri(s) {
         Ok(_) => Vec::new(),
-        Err(e) => vec![e],
+        Err(e) => vec![format!(
+            "parse {}: {e}",
+            crate::functions::go_isprint::quote(s.as_bytes())
+        )],
     }
 }
 
 // -- UUID --
 
+/// strfmt's `IsUUID`, with the apiserver's message.
 fn validate_uuid(s: &str) -> Vec<String> {
-    let mut errors = Vec::new();
-    // 8-4-4-4-12 hex pattern
-    let parts: Vec<&str> = s.split('-').collect();
-    if parts.len() != 5 {
-        errors
-            .push("must be in the form 8-4-4-4-12 (e.g., xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)".to_string());
-        return errors;
+    if is_uuid(s) {
+        Vec::new()
+    } else {
+        vec!["does not match the UUID format".to_string()]
     }
-    let expected_lens = [8, 4, 4, 4, 12];
-    let mut valid = true;
-    for (part, &expected_len) in parts.iter().zip(expected_lens.iter()) {
-        if part.len() != expected_len || !part.chars().all(|c| c.is_ascii_hexdigit()) {
-            valid = false;
-            break;
+}
+
+/// `(?i)^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$`:
+/// each `-` may be left out (`550e8400e29b41d4a716446655440000`).
+fn is_uuid(s: &str) -> bool {
+    let mut rest = s.as_bytes();
+    for (i, n) in [8, 4, 4, 4, 12].into_iter().enumerate() {
+        if i > 0
+            && let Some(after) = rest.strip_prefix(b"-")
+        {
+            rest = after;
         }
+        if rest.len() < n || !rest[..n].iter().all(u8::is_ascii_hexdigit) {
+            return false;
+        }
+        rest = &rest[n..];
     }
-    if !valid {
-        errors
-            .push("must be in the form 8-4-4-4-12 (e.g., xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)".to_string());
-    }
-    errors
+    rest.is_empty()
 }
 
 // -- Byte (base64) --
@@ -768,7 +732,6 @@ mod tests {
     #[test]
     fn test_dns1035_label_prefix_valid() {
         assert_valid("format.dns1035LabelPrefix().validate('my-prefix-')");
-        assert_valid("format.dns1035LabelPrefix().validate('')"); // empty is valid
         assert_valid("format.dns1035LabelPrefix().validate('a')");
         assert_valid("format.dns1035LabelPrefix().validate('ok-')");
     }
@@ -777,6 +740,8 @@ mod tests {
     fn test_dns1035_label_prefix_invalid() {
         assert_invalid("format.dns1035LabelPrefix().validate('1start-')"); // must start with letter
         assert_invalid("format.dns1035LabelPrefix().validate('UPPER')"); // uppercase
+        // maskTrailingDash leaves the empty string as it is: not a label.
+        assert_invalid("format.dns1035LabelPrefix().validate('')");
     }
 
     #[test]
@@ -989,6 +954,116 @@ mod tests {
         assert_eq!(
             eval("format.date().validate('x').value()"),
             eval("['invalid date']")
+        );
+    }
+
+    /// apimachinery's messages, verbatim (each checked against the apiserver).
+    #[test]
+    fn test_name_format_messages() {
+        let first = |expr: &str| eval(&format!("{expr}.value()[0]"));
+        let s = |v: &str| Value::String(Arc::new(v.to_owned()));
+        assert_eq!(
+            first("format.dns1123Label().validate('A')"),
+            s(
+                "a lowercase RFC 1123 label must consist of lower case alphanumeric characters or '-', and must \
+               start and end with an alphanumeric character (e.g. 'my-name',  or '123-abc', regex used for \
+               validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?')"
+            )
+        );
+        assert_eq!(
+            first("format.dns1123Label().validate('a.b')"),
+            s("must not contain dots")
+        );
+        assert_eq!(
+            first("format.dns1123Subdomain().validate('-')"),
+            s(
+                "a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters, '-' or '.', \
+               and must start and end with an alphanumeric character (e.g. 'example.com', regex used for \
+               validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')"
+            )
+        );
+        assert_eq!(
+            first("format.dns1035Label().validate('1a')"),
+            s(
+                "a DNS-1035 label must consist of lower case alphanumeric characters or '-', start with an \
+               alphabetic character, and end with an alphanumeric character (e.g. 'my-name',  or 'abc-123', \
+               regex used for validation is '[a-z]([-a-z0-9]*[a-z0-9])?')"
+            )
+        );
+        assert_eq!(
+            first(&format!("format.dns1123Label().validate('{}')", "a".repeat(64))),
+            s("must be no more than 63 characters")
+        );
+        assert_eq!(
+            first(&format!("format.labelValue().validate('{}')", "a".repeat(64))),
+            s("must be no more than 63 bytes")
+        );
+        assert_eq!(
+            first("format.qualifiedName().validate('/x')"),
+            s("prefix part must be non-empty")
+        );
+        assert_eq!(
+            eval("format.qualifiedName().validate('a/').value().size()"),
+            Value::Int(2)
+        );
+        assert_eq!(
+            first("format.qualifiedName().validate('a/b/c')"),
+            s(
+                "a valid label key must consist of alphanumeric characters, '-', '_' or '.', and must start and \
+               end with an alphanumeric character (e.g. 'MyName',  or 'my.name',  or '123-abc', regex used for \
+               validation is '([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]') with an optional DNS subdomain prefix \
+               and '/' (e.g. 'example.com/MyName')"
+            )
+        );
+        assert_eq!(
+            first("format.uuid().validate('x')"),
+            s("does not match the UUID format")
+        );
+        // The *Prefix formats replace a trailing `-` and the byte before it
+        // with `a`; uuid dashes are each optional.
+        assert_valid("format.dns1123LabelPrefix().validate('ab-')");
+        assert_valid("format.dns1123SubdomainPrefix().validate('a.b-')");
+        assert_invalid("format.dns1123LabelPrefix().validate('-')");
+        assert_valid("format.uuid().validate('550e8400e29b-41d4a716-446655440000')");
+    }
+
+    /// Go's `*url.Error` text (each checked against the apiserver).
+    #[test]
+    fn test_uri_messages() {
+        let first = |v: &str| eval(&format!("format.uri().validate('{v}').value()[0]"));
+        let s = |v: &str| Value::String(Arc::new(v.to_owned()));
+        assert_eq!(first("foo"), s(r#"parse "foo": invalid URI for request"#));
+        assert_eq!(
+            first("http://[x]/"),
+            s(r#"parse "http://[x]/": invalid host: ParseAddr("x"): unable to parse IP"#)
+        );
+        assert_eq!(
+            first("http://[1.2.3.4]/"),
+            s(r#"parse "http://[1.2.3.4]/": invalid IP-literal"#)
+        );
+        assert_eq!(
+            first("http://[::1.2.3.04]/"),
+            s(
+                r#"parse "http://[::1.2.3.04]/": invalid host: ParseAddr("::1.2.3.04"): IPv4 field has octet with leading zero"#
+            )
+        );
+        assert_eq!(
+            first("http://[%FF::1]/"),
+            s(
+                r#"parse "http://[%FF::1]/": invalid host: ParseAddr("\xff::1"): each colon-separated field must have at least one digit (at "\xff::1")"#
+            )
+        );
+        assert_eq!(
+            first(r"http://h:\u00ad/"),
+            s(r#"parse "http://h:\u00ad/": invalid port ":\u00ad" after host"#)
+        );
+        assert_eq!(
+            first("http://a b/"),
+            s(r#"parse "http://a b/": invalid character " " in host name"#)
+        );
+        assert_eq!(
+            first("http://h/%2é"),
+            s(r#"parse "http://h/%2é": invalid URL escape "%2\xc3""#)
         );
     }
 

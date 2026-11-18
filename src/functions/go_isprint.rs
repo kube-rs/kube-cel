@@ -1,9 +1,56 @@
 //! Go's `strconv.IsPrint`, which decides what `%q` (`strconv.Quote`) prints as
-//! is and what it escapes. The tables are those of go1.26.2's
+//! is and what it escapes, and `strconv.Quote` itself. The tables are those of go1.26.2's
 //! `src/strconv/isprint.go` (Unicode 15.0.0), the toolchain kube-apiserver
 //! v1.36.1 is built with; newer Go releases print code points assigned in later
 //! Unicode versions. Copied from the Go source (Copyright The Go Authors,
 //! BSD-style license); regenerate them from that file, not by hand.
+
+/// Go's `strconv.Quote` (and `%q` of a string) on Go string bytes: double
+/// quotes, `\"` and `\\`, what [`is_print`] accepts as is, the C escapes,
+/// `\xNN` below space, for DEL and for each byte that is not part of valid
+/// UTF-8, and `\uNNNN` / `\UNNNNNNNN` for the rest.
+pub(crate) fn quote(s: &[u8]) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    let mut i = 0;
+    while i < s.len() {
+        // One character if the bytes at `i` start a valid one (as Go's
+        // `utf8.DecodeRuneInString`), else that one byte.
+        let chunk = &s[i..(i + 4).min(s.len())];
+        let c = match std::str::from_utf8(chunk) {
+            Ok(text) => text.chars().next(),
+            Err(e) if e.valid_up_to() > 0 => std::str::from_utf8(&chunk[..e.valid_up_to()])
+                .ok()
+                .and_then(|text| text.chars().next()),
+            Err(_) => None,
+        };
+        let Some(c) = c else {
+            out.push_str(&format!("\\x{:02x}", s[i]));
+            i += 1;
+            continue;
+        };
+        i += c.len_utf8();
+        match c {
+            '"' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if is_print(c) => out.push(c),
+            '\u{07}' => out.push_str("\\a"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{0b}' => out.push_str("\\v"),
+            c if c < ' ' || c == '\u{7f}' => out.push_str(&format!("\\x{:02x}", u32::from(c))),
+            c if u32::from(c) < 0x10000 => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c => out.push_str(&format!("\\U{:08x}", u32::from(c))),
+        }
+    }
+    out.push('"');
+    out
+}
 
 /// Whether Go's `strconv.IsPrint` reports `c` as printable: letters, marks,
 /// numbers, punctuation, symbols and the ASCII space, as of Unicode 15.0.0.
