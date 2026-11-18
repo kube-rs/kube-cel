@@ -121,26 +121,37 @@ bump version:
     # README.md + src/lib.rs — update version in dependency examples
     sedi "s/kube-cel = \"${old_minor}\"/kube-cel = \"${new_minor}\"/g" README.md
     sedi "s/version = \"${old_minor}\"/version = \"${new_minor}\"/g" README.md src/lib.rs
-    # Add changelog entry
+    # Changelog: date an existing `## [X.Y.Z] - Unreleased` section (notes
+    # written as the work landed), otherwise add an empty one.
     date=$(date +%Y-%m-%d)
-    entry="## [{{version}}] - ${date}\n\n### Added\n\n### Fixed\n\n### Changed\n"
-    sedi "s/^# Changelog$/# Changelog\n\n${entry}/" CHANGELOG.md
+    v_re=$(printf '%s' "{{version}}" | sed 's/\./\\./g')
+    if grep -q "^## \[${v_re}\] - Unreleased$" CHANGELOG.md; then
+        sedi "s/^## \[${v_re}\] - Unreleased$/## [{{version}}] - ${date}/" CHANGELOG.md
+    elif grep -q "^## \[${v_re}\]" CHANGELOG.md; then
+        echo "⚠ CHANGELOG.md already has a dated section for {{version}}; left it as it is"
+    else
+        entry="## [{{version}}] - ${date}\n\n### Added\n\n### Fixed\n\n### Changed\n"
+        sedi "s/^# Changelog$/# Changelog\n\n${entry}/" CHANGELOG.md
+    fi
     echo "Bumped ${old} → {{version}}"
     echo "Updated: Cargo.toml, README.md, src/lib.rs, CHANGELOG.md"
     echo "Edit CHANGELOG.md to fill in release notes, then commit with sign-off:"
     echo "  git commit -s -am 'chore: release {{version}}'   (or a descriptive message)"
 
-# Release: tag, push, publish, GitHub release (commit the version bump first; never commits)
-release: check
+# Run on the merged release commit (HEAD == origin/main, clean tree); never commits.
+# Release: publish, then tag and push only that tag, then the GitHub release
+release:
     #!/usr/bin/env bash
-    # Commit the version bump yourself FIRST (`just bump X.Y.Z`, edit CHANGELOG,
-    # `git commit -s`). This recipe refuses a dirty tree and never creates
+    # Land the version bump on main FIRST (`just bump X.Y.Z`, edit CHANGELOG,
+    # `git commit -s`, merge). This recipe refuses a dirty tree and never creates
     # commits, so every release commit carries a DCO sign-off and a real message
-    # (the old recipe made an unsigned `chore: release` commit, failing kube-rs DCO).
+    # (an old recipe made an unsigned `chore: release` commit, failing kube-rs DCO).
     set -euo pipefail
     version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-    if ! grep -q "^## \[${version}\]" CHANGELOG.md; then
-        echo "⚠ no CHANGELOG.md section for ${version} — add release notes first"
+    tag="v${version}"
+    v_re=$(printf '%s' "${version}" | sed 's/\./\\./g')
+    if ! grep -Eq "^## \[${v_re}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md; then
+        echo "⚠ no dated CHANGELOG.md section for ${version} (\`just bump ${version}\` dates it)"
         exit 1
     fi
     if [ -n "$(git status --porcelain)" ]; then
@@ -149,16 +160,37 @@ release: check
         git status --short
         exit 1
     fi
-    echo "Releasing v${version}..."
-    git tag "v${version}"
-    git push origin main --tags
+    git fetch --quiet origin main
+    if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+        echo "⚠ HEAD is not origin/main — release the merged release commit:"
+        echo "  HEAD        $(git log -1 --format='%h %s' HEAD)"
+        echo "  origin/main $(git log -1 --format='%h %s' origin/main)"
+        exit 1
+    fi
+    if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null \
+        || [ -n "$(git ls-remote --tags origin "refs/tags/${tag}")" ]; then
+        echo "⚠ tag ${tag} already exists (locally or on origin)"
+        exit 1
+    fi
+    # The gate runs after the cheap refusals above, on the commit being released.
+    just check
+    echo "Releasing ${tag}..."
+    # Publish before tagging: a failed publish leaves no tag anywhere. Only this
+    # tag is pushed (never --tags, which would push every stray local tag).
     cargo publish
+    git tag "${tag}"
+    if ! git push origin "refs/tags/${tag}"; then
+        echo "⚠ published ${version}, but pushing ${tag} failed; retry with:"
+        echo "  git push origin refs/tags/${tag}"
+        echo "  gh release create ${tag} --title ${tag} --notes-file <(just release-notes ${version}) --verify-tag"
+        exit 1
+    fi
     # GitHub release: notes reflowed to one line per paragraph/bullet (GitHub
     # renders single newlines as <br>, so hard-wrapped CHANGELOG text breaks
     # mid-sentence otherwise).
-    gh release create "v${version}" --title "v${version}" \
+    gh release create "${tag}" --title "${tag}" \
         --notes-file <(just release-notes "${version}") --verify-tag
-    echo "Published + released kube-cel v${version}"
+    echo "Published + released kube-cel ${tag}"
 
 # Print GitHub-friendly (reflowed) release notes for VERSION from the CHANGELOG
 release-notes version:
@@ -176,7 +208,7 @@ release-notes version:
         if l.startswith('## ['):
             break
         sec.append(l)
-    out, cur = [], None
+    out, cur, fence = [], None, False
     def flush():
         global cur
         if cur:
@@ -185,6 +217,12 @@ release-notes version:
             cur = None
     for l in sec:
         s = l.strip()
+        # A fenced code block passes through verbatim (indentation kept, so it
+        # stays inside its list item).
+        if s.startswith('```'):
+            flush(); out.append(l); fence = not fence; continue
+        if fence:
+            out.append(l); continue
         if s == '':
             flush()
             if out and out[-1] != '':
@@ -198,7 +236,8 @@ release-notes version:
         if cur:
             cur[1].append(s)
         else:
-            cur = ('', [s])
+            # Keep the indentation of a paragraph that continues a list item.
+            cur = (l[:len(l) - len(l.lstrip())], [s])
     flush()
     while out and out[-1] == '':
         out.pop()
