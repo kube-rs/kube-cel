@@ -25,8 +25,8 @@ pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
     // name collision between string and list versions.
     r.add("first", list_first);
     r.add("last", list_last);
-    // slice, sort, flatten, reverse, distinct and lists.range are cel's
-    // upstream `lists` extension, declared on the Env (see `declare_env`).
+    // slice, sort, flatten, reverse, distinct and lists.range are cel-go's
+    // `ext.Lists`, declared on the Env (see `lists_ext`).
 }
 
 /// `<list>.isSorted() -> bool`

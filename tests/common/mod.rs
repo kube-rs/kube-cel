@@ -1092,7 +1092,7 @@ pub fn cases() -> Vec<ParityCase> {
             note: "replace/findAll with a negative count apply to every match → ACCEPT",
         },
         // ── cel 0.16 validation environment (kube-rs/kube-cel#14) ─────────────
-        // The validation env enables `cel`'s upstream `lists` extension and the
+        // The validation env enables cel-go's `ext.Lists` (kube-cel's port) and the
         // two-variable comprehensions, which the apiserver's base environment
         // has; before 0.9 `sortBy` and the two-variable macros were
         // UnsupportedReference (fail-closed). Bounded lists keep the apiserver's
@@ -1107,7 +1107,7 @@ pub fn cases() -> Vec<ParityCase> {
             }),
             object: json!({ "l": [1, 3, 2] }),
             expect: Expect::Accept,
-            note: "sortBy (upstream lists macro) evaluates → ACCEPT",
+            note: "sortBy (lists macro) evaluates → ACCEPT",
         },
         ParityCase {
             kind: "PsortByNo",
@@ -1161,7 +1161,56 @@ pub fn cases() -> Vec<ParityCase> {
             }),
             object: json!({ "l": [1, 3, 2] }),
             expect: Expect::Accept,
-            note: "upstream lists sort/reverse/slice/range evaluate → ACCEPT",
+            note: "lists sort/reverse/slice/range evaluate → ACCEPT",
+        },
+        // `sort()` and `sortBy()` order equal keys as Go's `sort.Slice` does
+        // (go1.26.2): kept in order up to 12 elements, reordered from 13.
+        ParityCase {
+            kind: "PsortByTies",
+            plural: "psortbytieses",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "lists.range(20).sortBy(x, x % 2)[0] == 10 && lists.range(13).sortBy(x, x % 2) == [8, 12, 2, 0, 4, 10, 6, 3, 7, 9, 5, 11, 1] && lists.range(12).sortBy(x, x % 2) == [0, 2, 4, 6, 8, 10, 1, 3, 5, 7, 9, 11]",
+                    "message": "ties"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "sortBy orders equal keys as Go's sort.Slice → ACCEPT",
+        },
+        ParityCase {
+            kind: "PsortSignedZero",
+            plural: "psortsignedzeros",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "lists.range(20).map(x, x % 2 == 0 ? (x == 0 ? -0.0 : 0.0) : 1.0).sort().map(x, 1.0 / x < 0.0).indexOf(true) == 5",
+                    "message": "zero"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "sort() moves a -0.0 among equal zeros as Go's sort.Slice → ACCEPT",
+        },
+        // cel-go makes `[]` of a negative range, and sorts a NaN (no
+        // comparison with it is "less").
+        ParityCase {
+            kind: "PlistsEdges",
+            plural: "plistsedgeses",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "lists.range(-1) == [] && [double('NaN')].sort().size() == 1 && [1.0, double('NaN'), 2.0].sort().size() == 3",
+                    "message": "edges"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "lists.range(-1) is [] and a NaN sorts → ACCEPT",
         },
         // `string(<IP>)` is an Env overload in 0.9 (the member form is gone).
         ParityCase {

@@ -53,13 +53,14 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   - `sortBy` and the two-variable comprehensions (`all(i, v, …)`,
     `exists(i, v, …)`, `transformList`, `transformMap`, …) now evaluate instead
     of failing closed with `UnsupportedReference`. `slice`, `flatten`,
-    `distinct`, `reverse`, `sort` and `lists.range` already evaluated; they now
-    come from `cel`'s upstream `lists` extension instead of kube-cel's own
-    implementations, so, for one, `sort()` now fails on a list mixing `int`
-    and `double` ("list elements must have the same type"). The upstream
-    `lists` extension needs the `lists` feature: without it, a rule reaching a
-    list function is rejected (`UnsupportedReference`), and one using `sortBy`
-    (a macro) does not compile.
+    `distinct`, `reverse`, `sort` and `lists.range` already evaluated; they are
+    now a port of cel-go's `ext.Lists` declared on the `Env` (it replaces
+    kube-cel's own implementations of before), so, for one, `sort()` now
+    fails on a list mixing `int` and `double` ("list elements must have the
+    same type"), and an extra argument is an error rather than ignored. It
+    needs the `lists` feature: without it, a rule reaching a list function is
+    rejected (`UnsupportedReference`), and one using `sortBy` (a macro) does
+    not compile.
   - `ErrorKind::UnsupportedReference` now covers a reference evaluation cannot
     resolve (an undeclared identifier, a function the apiserver declares but
     kube-cel does not implement or has behind a disabled feature, or a function
@@ -236,10 +237,11 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
 
 ### Added
 - `new_env() -> cel::Env`: kube-cel's environment, the apiserver's base CEL
-  environment as far as kube-cel models it: the `cel` standard library, `cel`'s
-  upstream `lists` extension (feature `lists`), the two-variable comprehension
+  environment as far as kube-cel models it: the `cel` standard library,
+  cel-go's `ext.Lists` (feature `lists`), the two-variable comprehension
   macros and `string(<IP>)` / `string(<CIDR>)` (feature `ip`). The validation
-  engine uses it too.
+  engine uses it too. It does not install `cel`'s `lists` extension, whose
+  functions it declares itself, so adding that extension to it fails.
 - `new_context(env) -> Result<cel::Context, RegisterError>`: a root context on
   `env` with every compiled-in function registered, the path that replaces
   `KubeCelExt`. `env` must start from `new_env()`, with `cel`'s extensions or
@@ -311,6 +313,14 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   `'aaa'.replace('a', 'b', -1) == 'aaa'` held). `replace`, `findAll`,
   `charAt`, `indexOf` and `substring` no longer narrow an `int` with `as
   usize`, which truncated values past `u32::MAX` on 32-bit targets.
+- `sort()` and `sortBy()` order elements with equal keys as the apiserver
+  does: both reorder the indices with a port of go1.26.2's `sort.Slice` (the
+  toolchain of kube-apiserver v1.36.1), as cel-go v0.26 does. `cel`'s `lists`
+  extension sorts stably, so from 13 elements on the order differed:
+  `lists.range(20).sortBy(x, x % 2)[0] == 0` held, a **fail-open**, as did a
+  rule reading where `sort()` put a `-0.0` among equal zeros. `lists.range(-1)`
+  is `[]`, and a list holding a NaN sorts (no comparison with it is "less"),
+  as in cel-go; both used to be errors (fail-closed).
 - A schema `format: duration` parses as the apiserver's
   `strfmt.ParseDuration`: Go's `time.ParseDuration` exactly (`µs` / `μs`, a
   `+` sign, every overflow refused), then strfmt's word units (`1d`,
@@ -319,9 +329,8 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   `cel.bind` (its base environment has no `ext.Bindings`); it rejects the CRD at
   registration. The `sortBy` and two-variable comprehension rows are gone (both
   now evaluate), and rows for `math.*`, the `isIPv4`-style helpers, `base64.*` /
-  `jsonpatch.escapeKey`, global `min` / `max`, string `reverse()`,
-  `lists.range(-1)` / `sort()` of a list holding a NaN, and `<IP>.string()` are
-  added (all fail closed). The authz library row now covers
+  `jsonpatch.escapeKey`, global `min` / `max`, string `reverse()` and
+  `<IP>.string()` are added (all fail closed). The authz library row now covers
   every function the apiserver declares that kube-cel does not implement
   (`optional.unwrap`, `<list>.unwrapOpt()`, ..). Two last rows document the
   known fail-open classes. `cel` has no type checker yet

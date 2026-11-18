@@ -21,8 +21,8 @@ mod sealed {
 ///
 /// Deprecated: this registers only the functions that live on a context. It
 /// does not install the part of kube-cel's environment that lives on the
-/// [`cel::Env`] (`cel`'s upstream `lists` extension, the `sortBy` and
-/// two-variable comprehension macros, `string(<IP>)` / `string(<CIDR>)`), so on
+/// [`cel::Env`] (cel-go's `ext.Lists`, the `sortBy` and two-variable
+/// comprehension macros, `string(<IP>)` / `string(<CIDR>)`), so on
 /// [`Context::default`] those are missing. Build the environment with
 /// [`new_env`] and the context with [`new_context`] instead. The trait will be
 /// removed once kube-cel's functions move to `Env` overloads, see
@@ -45,7 +45,7 @@ mod sealed {
 /// [sealed]: https://rust-lang.github.io/api-guidelines/future-proofing.html#c-sealed
 #[deprecated(
     since = "0.9.0",
-    note = "registers only the Context functions, not the Env part (upstream lists, the sortBy and \
+    note = "registers only the Context functions, not the Env part (ext.Lists, the sortBy and \
             two-variable comprehension macros, string(<IP>)); use new_env() and new_context(). Will \
             be removed once functions move to Env overloads, see kube-rs/kube-cel#17"
 )]
@@ -62,7 +62,7 @@ pub trait KubeCelExt: sealed::Sealed + Sized {
     /// or on [`new_env`].
     #[deprecated(
         since = "0.9.0",
-        note = "registers only the Context functions, not the Env part (upstream lists, the sortBy \
+        note = "registers only the Context functions, not the Env part (ext.Lists, the sortBy \
                 and two-variable comprehension macros, string(<IP>)); use new_env() and \
                 new_context(). Will be removed once functions move to Env overloads, see \
                 kube-rs/kube-cel#17"
@@ -77,7 +77,7 @@ pub trait KubeCelExt: sealed::Sealed + Sized {
     /// Panics as [`register_all`](KubeCelExt::register_all) does.
     #[deprecated(
         since = "0.9.0",
-        note = "registers only the Context functions, not the Env part (upstream lists, the sortBy \
+        note = "registers only the Context functions, not the Env part (ext.Lists, the sortBy \
                 and two-variable comprehension macros, string(<IP>)); use new_env() and \
                 new_context(). Will be removed once functions move to Env overloads, see \
                 kube-rs/kube-cel#17"
@@ -111,8 +111,8 @@ impl KubeCelExt for Context<'_, '_> {
 #[non_exhaustive]
 pub enum RegisterError {
     /// The environment was not built by [`new_env`], so it lacks the part of
-    /// kube-cel's environment that lives on the [`cel::Env`] (`cel`'s upstream
-    /// `lists` extension, the `sortBy` and two-variable comprehension macros,
+    /// kube-cel's environment that lives on the [`cel::Env`] (cel-go's
+    /// `ext.Lists`, the `sortBy` and two-variable comprehension macros,
     /// `string(<IP>)` / `string(<CIDR>)`, as the enabled features have them).
     /// Start from [`new_env`] and add to it.
     IncompleteEnv,
@@ -155,8 +155,8 @@ impl std::error::Error for RegisterError {
 /// [`Env::has_library`]).
 const ENV_LIBRARY: &str = "kube-cel.env";
 
-/// The part of kube-cel's environment that lives on the [`Env`]: `cel`'s
-/// upstream `lists` extension, the two-variable comprehension macros and the
+/// The part of kube-cel's environment that lives on the [`Env`]: cel-go's
+/// `ext.Lists`, the two-variable comprehension macros and the
 /// `string(<IP>)` / `string(<CIDR>)` overloads, as the enabled features have
 /// them (see `functions::declare_env`).
 ///
@@ -180,9 +180,10 @@ impl cel::Library for EnvLibrary {
 ///
 /// On top of [`Env::stdlib`] it has, as the enabled features allow:
 ///
-/// - `cel`'s upstream `lists` extension (feature `lists`): `slice`, `flatten`,
-///   `distinct`, `reverse`, `sort`, `lists.range` and the `sortBy` macro, as
-///   cel-go's `ext.Lists`;
+/// - cel-go's `ext.Lists` (feature `lists`): `slice`, `flatten`, `distinct`,
+///   `reverse`, `sort`, `lists.range` and the `sortBy` macro. kube-cel's own
+///   port rather than `cel`'s `lists` extension: `sort()` and `sortBy()` order
+///   equal keys as Go's `sort.Slice` does, as the apiserver's do;
 /// - the two-variable comprehension macros: `all(i, v, ..)`, `exists(i, v, ..)`,
 ///   `existsOne(i, v, ..)`, `transformList`, `transformMap`, `transformMapEntry`;
 /// - `string(<IP>)` and `string(<CIDR>)` (feature `ip`). As in the apiserver,
@@ -353,11 +354,11 @@ mod tests {
     }
 
     /// `new_env` has what the apiserver's base environment has on its `Env`:
-    /// `cel`'s upstream `lists` extension, with the `sortBy` macro, and the
-    /// two-variable comprehension macros.
+    /// cel-go's `ext.Lists`, with the `sortBy` macro, and the two-variable
+    /// comprehension macros.
     #[test]
     #[cfg(feature = "lists")]
-    fn new_env_has_the_upstream_lists_extension() {
+    fn new_env_has_the_lists_extension() {
         holds("[1, 2, 3, 4].slice(1, 3) == [2, 3]");
         holds("[[1, [2]], [3]].flatten(2) == [1, 2, 3]");
         holds("[1, 2, 2, 1].distinct() == [1, 2]");
@@ -377,11 +378,11 @@ mod tests {
         holds("{'a': 1}.transformMap(k, v, v + 1) == {'a': 2}");
     }
 
-    /// The upstream `lists` functions behave as cel-go's, not as kube-cel's
-    /// own did before 0.9: pinned for the CHANGELOG entry.
+    /// The `lists` functions behave as cel-go's, not as kube-cel's own did
+    /// before 0.9: pinned for the CHANGELOG entry.
     #[test]
     #[cfg(feature = "lists")]
-    fn upstream_lists_behaviour() {
+    fn lists_behave_as_cel_go() {
         // No string `reverse()`: the apiserver has none.
         assert!(eval("'abc'.reverse()").is_err());
         // Mixed numeric types do not sort; bytes do.
@@ -443,7 +444,7 @@ mod tests {
     }
 
     /// The string `reverse()` the CHANGELOG points general users to: an
-    /// overload of their own, beside the upstream list `reverse()`.
+    /// overload of their own, beside the list `reverse()`.
     #[test]
     fn own_string_reverse_fits_new_env() {
         use cel::common::types::CelString;

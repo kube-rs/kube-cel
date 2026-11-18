@@ -23,6 +23,8 @@
 
 #[cfg(feature = "format")] mod format;
 #[cfg(feature = "format")] mod go_isprint;
+#[cfg(feature = "lists")] mod go_sort;
+#[cfg(feature = "lists")] mod lists_ext;
 
 #[cfg(feature = "quantity")] mod quantity;
 
@@ -96,16 +98,16 @@ impl<'c, 'p, 'v> Registrar<'c, 'p, 'v> {
 /// rather than on a context, as the apiserver's base environment has it
 /// (`k8s.io/apiserver/pkg/cel/environment`, `MustBaseEnvSet(..)`):
 ///
-/// - with the `lists` feature, `cel`'s upstream `lists` extension (cel-go's
-///   `ext.Lists`: `slice`, `flatten`, `distinct`, `reverse`, `sort`,
-///   `lists.range` and the `sortBy` macro);
+/// - with the `lists` feature, kube-cel's port of cel-go's `ext.Lists`
+///   (`slice`, `flatten`, `distinct`, `reverse`, `sort`, `lists.range` and the
+///   `sortBy` macro, see `lists_ext`), which sorts as Go's `sort.Slice` does;
 /// - the two-variable comprehension macros (`all(i, v, ..)`, `transformList`,
 ///   `transformMap`, ..);
 /// - with the `ip` feature, `string(<IP>)` and `string(<CIDR>)`: `string` is a
 ///   standard-library overload, which `cel` refuses as a context function.
 pub(crate) fn declare_env(env: &mut cel::Env) -> Result<(), cel::DeclarationError> {
     #[cfg(feature = "lists")]
-    env.add_extension(cel::extensions::lists)?;
+    lists_ext::declare(env)?;
     env.add_extension(cel::extensions::two_var_comprehensions)?;
 
     #[cfg(feature = "ip")]

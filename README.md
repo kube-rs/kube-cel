@@ -237,9 +237,10 @@ let warnings = analyze_rule(
 
 ### Lists
 `isSorted`, `sum`, `min`, `max`, `indexOf`, `lastIndexOf`, `first`, `last`, and
-`cel`'s upstream `lists` extension (cel-go's `ext.Lists`) on the `Env`:
-`slice`, `sort`, `sortBy`, `flatten`, `reverse`, `distinct`, `lists.range`
-(`sortBy` is a macro, so compile with `env.compile(..)`)
+cel-go's `ext.Lists` on the `Env`: `slice`, `sort`, `sortBy`, `flatten`,
+`reverse`, `distinct`, `lists.range` (`sortBy` is a macro, so compile with
+`env.compile(..)`). `sort()` and `sortBy()` order equal keys as the apiserver
+does, through a port of Go's `sort.Slice`.
 
 ### Comprehensions
 The two-variable macros (cel-go's `ext.TwoVarComprehensions`), on the `Env`
@@ -320,7 +321,7 @@ kube-cel = { version = "0.8", default-features = false, features = ["full"] }
 | Feature | Dependencies | Description |
 |---------|-------------|-------------|
 | `strings` | - | String extension functions |
-| `lists` | - | List extension functions, and `cel`'s upstream `lists` extension on the `Env` |
+| `lists` | - | List extension functions, and cel-go's `ext.Lists` on the `Env` |
 | `sets` | - | Set operations |
 | `regex_funcs` | `regex` | Regex find/findAll |
 | `urls` | `url` | URL parsing and accessors |
@@ -379,7 +380,6 @@ divergences are pinned by
 | `base64.*` (cel-go `ext.Encoders`), `jsonpatch.escapeKey` | rejects the CRD at registration (not in the base environment; `jsonpatch` is a MutatingAdmissionPolicy library) | `CompilationFailure` | fail-closed |
 | Global `min(..)` / `max(..)` | rejects the CRD at registration (only `<list>.min()` / `<list>.max()`) | `CompilationFailure` | fail-closed |
 | String `reverse()` (`'abc'.reverse()`) | rejects the CRD at registration (no matching overload) | `EvaluationError` | fail-closed |
-| `lists.range(-1)`; `sort()` on a list holding a NaN (`[double('NaN')].sort()`) | evaluates: `lists.range(-1)` is `[]`, and the list sorts | `EvaluationError` | fail-closed |
 | `<IP>.string()`, `<CIDR>.string()` | rejects the CRD at registration (no matching overload; only `string(<IP>)`) | `UnsupportedReference` | fail-closed |
 | A rule reading `oldSelf` in the items of a list that is not `x-kubernetes-list-type: map`, or `optionalOldSelf` on a rule that does not read `oldSelf` | rejects the CRD at registration | `CompilationFailure` | fail-closed |
 | Quantity `add` / `sub` past `i128` (`quantity('2e38').add(quantity('1'))`) | exact (`inf.Dec`), so `….isGreaterThan(quantity('2e38'))` holds | `EvaluationError` (quantity overflow) | fail-closed |
@@ -394,9 +394,9 @@ The validation pipeline compiles and runs rules in the environment `new_env()`
 builds, modelled on the apiserver's base CEL environment (`k8s.io/apiserver`
 `environment.MustBaseEnvSet(..).NewExpressionsEnv()`): it enables the
 two-variable comprehensions (`all(i, v, …)`, `transformList`, `transformMap`, …)
-and, with the `lists` feature, `cel`'s `lists` extension (`sortBy`, `slice`,
+and, with the `lists` feature, cel-go's `ext.Lists` (`sortBy`, `slice`,
 `flatten`, `distinct`, `reverse`, `sort`, `lists.range`), which evaluate as in
-the apiserver but for the `lists.range(-1)` / NaN row above, and it leaves out
+the apiserver, equal sort keys included, and it leaves out
 what the base environment lacks: `cel.bind` and the `math` and `base64.*`
 libraries. (`cel` has them as its `bindings`, `math` and `encoders` extensions,
 for an `Env` of your own.) `cel` only parses,

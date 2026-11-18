@@ -377,9 +377,11 @@ fn no_cost_model_fails_open() {
 // ── `lists` extension and two-variable comprehensions — faithful since 0.9 ──
 // apiserver: evaluates (`ext.Lists` and `ext.TwoVarComprehensions` are in the
 //            base environment).
-// kube-cel:  evaluates too, through `cel`'s upstream extensions (`lists` with
-//            the `lists` feature). Before 0.9 `sortBy` and the two-variable
-//            macros surfaced as UnsupportedReference (fail-closed).
+// kube-cel:  evaluates too: its port of `ext.Lists` (feature `lists`), which
+//            orders equal keys as Go's `sort.Slice`, makes `[]` of
+//            `lists.range(-1)` and sorts a NaN, and `cel`'s two-variable
+//            comprehensions. Before 0.9 `sortBy` and the two-variable macros
+//            surfaced as UnsupportedReference (fail-closed).
 
 /// Asserts the rule evaluates to `true` against `{"items": [3, 1, 2]}`.
 fn assert_passes(rule: &str) {
@@ -443,36 +445,12 @@ fn list_functions_need_the_lists_feature() {
     );
 }
 
-/// kube-cel's own Kubernetes list functions (feature `lists`) stay alongside
-/// the upstream ones.
+/// kube-cel's Kubernetes list functions (feature `lists`) stay alongside the
+/// `ext.Lists` ones.
 #[test]
 #[cfg(feature = "lists")]
 fn kubernetes_list_functions_coexist() {
     assert_passes("!self.items.isSorted() && self.items.sum() == 6 && self.items.min() == 1");
-}
-
-// ── `lists` extension edge cases — fail CLOSED ──────────────────────────────
-// apiserver: cel-go v0.26's `ext.Lists` makes `[]` of `lists.range(-1)`, and
-//            `sort()` orders a list holding a NaN (Go's `sort.Slice` with `<`,
-//            which no NaN satisfies), so the rules below hold (checked on
-//            v1.36.1).
-// kube-cel:  `cel`'s `lists` extension refuses a negative size and a NaN it
-//            cannot order: EvaluationError, the object is rejected.
-
-#[test]
-#[cfg(feature = "lists")]
-fn upstream_lists_edge_cases_fail_closed() {
-    for rule in [
-        "lists.range(-1) == []",
-        "[double('NaN')].sort().size() == 1",
-        "[1.0, double('NaN'), 2.0].sort().size() == 3",
-    ] {
-        let errors = run_rule(rule).unwrap_err();
-        assert!(
-            errors.iter().any(|e| e.kind == ErrorKind::EvaluationError),
-            "{rule}: expected EvaluationError, got {errors:?}"
-        );
-    }
 }
 
 /// Control: the single-argument comprehension is supported alongside the
