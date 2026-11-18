@@ -988,6 +988,73 @@ pub fn cases() -> Vec<ParityCase> {
             expect: Expect::Accept,
             note: "%s renders doubles and nested values like cel-go v0.26 → ACCEPT",
         },
+        // `format()` ports cel-go v0.26's formatter. `%f` / `%e` go through
+        // golang.org/x/text's en-US number formatter: thousands grouped, a
+        // negative zero unsigned, `∞`, a precision kept in an i16 (`%.65536f`
+        // rounds to 0 places); `%e` shows seven significant digits with a
+        // superscript exponent and reads the precision as a field width.
+        ParityCase {
+            kind: "PfmtFloatVerbs",
+            plural: "pfmtfloatverbses",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "'%.2f'.format([1500.0]) == '1,500.00' && '%.2f'.format([-0.001]) == '-0.00' && '%f'.format(['-Infinity']) == '-∞' && '%.65536f'.format([1.5]) == '2' && '%.2e'.format([1500.0]) == '1.500000×10⁰³' && '%.20e'.format([-1500.0]) == '      -1.500000×10⁰³' && '%e'.format([double('NaN')]) == '   NaN'",
+                    "message": "float verbs"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "%f / %e print through x/text's en-US formatter → ACCEPT",
+        },
+        // `%f` takes a double (or "NaN" / "Infinity" / "-Infinity"), not an int.
+        ParityCase {
+            kind: "PfmtFloatOnInt",
+            plural: "pfmtfloatonints",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{ "rule": "'%f'.format([dyn(1)]) != 'x'", "message": "int" }]
+            }),
+            object: json!({}),
+            expect: Expect::Reject,
+            note: "%f on an int is an evaluation error → REJECT",
+        },
+        // A negative int in another base is a sign and the magnitude.
+        ParityCase {
+            kind: "PfmtSignedInts",
+            plural: "pfmtsignedintses",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "'%b'.format([-5]) == '-101' && '%o'.format([-8]) == '-10' && '%x'.format([-255]) == '-ff' && '%X'.format([-255]) == '-FF'",
+                    "message": "signed"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "negative %b / %o / %x / %X are sign and magnitude → ACCEPT",
+        },
+        // `%s`: Go's shortest digits break a tie towards even; go1.26.2's
+        // strconv.IsPrint (Unicode 15.0.0) escapes U+0378 (unassigned) and
+        // U+1C89 (assigned in Unicode 16); a type value is written bare.
+        ParityCase {
+            kind: "PfmtSResiduals",
+            plural: "pfmtsresidualses",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "'%s'.format([1000000000000000.25]) == '1.0000000000000002e+15' && '%s'.format([['\\u0378', '\\u1c89']]) == '[\"\\\\u0378\", \"\\\\u1c89\"]' && '%s'.format([[type(1), type(null)]]) == '[int, null_type]'",
+                    "message": "s"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "%s tie-break, escaping and type values follow cel-go v0.26 → ACCEPT",
+        },
         // A negative count means no limit: Go's `strings.Replace` and
         // `FindAllString` take `n < 0` as "all". kube-cel clamped `replace`'s
         // count to 0 and replaced nothing.

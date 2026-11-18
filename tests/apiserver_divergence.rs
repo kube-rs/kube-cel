@@ -11,11 +11,10 @@
 //!   piece: the errors only a type checker catches (cel-rust#350), see
 //!   [`no_type_checker_fails_open`], and the rules only a cost model refuses
 //!   (on `cel`'s roadmap, cel-rust discussion #230), see
-//!   [`no_cost_model_fails_open`]. Besides those, until it is fixed before
-//!   0.9.0 (#14), `format()`'s output, see
-//!   [`format_numeric_verbs_fail_open`] and [`format_s_fail_open`]. Rules on
-//!   schema nodes the object does not reach used to be another; since 0.9
-//!   every rule in the schema is compiled before the object is walked.
+//!   [`no_cost_model_fails_open`]. Rules on schema nodes the object does not
+//!   reach used to be another, and `format()`'s output a third; since 0.9
+//!   every rule in the schema is compiled before the object is walked, and
+//!   `format()` ports cel-go v0.26's formatter.
 //!
 //! Each test locks the *current measured* behavior so a divergence cannot
 //! change silently. The human-readable summary lives in the README
@@ -375,86 +374,6 @@ fn no_cost_model_fails_open() {
     }
 }
 
-// ── `format()` output — fail OPEN (fix before 0.9.0) ─────────────────────────
-// apiserver: cel-go v0.26's formatter (`ext.Strings` version 2). It prints `%f`
-//            and `%e` through golang.org/x/text's locale printer, a negative
-//            `%b` / `%o` / `%x` as sign and magnitude, and refuses `%f` / `%e`
-//            on a non-double at runtime. Its `%s` takes Go's `%g` digits (which
-//            break a rounding tie differently from Rust), escapes every code
-//            point Go does not print (unassigned ones too), and writes a type
-//            value as a type. All checked on v1.36.1 and with k8s.io/apiserver
-//            v0.36.1 `MustBaseEnvSet(1.36)`.
-// kube-cel:  Go `fmt`-style `%f` / `%e` that accept an int, two's complement,
-//            Rust's shortest digits, an approximation of Go's printable set,
-//            and a type value as a string. So a rule comparing either output
-//            holds on one side only. Pinned so the tests fail once fixed.
-
-#[test]
-#[cfg(feature = "format")]
-fn format_numeric_verbs_fail_open() {
-    // kube-cel's own output: these hold here and fail on the apiserver.
-    for rule in [
-        "'%.2f'.format([1500.0]) == '1500.00'",
-        "'%.2e'.format([1500.0]) == '1.50e+03'",
-        "'%.2e'.format([0.0]) == '0.00e+00'",
-        "'%.1e'.format([0.0000015]) == '1.5e-06'",
-        "'%f'.format([dyn(1)]) == '1.000000'",
-        "'%.1f'.format([dyn(5)]) == '5.0'",
-        "'%b'.format([-5]) == '1111111111111111111111111111111111111111111111111111111111111011'",
-        "'%o'.format([-8]) == '1777777777777777777770'",
-        "'%x'.format([-255]) == 'ffffffffffffff01'",
-        "'%X'.format([-255]) == 'FFFFFFFFFFFFFF01'",
-    ] {
-        assert!(
-            run_rule(rule).is_ok(),
-            "{rule}: expected the known fail-open to pass"
-        );
-    }
-    // The apiserver's output: these hold there and fail here.
-    for rule in [
-        "'%.2f'.format([1500.0]) == '1,500.00'",
-        "'%.2e'.format([1500.0]) == '1.500000×10⁰³'",
-        "'%b'.format([-5]) == '-101'",
-        "'%o'.format([-8]) == '-10'",
-        "'%x'.format([-255]) == '-ff'",
-        "'%X'.format([-255]) == '-FF'",
-    ] {
-        assert!(
-            run_rule(rule).is_err(),
-            "{rule}: kube-cel unexpectedly matches the apiserver"
-        );
-    }
-}
-
-#[test]
-#[cfg(feature = "format")]
-fn format_s_fail_open() {
-    // kube-cel's own output: these hold here and fail on the apiserver.
-    for rule in [
-        r#"'%s'.format([1000000000000000.25]) == '1.0000000000000003e+15'"#,
-        r#"'%s'.format([['\u0378']]) == '["\u0378"]'"#,
-        r#"'%s'.format([['\uffff']]) == '["\uffff"]'"#,
-        r#"'%s'.format([[type(1)]]) == '["int"]'"#,
-    ] {
-        assert!(
-            run_rule(rule).is_ok(),
-            "{rule}: expected the known fail-open to pass"
-        );
-    }
-    // The apiserver's output: these hold there and fail here.
-    for rule in [
-        r#"'%s'.format([1000000000000000.25]) == '1.0000000000000002e+15'"#,
-        r#"'%s'.format([['\u0378']]) == '["\\u0378"]'"#,
-        r#"'%s'.format([['\uffff']]) == '["\\uffff"]'"#,
-        r#"'%s'.format([[type(1)]]) == '[int]'"#,
-    ] {
-        assert!(
-            run_rule(rule).is_err(),
-            "{rule}: kube-cel unexpectedly matches the apiserver"
-        );
-    }
-}
-
 // ── `lists` extension and two-variable comprehensions — faithful since 0.9 ──
 // apiserver: evaluates (`ext.Lists` and `ext.TwoVarComprehensions` are in the
 //            base environment).
@@ -621,35 +540,6 @@ fn quantity_arithmetic_past_i128_fails_closed() {
             errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
             "{rule}: {errors:?}"
         );
-    }
-}
-
-// ── `format()` `%f` / `%e` precision past 65535 — fails CLOSED ──────────────
-// apiserver: formats the value; its locale printer (golang.org/x/text) keeps
-//            only part of such a precision (`'%.65536f'.format([1.5])` is `2`,
-//            k8s.io/apiserver v0.36.1 `MustBaseEnvSet(1.36)`).
-// kube-cel:  Rust's formatter panics past `u16::MAX`, so `%f` / `%e` refuse
-//            such a precision with an EvaluationError. Verbs that ignore the
-//            precision (`%s`, `%d`, ..) take any int64 one, as cel-go does.
-
-#[test]
-#[cfg(feature = "format")]
-fn format_float_precision_past_u16_fails_closed() {
-    for rule in [
-        "'%.65536f'.format([1.5]) != 'x'",
-        "'%.65536e'.format([1.5]) != 'x'",
-    ] {
-        let errors = run_rule(rule).unwrap_err();
-        assert!(
-            errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
-            "{rule}: {errors:?}"
-        );
-    }
-    for rule in [
-        "'%.65536s'.format(['hello']) == 'hello'",
-        "'%.65536d'.format([12]) == '12'",
-    ] {
-        assert!(run_rule(rule).is_ok(), "{rule}");
     }
 }
 

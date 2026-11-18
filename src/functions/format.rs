@@ -1,121 +1,186 @@
-//! Kubernetes CEL string formatting extension function.
+//! Kubernetes CEL string formatting: `<string>.format(<list>)`.
 //!
-//! Provides printf-style `format()` function,
-//! matching `cel-go/ext/strings.go` format implementation.
+//! The apiserver's base environment has cel-go v0.26's `ext.Strings` at version
+//! 2, whose `format()` is cel-go's first formatter (`ext/formatting.go`; the
+//! `formatting_v2.go` one starts at version 4). This is a port of it: the clause
+//! parser, `%s` through cel-go's string conversion, `%d` / `%b` / `%o` / `%x` /
+//! `%X` through Go's `fmt`, and `%f` / `%e` through the en-US number formatter
+//! of golang.org/x/text v0.33.0's `message` printer, which groups thousands
+//! (`1,500.00`) and writes the exponent in superscript (`1.500000×10⁰³`).
 
 use cel::{
-    ExecutionError, ResolveResult,
+    ExecutionError, FunctionContext, ResolveResult,
+    common::{
+        types::{CelList, CelMap, CelType, Kind},
+        value::Val,
+    },
     extractors::This,
-    objects::{Key, Value},
+    objects::{Key, Map, Opaque, Value},
 };
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
-use crate::functions::Registrar;
+use crate::functions::{Registrar, go_isprint};
 
 /// Register the format function.
 pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
     r.add("format", format_string);
 }
 
-/// `<string>.format(<list>) -> string`
-fn format_string(This(fmt): This<Arc<String>>, args: Value) -> ResolveResult {
-    let args = match args {
-        Value::List(list) => list,
-        _ => {
-            return Err(ExecutionError::function_error(
-                "format",
-                "format() requires a list argument",
-            ));
-        }
-    };
-
-    let mut result = String::new();
-    let mut arg_idx: usize = 0;
-    let mut chars = fmt.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if ch != '%' {
-            result.push(ch);
-            continue;
-        }
-
-        // Next char determines the verb
-        let Some(next) = chars.next() else {
-            return Err(ExecutionError::function_error(
-                "format",
-                "format string ends with '%'",
-            ));
-        };
-
-        // Literal %
-        if next == '%' {
-            result.push('%');
-            continue;
-        }
-
-        // Parse optional precision: %.Nf or %.Ne
-        let (precision, verb) = if next == '.' {
-            let mut prec_str = String::new();
-            while let Some(&d) = chars.peek() {
-                if d.is_ascii_digit() {
-                    prec_str.push(d);
-                    chars.next();
-                } else {
-                    break;
-                }
-            }
-            // Go's `strconv.Atoi`: a precision past the int64 range is an error
-            // for every verb, including those that ignore it.
-            let prec: i64 = prec_str.parse().map_err(|_| {
-                ExecutionError::function_error("format", "invalid precision in format string")
-            })?;
-            let v = chars.next().ok_or_else(|| {
-                ExecutionError::function_error("format", "format string ends after precision")
-            })?;
-            (Some(prec), v)
-        } else {
-            (None, next)
-        };
-
-        // Consume one argument
-        if arg_idx >= args.len() {
-            return Err(ExecutionError::function_error(
-                "format",
-                format!(
-                    "not enough arguments: format requires at least {} but got {}",
-                    arg_idx + 1,
-                    args.len()
-                ),
-            ));
-        }
-        let arg = &args[arg_idx];
-        arg_idx += 1;
-
-        match verb {
-            's' => format_s(arg, &mut result)?,
-            'd' => format_d(arg, &mut result)?,
-            'f' => format_f(arg, float_precision(precision)?, &mut result)?,
-            'e' => format_e(arg, float_precision(precision)?, &mut result)?,
-            'b' => format_b(arg, &mut result)?,
-            'o' => format_o(arg, &mut result)?,
-            'x' => format_hex(arg, false, &mut result)?,
-            'X' => format_hex(arg, true, &mut result)?,
-            _ => {
-                return Err(ExecutionError::function_error(
-                    "format",
-                    format!("unknown format verb '%{verb}'"),
-                ));
-            }
-        }
-    }
-
-    Ok(Value::String(Arc::new(result)))
+fn err(message: impl ToString) -> ExecutionError {
+    ExecutionError::function_error("format", message)
 }
 
-/// `%s`, as cel-go v0.26 `FormatString` (ext/formatting.go: the formatter of
-/// `ext.Strings` below version 4, which the apiserver's base environment uses).
-/// A scalar is converted like `string(x)`; a list or map is written with its
-/// elements as CEL literals (see [`format_nested`]).
+/// `<string>.format(<list>) -> string`, cel-go's `parseFormatString`. The
+/// arguments are read as `cel` values rather than [`Value`]s, so that a type
+/// value (`type(1)`) stays a type, which `%s` writes unquoted in a list.
+fn format_string(ftx: &FunctionContext, This(format): This<Arc<String>>) -> ResolveResult {
+    let list = ftx
+        .args
+        .get(ftx.arg_idx)
+        .ok_or_else(|| err("format() requires a list argument"))?;
+    let Value::List(args) = format_value(list.as_ref())? else {
+        return Err(err("format() requires a list argument"));
+    };
+
+    let bytes = format.as_bytes();
+    let mut out = String::with_capacity(format.len());
+    let (mut i, mut arg_index) = (0, 0);
+    while i < bytes.len() {
+        if bytes[i] != b'%' {
+            let end = bytes[i..]
+                .iter()
+                .position(|&b| b == b'%')
+                .map_or(bytes.len(), |p| i + p);
+            out.push_str(&format[i..end]);
+            i = end;
+            continue;
+        }
+        if bytes.get(i + 1) == Some(&b'%') {
+            out.push('%');
+            i += 2;
+            continue;
+        }
+        // cel-go takes the argument before it looks at the clause.
+        let arg = args
+            .get(arg_index)
+            .ok_or_else(|| err(format!("index {arg_index} out of range")))?;
+        if i + 1 >= bytes.len() {
+            return Err(err("unexpected end of string"));
+        }
+        let (read, verb, precision) = parse_clause(&bytes[i + 1..])?;
+        format_clause(verb, precision, arg, &mut out)?;
+        i += 1 + read;
+        arg_index += 1;
+    }
+    Ok(Value::String(Arc::new(out)))
+}
+
+/// cel-go's `parseFormattingClause` on the bytes after a `%` (never empty): an
+/// optional `.` and decimal precision, then the verb byte. Returns how many
+/// bytes it read, the verb and the precision. The precision is an `int` (Go's
+/// `strconv.Atoi`), so one past the int64 range is an error for every verb,
+/// although only `%f` and `%e` use it.
+fn parse_clause(s: &[u8]) -> Result<(usize, u8, Option<i64>), ExecutionError> {
+    let mut i = 0;
+    let mut precision = None;
+    if s[0] == b'.' {
+        i = 1;
+        while i < s.len() && s[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i >= s.len() {
+            return Err(err("could not find end of precision specifier"));
+        }
+        let digits = std::str::from_utf8(&s[1..i]).expect("ASCII digits");
+        precision = Some(
+            digits
+                .parse::<i64>()
+                .map_err(|_| err(format!("invalid precision {digits:?}")))?,
+        );
+    }
+    Ok((i + 1, s[i], precision))
+}
+
+fn format_clause(
+    verb: u8,
+    precision: Option<i64>,
+    arg: &Value,
+    out: &mut String,
+) -> Result<(), ExecutionError> {
+    match verb {
+        b's' => return format_s(arg, out),
+        b'd' => out.push_str(&format_decimal(arg)?),
+        b'f' => out.push_str(&format_fixed(arg, precision.unwrap_or(6))?),
+        b'e' => out.push_str(&format_scientific(arg, precision.unwrap_or(6))?),
+        b'b' => out.push_str(&format_binary(arg)?),
+        b'o' => out.push_str(&format_octal(arg)?),
+        b'x' => out.push_str(&format_hex(arg, false)?),
+        b'X' => out.push_str(&format_hex(arg, true)?),
+        other => {
+            return Err(err(format!(
+                "unrecognized formatting clause \"{}\"",
+                char::from(other)
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// A type value among `format()`'s arguments. [`Value`] holds a type as its
+/// name in a string, which `%s` would quote inside a list; cel-go writes the
+/// bare name (`[int]`).
+#[derive(Debug, PartialEq, Eq)]
+struct TypeName(String);
+
+impl Opaque for TypeName {
+    fn runtime_type_name(&self) -> &str {
+        "type"
+    }
+}
+
+/// A `cel` value as a [`Value`], but for a type value, which becomes a
+/// [`TypeName`], also inside lists and maps.
+fn format_value(v: &dyn Val) -> Result<Value, ExecutionError> {
+    match v.get_type().kind() {
+        Kind::Type => {
+            if let Some(t) = v.downcast_ref::<CelType>() {
+                return Ok(Value::Opaque(Arc::new(TypeName(t.name().to_owned()))));
+            }
+        }
+        Kind::List => {
+            if let Some(list) = v.downcast_ref::<CelList>() {
+                let items = list
+                    .inner()
+                    .iter()
+                    .map(|item| format_value(item.as_ref()))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok(Value::List(Arc::new(items)));
+            }
+        }
+        Kind::Map => {
+            if let Some(map) = v.downcast_ref::<CelMap>() {
+                let entries = map
+                    .inner()
+                    .iter()
+                    .map(|(k, v)| Ok((Key::from(k.clone()), format_value(v.as_ref())?)))
+                    .collect::<Result<HashMap<_, _>, ExecutionError>>()?;
+                return Ok(Value::Map(Map {
+                    map: Arc::new(entries),
+                }));
+            }
+        }
+        _ => {}
+    }
+    Value::try_from(v)
+}
+
+// ---------------------------------------------------------------------------
+// %s
+// ---------------------------------------------------------------------------
+
+/// `%s`, cel-go's `FormatString`: a scalar converted as `string(x)` would be
+/// (cel-go's `ConvertToType(StringType)`), a list or map with its elements as
+/// CEL literals (see [`format_nested`]).
 fn format_s(val: &Value, out: &mut String) -> Result<(), ExecutionError> {
     match val {
         Value::List(list) => format_list(list, out),
@@ -131,33 +196,42 @@ fn format_s(val: &Value, out: &mut String) -> Result<(), ExecutionError> {
     }
 }
 
-/// cel-go's `ConvertToType(StringType)` for a scalar: a double is Go `%g`,
-/// bytes must be UTF-8, a timestamp is RFC3339Nano and a duration seconds + "s".
-/// Anything else (an IP, a quantity, a URL, ..) has no `%s` form in cel-go.
+/// cel-go's `ConvertToType(StringType)` for a scalar: a double is Go's `%g`,
+/// bytes must be UTF-8, a timestamp is RFC3339Nano, a duration its seconds and
+/// "s", a type its name. Anything else (an IP, a quantity, a URL, ..) has no
+/// `%s` form in cel-go.
 fn to_cel_string(val: &Value) -> Result<String, ExecutionError> {
     Ok(match val {
         Value::String(s) => s.to_string(),
         Value::Int(n) => n.to_string(),
         Value::UInt(n) => n.to_string(),
-        Value::Float(f) => format_float_default(*f),
+        Value::Float(f) => go_g(*f),
         Value::Bool(b) => b.to_string(),
         Value::Bytes(b) => utf8_bytes(b)?.to_owned(),
         Value::Timestamp(_) | Value::Duration(_) => {
-            cel_value_to_string(val).expect("timestamps and durations always convert")
+            time_string(val).expect("timestamps and durations convert")
         }
-        other => {
-            return Err(ExecutionError::function_error(
-                "format",
-                format!("%s does not format {}", other.type_of()),
-            ));
-        }
+        Value::Opaque(o) => match o.downcast_ref::<TypeName>() {
+            Some(t) => t.0.clone(),
+            None => return Err(no_string_form(val)),
+        },
+        other => return Err(no_string_form(other)),
     })
+}
+
+fn no_string_form(val: &Value) -> ExecutionError {
+    err(format!(
+        "string clause can only be used on strings, bools, bytes, ints, doubles, maps, lists, \
+         types, durations, and timestamps, was given {}",
+        val.type_of()
+    ))
 }
 
 /// A list element or map value, as cel-go's `clauseForType` + `quoteForCEL`
 /// write it: a valid CEL literal. Strings and bytes are Go-quoted (`"a"`,
-/// `b"a"`), a double is `%.6f` (an infinity or NaN quoted), and a timestamp or
-/// duration is wrapped as `timestamp("…")` / `duration("…")`.
+/// `b"a"`), a double is Go's `%.6f` (an infinity or NaN quoted), a timestamp or
+/// duration is wrapped as `timestamp("…")` / `duration("…")`, and a type is its
+/// bare name.
 fn format_nested(val: &Value, out: &mut String) -> Result<(), ExecutionError> {
     match val {
         Value::String(s) => out.push_str(&go_quote(s)),
@@ -165,16 +239,17 @@ fn format_nested(val: &Value, out: &mut String) -> Result<(), ExecutionError> {
             out.push('b');
             out.push_str(&go_quote(utf8_bytes(b)?));
         }
-        Value::Float(f) if f.is_finite() => out.push_str(&format!("{f:.6}")),
-        // Go's `%.6f` of ±Inf/NaN is "+Inf"/"-Inf"/"NaN", the same as `%g`.
-        Value::Float(f) => out.push_str(&go_quote(&format_float_default(*f))),
-        Value::Timestamp(_) => {
-            out.push_str("timestamp(");
-            out.push_str(&go_quote(&to_cel_string(val)?));
-            out.push(')');
-        }
-        Value::Duration(_) => {
-            out.push_str("duration(");
+        Value::Float(f) if f.is_finite() => out.push_str(&go_fixed(*f, 6)),
+        // Go's `%.6f` of ±Inf / NaN is "+Inf" / "-Inf" / "NaN", as `%g` is.
+        Value::Float(f) => out.push_str(&go_quote(&go_g(*f))),
+        Value::Timestamp(_) | Value::Duration(_) => {
+            let name = if matches!(val, Value::Timestamp(_)) {
+                "timestamp"
+            } else {
+                "duration"
+            };
+            out.push_str(name);
+            out.push('(');
             out.push_str(&go_quote(&to_cel_string(val)?));
             out.push(')');
         }
@@ -197,7 +272,7 @@ fn format_list(list: &[Value], out: &mut String) -> Result<(), ExecutionError> {
 
 /// `{key:value, ..}`, entries sorted by the written key (cel-go
 /// `sort.SliceStable` on the quoted key string, so `-1` < `10` < `2`).
-fn format_map(map: &cel::objects::Map, out: &mut String) -> Result<(), ExecutionError> {
+fn format_map(map: &Map, out: &mut String) -> Result<(), ExecutionError> {
     let mut entries = Vec::with_capacity(map.map.len());
     for (key, value) in map.map.iter() {
         let key = match key {
@@ -224,19 +299,19 @@ fn format_map(map: &cel::objects::Map, out: &mut String) -> Result<(), Execution
     Ok(())
 }
 
-/// Go's `%q` (`strconv.Quote`): double quotes, `\"` and `\\`, the C escapes,
-/// `\xNN` below space and for DEL, `\uNNNN` / `\UNNNNNNNN` for other characters
-/// Go does not print. Go's `unicode.IsPrint` needs category tables; this treats
-/// controls, separators other than the space, and the format characters and
-/// private-use ranges below as non-printing, and keeps the rest (an unassigned
-/// code point is escaped by Go but kept here).
+/// Go's `%q` (`strconv.Quote`): double quotes, `\"` and `\\`, what
+/// [`go_isprint::is_print`] accepts as is, the C escapes, `\xNN` below space
+/// and for DEL, and `\uNNNN` / `\UNNNNNNNN` for the rest.
 fn go_quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
         match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
+            '"' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if go_isprint::is_print(c) => out.push(c),
             '\u{07}' => out.push_str("\\a"),
             '\u{08}' => out.push_str("\\b"),
             '\u{0c}' => out.push_str("\\f"),
@@ -244,68 +319,29 @@ fn go_quote(s: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             '\u{0b}' => out.push_str("\\v"),
-            c if c < ' ' || c == '\u{7f}' => out.push_str(&format!("\\x{:02x}", c as u32)),
-            c if go_prints(c) => out.push(c),
-            c if (c as u32) < 0x10000 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push_str(&format!("\\U{:08x}", c as u32)),
+            c if c < ' ' || c == '\u{7f}' => out.push_str(&format!("\\x{:02x}", u32::from(c))),
+            c if u32::from(c) < 0x10000 => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c => out.push_str(&format!("\\U{:08x}", u32::from(c))),
         }
     }
     out.push('"');
     out
 }
 
-/// An approximation of Go's `unicode.IsPrint` (see [`go_quote`]).
-fn go_prints(c: char) -> bool {
-    let u = c as u32;
-    let format_char = matches!(
-        u,
-        0xAD | 0x600..=0x605
-            | 0x61C
-            | 0x6DD
-            | 0x70F
-            | 0x890..=0x891
-            | 0x8E2
-            | 0x180E
-            | 0x200B..=0x200F
-            | 0x202A..=0x202E
-            | 0x2060..=0x2064
-            | 0x2066..=0x206F
-            | 0xFEFF
-            | 0xFFF9..=0xFFFB
-            | 0x110BD
-            | 0x110CD
-            | 0x13430..=0x1343F
-            | 0x1BCA0..=0x1BCA3
-            | 0x1D173..=0x1D17A
-            | 0xE0001
-            | 0xE0020..=0xE007F
-    );
-    let private_use = matches!(u, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD);
-    c == ' ' || !(c.is_control() || c.is_whitespace() || format_char || private_use)
-}
-
 /// Bytes as UTF-8 text, as cel-go's `ConvertToType(StringType)` requires.
 fn utf8_bytes(b: &[u8]) -> Result<&str, ExecutionError> {
-    std::str::from_utf8(b).map_err(|_| {
-        ExecutionError::function_error("format", "invalid UTF-8 in bytes, cannot convert to string")
-    })
+    std::str::from_utf8(b).map_err(|_| err("invalid UTF-8 in bytes, cannot convert to string"))
 }
 
-/// Render a `Timestamp`/`Duration` to string exactly as cel-go's
-/// `ConvertToType(StringType)` — the conversion behind both `string(x)` and the
-/// `%s` format verb on the apiserver. Timestamps use `time.RFC3339Nano`;
-/// durations use total seconds + `"s"`
-/// (`strconv.FormatFloat(d.Seconds(), 'f', -1, 64) + "s"`), NOT Go's
-/// `Duration.String()` `"1h0m0s"` form. Returns `None` for other value types.
-///
-/// Uses only inherent `chrono` methods on the bound value, so it needs no
-/// direct `chrono` dependency.
-fn cel_value_to_string(v: &Value) -> Option<String> {
+/// cel-go's string conversion of a timestamp (`time.RFC3339Nano`: the fraction
+/// without its trailing zeros, "Z" for UTC, else the ±hh:mm offset) or a
+/// duration (`strconv.FormatFloat(d.Seconds(), 'f', -1, 64) + "s"`; `Seconds()`
+/// adds the whole seconds and the nanosecond remainder as two floats). `None`
+/// for any other value. Uses only inherent `chrono` methods of the bound value,
+/// so it needs no direct `chrono` dependency.
+fn time_string(v: &Value) -> Option<String> {
     match v {
         Value::Timestamp(t) => {
-            // RFC3339Nano: date-time, then fractional seconds with ALL trailing
-            // zeros removed (Go trims; chrono's `%.f` would keep them, so trim the
-            // zero-padded `%9f` by hand), then "Z" for UTC else the ±hh:mm offset.
             let mut s = t.format("%Y-%m-%dT%H:%M:%S").to_string();
             let frac = t.format("%9f").to_string();
             let frac = frac.trim_end_matches('0');
@@ -321,194 +357,451 @@ fn cel_value_to_string(v: &Value) -> Option<String> {
             Some(s)
         }
         Value::Duration(d) => {
-            // cel-go: FormatFloat(d.Seconds(), 'f', -1, 64) + "s". Go's `'f'` and
-            // Rust's `Display` are both shortest and never exponential, so agree.
-            // `Seconds()` adds whole seconds and the nanosecond remainder as two
-            // floats; dividing the nanosecond total rounds differently.
             let secs = d.num_nanoseconds().map_or_else(
                 || d.num_seconds() as f64,
                 |n| (n / 1_000_000_000) as f64 + (n % 1_000_000_000) as f64 / 1e9,
             );
-            Some(format!("{secs}s"))
+            let (digits, dp) = go_shortest(secs.abs());
+            let prec = (digits.len() as i64 - i64::from(dp)).max(0) as usize;
+            let mut s = fmt_f(secs < 0.0, &digits, dp, prec);
+            s.push('s');
+            Some(s)
         }
         _ => None,
     }
 }
 
-fn format_float_default(f: f64) -> String {
-    // cel-go renders a double for `%s` through Go's `%g` (common/types/double.go
-    // `ConvertToType(String)` = `fmt.Sprintf("%g", f)`): shortest round-trip
-    // digits, infinities as "+Inf"/"-Inf", NaN as "NaN", and scientific notation
-    // when the decimal exponent is < -4 or >= 6 (strconv uses precision 6 for
-    // that choice when printing the shortest digits; 21 is `%v`'s threshold).
-    if f.is_nan() {
-        return "NaN".to_string();
+// ---------------------------------------------------------------------------
+// Go's float formatting (strconv), on an exact decimal expansion
+// ---------------------------------------------------------------------------
+
+/// The exact decimal expansion of a finite `x >= 0`: its significant digits
+/// (none for zero) and the exponent `dp` with `x = 0.d₁d₂… × 10^dp`. A double
+/// has at most 767 significant digits, and Rust's `{:.N e}` is exact.
+fn exact_decimal(x: f64) -> (Vec<u8>, i32) {
+    let s = format!("{x:.767e}");
+    let (mantissa, exp) = s.split_once('e').expect("{:e} writes an exponent");
+    let mut digits: Vec<u8> = mantissa
+        .bytes()
+        .filter(u8::is_ascii_digit)
+        .map(|b| b - b'0')
+        .collect();
+    while digits.last() == Some(&0) {
+        digits.pop();
     }
-    if f.is_infinite() {
-        return if f > 0.0 {
-            "+Inf".to_string()
-        } else {
-            "-Inf".to_string()
-        };
+    if digits.is_empty() {
+        return (digits, 0);
     }
-    // Rust's `{:e}` gives the shortest mantissa + a bare exponent (e.g. "1e0",
-    // "1.5e0", "1e21", "-1.2e-7"); use the exponent to pick the notation.
-    let sci = format!("{f:e}");
-    let epos = sci.find('e').expect("{:e} always emits 'e'");
-    let exp: i32 = sci[epos + 1..].parse().expect("{:e} exponent is an integer");
-    if !(-4..6).contains(&exp) {
-        // Go `%g` scientific form: shortest mantissa + `e` + signed 2-digit exp.
-        let mantissa = &sci[..epos];
-        let sign = if exp < 0 { '-' } else { '+' };
-        format!("{mantissa}e{sign}{:02}", exp.abs())
-    } else {
-        // In this range Go `%g` uses plain decimal, matching Rust's `Display`.
-        f.to_string()
-    }
+    (
+        digits,
+        exp.parse::<i32>().expect("{:e} exponent is an integer") + 1,
+    )
 }
 
-/// %d — decimal integer.
-fn format_d(val: &Value, out: &mut String) -> Result<(), ExecutionError> {
-    match val {
-        Value::Int(n) => out.push_str(&n.to_string()),
-        Value::UInt(n) => out.push_str(&n.to_string()),
-        _ => {
-            return Err(ExecutionError::function_error(
-                "format",
-                format!("%d requires int or uint, got {:?}", val.type_of()),
-            ));
+/// Go's `decimal.Round(nd)`: keeps `nd` digits, rounding half to even, except
+/// that an exact half of the first digit (`nd == 0`) rounds down. Trailing
+/// zeros are dropped. A negative `nd` drops every digit: strconv's `%f` prints
+/// none of them, and the value is below half a unit there.
+fn round_go(digits: &mut Vec<u8>, dp: &mut i32, nd: i64) {
+    let Ok(nd) = usize::try_from(nd) else {
+        digits.clear();
+        *dp = 0;
+        return;
+    };
+    if nd >= digits.len() {
+        return;
+    }
+    let up = if digits[nd] == 5 && nd + 1 == digits.len() {
+        nd > 0 && digits[nd - 1] % 2 == 1
+    } else {
+        digits[nd] >= 5
+    };
+    digits.truncate(nd);
+    if up {
+        match digits.iter().rposition(|&d| d < 9) {
+            Some(i) => {
+                digits[i] += 1;
+                digits.truncate(i + 1);
+            }
+            None => {
+                digits.clear();
+                digits.push(1);
+                *dp += 1;
+            }
         }
     }
-    Ok(())
-}
-
-/// The precision `%f` / `%e` pass to Rust's formatter, 6 when none is given.
-/// Rust's formatter panics past `u16::MAX`, so a larger one is an error; the
-/// apiserver formats it (a documented fail-closed difference).
-fn float_precision(precision: Option<i64>) -> Result<usize, ExecutionError> {
-    match precision {
-        None => Ok(6),
-        Some(p) => u16::try_from(p)
-            .map(usize::from)
-            .map_err(|_| ExecutionError::function_error("format", format!("precision {p} is too large"))),
+    while digits.last() == Some(&0) {
+        digits.pop();
+    }
+    if digits.is_empty() {
+        *dp = 0;
     }
 }
 
-/// %f — fixed-point float.
-fn format_f(val: &Value, precision: usize, out: &mut String) -> Result<(), ExecutionError> {
-    let f = extract_float(val, 'f')?;
-    out.push_str(&format!("{f:.precision$}"));
-    Ok(())
+/// Go's shortest decimal for a finite `x >= 0` (strconv with precision -1): the
+/// fewest digits that parse back to `x`, and of two such, the nearer to `x`,
+/// the even one on a tie (Rust's shortest form breaks that tie the other way:
+/// `1.0000000000000003e+15` where Go writes `…02e+15`).
+fn go_shortest(x: f64) -> (Vec<u8>, i32) {
+    let (exact, dp) = exact_decimal(x);
+    let parses_back = |digits: &[u8], dp: i32| {
+        let s: String = digits.iter().map(|&d| char::from(b'0' + d)).collect();
+        format!("0.{s}e{dp}").parse::<f64>() == Ok(x)
+    };
+    for n in 1..exact.len() {
+        let floor = exact[..n].to_vec();
+        let (mut ceil, mut ceil_dp) = (floor.clone(), dp);
+        round_up_last(&mut ceil, &mut ceil_dp);
+        let pick_ceil = match (parses_back(&floor, dp), parses_back(&ceil, ceil_dp)) {
+            (false, false) => continue,
+            (true, false) => false,
+            (false, true) => true,
+            (true, true) => {
+                // The nearer one; on an exact half, the one with an even last digit.
+                let rest = &exact[n..];
+                match rest[0].cmp(&5) {
+                    std::cmp::Ordering::Greater => true,
+                    std::cmp::Ordering::Less => false,
+                    std::cmp::Ordering::Equal if rest.len() > 1 => true,
+                    std::cmp::Ordering::Equal => floor[n - 1] % 2 == 1,
+                }
+            }
+        };
+        let (mut digits, dp) = if pick_ceil { (ceil, ceil_dp) } else { (floor, dp) };
+        while digits.last() == Some(&0) {
+            digits.pop();
+        }
+        return (digits, dp);
+    }
+    (exact, dp)
 }
 
-/// %e — scientific notation.
-///
-/// cel-go formats `%e` through Go's `fmt`, whose exponent ALWAYS carries a sign
-/// and is zero-padded to at least two digits (e.g. `1.50e+03`). Rust's `{:e}`
-/// omits both (`1.50e3`), so reformat the exponent to match the apiserver.
-fn format_e(val: &Value, precision: usize, out: &mut String) -> Result<(), ExecutionError> {
-    let f = extract_float(val, 'e')?;
-    let rust = format!("{f:.precision$e}");
-    let (mantissa, exp) = rust.split_once('e').unwrap_or((rust.as_str(), "0"));
-    let (sign, digits) = match exp.strip_prefix('-') {
-        Some(d) => ('-', d),
-        None => ('+', exp),
+/// Adds one unit in the last place of `digits`.
+fn round_up_last(digits: &mut Vec<u8>, dp: &mut i32) {
+    match digits.iter().rposition(|&d| d < 9) {
+        Some(i) => {
+            digits[i] += 1;
+            digits.truncate(i + 1);
+        }
+        None => {
+            digits.clear();
+            digits.push(1);
+            *dp += 1;
+        }
+    }
+}
+
+fn push_digit(out: &mut String, d: u8) {
+    out.push(char::from(b'0' + d));
+}
+
+/// strconv's `fmtF`: the integer digits (or 0), then `prec` fraction digits.
+fn fmt_f(neg: bool, digits: &[u8], dp: i32, prec: usize) -> String {
+    let mut out = String::new();
+    if neg {
+        out.push('-');
+    }
+    let at = |j: i64| {
+        usize::try_from(j)
+            .ok()
+            .and_then(|j| digits.get(j))
+            .copied()
+            .unwrap_or(0)
     };
-    out.push_str(mantissa);
-    out.push('e');
-    out.push(sign);
-    if digits.len() < 2 {
+    if dp > 0 {
+        for j in 0..i64::from(dp) {
+            push_digit(&mut out, at(j));
+        }
+    } else {
         out.push('0');
     }
-    out.push_str(digits);
-    Ok(())
-}
-
-/// %b — binary representation for int/uint, or "1"/"0" for bool (matching cel-go).
-fn format_b(val: &Value, out: &mut String) -> Result<(), ExecutionError> {
-    match val {
-        Value::Int(n) => out.push_str(&format!("{n:b}")),
-        Value::UInt(n) => out.push_str(&format!("{n:b}")),
-        Value::Bool(b) => out.push_str(if *b { "1" } else { "0" }),
-        _ => {
-            return Err(ExecutionError::function_error(
-                "format",
-                format!("%b requires int, uint, or bool, got {:?}", val.type_of()),
-            ));
+    if prec > 0 {
+        out.push('.');
+        for i in 0..prec as i64 {
+            push_digit(&mut out, at(i64::from(dp) + i));
         }
     }
-    Ok(())
+    out
 }
 
-/// %o — octal.
-fn format_o(val: &Value, out: &mut String) -> Result<(), ExecutionError> {
-    match val {
-        Value::Int(n) => out.push_str(&format!("{n:o}")),
-        Value::UInt(n) => out.push_str(&format!("{n:o}")),
-        _ => {
-            return Err(ExecutionError::function_error(
-                "format",
-                format!("%o requires int or uint, got {:?}", val.type_of()),
-            ));
+/// Go's `fmt` `%.{prec}f` (a negative zero keeps its sign).
+fn go_fixed(x: f64, prec: usize) -> String {
+    let (mut digits, mut dp) = exact_decimal(x.abs());
+    let nd = i64::from(dp) + prec as i64;
+    round_go(&mut digits, &mut dp, nd);
+    fmt_f(x.is_sign_negative(), &digits, dp, prec)
+}
+
+/// Go's `fmt` `%g`: the shortest digits, in scientific form when the exponent
+/// is below -4 or at least 6 (`1e+06`, `1e-05`), "+Inf", "-Inf" and "NaN".
+fn go_g(x: f64) -> String {
+    if x.is_nan() {
+        return "NaN".to_owned();
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { "+Inf" } else { "-Inf" }.to_owned();
+    }
+    let neg = x.is_sign_negative();
+    let (digits, dp) = go_shortest(x.abs());
+    let exp = dp - 1;
+    if digits.is_empty() || (-4..6).contains(&exp) {
+        let prec = (digits.len() as i64 - i64::from(dp)).max(0) as usize;
+        return fmt_f(neg, &digits, dp, prec);
+    }
+    // strconv's `fmtE` with the shortest digits: d[.ddd]e±XX.
+    let mut out = String::new();
+    if neg {
+        out.push('-');
+    }
+    push_digit(&mut out, digits[0]);
+    if digits.len() > 1 {
+        out.push('.');
+        for &d in &digits[1..] {
+            push_digit(&mut out, d);
         }
     }
-    Ok(())
+    out.push('e');
+    out.push(if exp < 0 { '-' } else { '+' });
+    out.push_str(&format!("{:02}", exp.abs()));
+    out
 }
 
-/// %x / %X — hexadecimal.
-fn format_hex(val: &Value, upper: bool, out: &mut String) -> Result<(), ExecutionError> {
-    match val {
-        Value::Int(n) => {
-            if upper {
-                out.push_str(&format!("{n:X}"));
-            } else {
-                out.push_str(&format!("{n:x}"));
-            }
-        }
-        Value::UInt(n) => {
-            if upper {
-                out.push_str(&format!("{n:X}"));
-            } else {
-                out.push_str(&format!("{n:x}"));
-            }
-        }
-        Value::String(s) => {
-            for byte in s.as_bytes() {
-                if upper {
-                    out.push_str(&format!("{byte:02X}"));
-                } else {
-                    out.push_str(&format!("{byte:02x}"));
-                }
-            }
-        }
-        Value::Bytes(b) => {
-            for byte in b.iter() {
-                if upper {
-                    out.push_str(&format!("{byte:02X}"));
-                } else {
-                    out.push_str(&format!("{byte:02x}"));
-                }
-            }
-        }
-        _ => {
-            return Err(ExecutionError::function_error(
-                "format",
-                format!("%x requires int, uint, string, or bytes, got {:?}", val.type_of()),
-            ));
-        }
-    }
-    Ok(())
-}
+// ---------------------------------------------------------------------------
+// %f / %e: golang.org/x/text's en-US number formatter
+// ---------------------------------------------------------------------------
 
-fn extract_float(val: &Value, verb: char) -> Result<f64, ExecutionError> {
-    match val {
+/// The argument `%f` / `%e` take in cel-go: a double, or one of the strings
+/// "NaN", "Infinity" and "-Infinity" (an int is refused).
+fn float_clause_arg(arg: &Value, clause: &str) -> Result<f64, ExecutionError> {
+    match arg {
         Value::Float(f) => Ok(*f),
-        Value::Int(n) => Ok(*n as f64),
-        Value::UInt(n) => Ok(*n as f64),
-        _ => Err(ExecutionError::function_error(
-            "format",
-            format!("%{verb} requires float, int, or uint, got {:?}", val.type_of()),
-        )),
+        Value::String(s) if s.as_str() == "NaN" => Ok(f64::NAN),
+        Value::String(s) if s.as_str() == "Infinity" => Ok(f64::INFINITY),
+        Value::String(s) if s.as_str() == "-Infinity" => Ok(f64::NEG_INFINITY),
+        other => Err(err(format!(
+            "{clause} clause can only be used on doubles, was given {}",
+            other.type_of()
+        ))),
+    }
+}
+
+/// x/text parses the number in `%.{n}f` / `%{n}e` itself, and gives up on one
+/// past 10,000,009 (it stops before a digit once the value so far exceeds 1e6),
+/// printing this in place of the value.
+const XTEXT_NO_VERB: &str = "%!(NOVERB)";
+
+fn xtext_number_too_large(n: i64) -> bool {
+    n / 10 > 1_000_000
+}
+
+/// `%f`: cel-go hands `%.{prec}f` to x/text's printer, which formats the value
+/// with the en-US decimal pattern at `prec` fraction digits. The fraction
+/// bounds are kept in a `u8` (at least) and an `i16` (at most), so a precision
+/// of 256 shows no forced zeros and one of 32768 or more none of the bound:
+/// `'%.65536f'.format([1.5])` is `2`.
+fn format_fixed(arg: &Value, prec: i64) -> Result<String, ExecutionError> {
+    let x = float_clause_arg(arg, "fixed-point")?;
+    if xtext_number_too_large(prec) {
+        return Ok(XTEXT_NO_VERB.to_owned());
+    }
+    if x.is_nan() {
+        return Ok("NaN".to_owned());
+    }
+    // A negative zero is not negative here (x/text checks `x < 0`).
+    let mut out = String::new();
+    if x < 0.0 {
+        out.push('-');
+    }
+    if x.is_infinite() {
+        out.push('∞');
+        return Ok(out);
+    }
+    let min_frac = i64::from(prec as u8);
+    let max_frac = i64::from(prec as i16);
+    // Rounded by strconv (`'f'` at `max_frac`), or its shortest digits when
+    // there is no bound; x/text's own rounding then has nothing left to do.
+    let (digits, dp) = if max_frac >= 0 {
+        let (mut digits, mut dp) = exact_decimal(x.abs());
+        let nd = i64::from(dp) + max_frac;
+        round_go(&mut digits, &mut dp, nd);
+        (digits, dp)
+    } else {
+        go_shortest(x.abs())
+    };
+    let exp = if digits.is_empty() { 0 } else { i64::from(dp) };
+    let end = if digits.is_empty() {
+        min_frac
+    } else {
+        (digits.len() as i64).max(exp + min_frac)
+    };
+    // `appendDecimal`: at least one integer digit, groups of three.
+    let num_frac = end - exp;
+    let num_int = exp.max(0);
+    let split = usize::try_from(num_int).unwrap_or(usize::MAX).min(digits.len());
+    let (int_digits, frac_digits) = digits.split_at(split);
+    if num_int == 0 {
+        out.push('0');
+    }
+    for i in 0..num_int {
+        let d = usize::try_from(i)
+            .ok()
+            .and_then(|i| int_digits.get(i))
+            .copied()
+            .unwrap_or(0);
+        push_digit(&mut out, d);
+        if needs_group_separator(num_int - i) {
+            out.push(',');
+        }
+    }
+    if num_frac > 0 {
+        out.push('.');
+    }
+    let mut written = 0;
+    for _ in 0..(-exp).max(0) {
+        out.push('0');
+        written += 1;
+    }
+    for &d in frac_digits {
+        push_digit(&mut out, d);
+        written += 1;
+    }
+    while written < num_frac {
+        out.push('0');
+        written += 1;
+    }
+    Ok(out)
+}
+
+/// x/text's `needsSep` for the en-US grouping of three: a separator after the
+/// integer digit `pos` places before the decimal point.
+fn needs_group_separator(pos: i64) -> bool {
+    let p = pos - 1;
+    p > 0 && p % 3 == 0
+}
+
+/// `%e`: cel-go hands x/text `%{prec}e` (not `%.{prec}e`), so the precision is
+/// a field width, padded with spaces on the left and kept in a `u16`; `%0e`
+/// reads the 0 as a flag. The en-US scientific pattern shows seven significant
+/// digits whatever the precision, and a superscript exponent of two digits at
+/// least: `'%.2e'.format([1500.0])` is `1.500000×10⁰³`.
+fn format_scientific(arg: &Value, prec: i64) -> Result<String, ExecutionError> {
+    let x = float_clause_arg(arg, "scientific")?;
+    if xtext_number_too_large(prec) {
+        return Ok(XTEXT_NO_VERB.to_owned());
+    }
+    let mut out = String::new();
+    if x.is_nan() {
+        out.push_str("NaN");
+    } else {
+        if x < 0.0 {
+            out.push('-');
+        }
+        if x.is_infinite() {
+            out.push('∞');
+        } else {
+            // strconv `'g'` with 7 digits, then 1 integer and 6 fraction digits.
+            let (mut digits, mut dp) = exact_decimal(x.abs());
+            round_go(&mut digits, &mut dp, 7);
+            if digits.is_empty() {
+                digits.push(0);
+                dp = 1;
+            }
+            push_digit(&mut out, digits[0]);
+            out.push('.');
+            for i in 1..7 {
+                push_digit(&mut out, digits.get(i).copied().unwrap_or(0));
+            }
+            out.push_str("×10");
+            let exp = dp - 1;
+            if exp < 0 {
+                out.push('⁻');
+            }
+            const SUPERSCRIPT: [char; 10] = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+            for d in format!("{:02}", exp.unsigned_abs()).bytes() {
+                out.push(SUPERSCRIPT[usize::from(d - b'0')]);
+            }
+        }
+    }
+    let width = usize::from(prec as u16);
+    let len = out.chars().count();
+    if len < width {
+        out.insert_str(0, &" ".repeat(width - len));
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// %d / %b / %o / %x / %X: Go's fmt
+// ---------------------------------------------------------------------------
+
+/// A negative int as Go's `fmt` writes it in any base: a sign, then the
+/// magnitude (`'%x'.format([-255])` is `-ff`, not two's complement).
+fn signed(n: i64, magnitude: impl Fn(u64) -> String) -> String {
+    if n < 0 {
+        format!("-{}", magnitude(n.unsigned_abs()))
+    } else {
+        magnitude(n.unsigned_abs())
+    }
+}
+
+fn format_decimal(arg: &Value) -> Result<String, ExecutionError> {
+    match arg {
+        Value::Int(n) => Ok(n.to_string()),
+        Value::UInt(n) => Ok(n.to_string()),
+        other => Err(err(format!(
+            "decimal clause can only be used on integers, was given {}",
+            other.type_of()
+        ))),
+    }
+}
+
+fn format_binary(arg: &Value) -> Result<String, ExecutionError> {
+    match arg {
+        Value::Int(n) => Ok(signed(*n, |m| format!("{m:b}"))),
+        Value::UInt(n) => Ok(format!("{n:b}")),
+        Value::Bool(b) => Ok(if *b { "1" } else { "0" }.to_owned()),
+        other => Err(err(format!(
+            "only integers and bools can be formatted as binary, was given {}",
+            other.type_of()
+        ))),
+    }
+}
+
+fn format_octal(arg: &Value) -> Result<String, ExecutionError> {
+    match arg {
+        Value::Int(n) => Ok(signed(*n, |m| format!("{m:o}"))),
+        Value::UInt(n) => Ok(format!("{n:o}")),
+        other => Err(err(format!(
+            "octal clause can only be used on integers, was given {}",
+            other.type_of()
+        ))),
+    }
+}
+
+/// `%x` / `%X`: an int or uint in hex, a string's UTF-8 bytes or bytes as two
+/// hex digits each.
+fn format_hex(arg: &Value, upper: bool) -> Result<String, ExecutionError> {
+    let hex = |m: u64| if upper { format!("{m:X}") } else { format!("{m:x}") };
+    let bytes_hex = |b: &[u8]| -> String {
+        b.iter()
+            .map(|byte| {
+                if upper {
+                    format!("{byte:02X}")
+                } else {
+                    format!("{byte:02x}")
+                }
+            })
+            .collect()
+    };
+    match arg {
+        Value::Int(n) => Ok(signed(*n, hex)),
+        Value::UInt(n) => Ok(hex(*n)),
+        Value::String(s) => Ok(bytes_hex(s.as_bytes())),
+        Value::Bytes(b) => Ok(bytes_hex(b)),
+        other => Err(err(format!(
+            "only integers, byte buffers, and strings can be formatted as hex, was given {}",
+            other.type_of()
+        ))),
     }
 }
 
@@ -545,17 +838,101 @@ mod tests {
     }
 
     #[test]
-    fn test_format_precision_past_u16_is_an_error() {
-        // Rust's `{:.N}` panics ("Formatting argument out of range") once N
-        // exceeds u16::MAX; found by the fuzz sweep.
-        assert_eq!(eval_str("'%.65535f'.format([1.5])").len(), 65537);
-        assert!(crate::functions::eval("'%.65536f'.format([1.5])").is_err());
-        assert!(crate::functions::eval("'%.4294967296e'.format([1.5])").is_err());
+    fn test_format_f_is_the_xtext_en_us_decimal() {
+        // Expected strings are k8s.io/apiserver v0.36.1 `MustBaseEnvSet(1.36)`
+        // output (cel-go v0.26, golang.org/x/text v0.33.0, go1.26.2).
+        let cases: &[(&str, &str)] = &[
+            ("'%.2f'.format([1500.0])", "1,500.00"),
+            ("'%f'.format([1234567.891])", "1,234,567.891000"),
+            ("'%.0f'.format([2.5])", "2"),
+            ("'%.2f'.format([0.125])", "0.12"),
+            ("'%.2f'.format([-0.001])", "-0.00"),
+            ("'%f'.format([-0.0])", "0.000000"),
+            ("'%f'.format(['NaN'])", "NaN"),
+            ("'%f'.format(['-Infinity'])", "-∞"),
+            ("'%f'.format([double('Infinity')])", "∞"),
+            // The precision is kept in an i16 (at most) and a u8 (at least).
+            ("'%.65536f'.format([1.5])", "2"),
+            ("'%.10000010f'.format([1.5])", "%!(NOVERB)"),
+        ];
+        for (expr, want) in cases {
+            assert_eq!(eval_str(expr), *want, "{expr}");
+        }
+        assert_eq!(eval_str("'%.40000f'.format([1.5])").len(), 66);
+        // An int is not a double.
+        eval_err("'%f'.format([1])");
+        eval_err("'%.1f'.format([dyn(5)])");
+    }
+
+    #[test]
+    fn test_format_e_is_the_xtext_en_us_scientific() {
+        // Same source as above. The precision is a field width; seven
+        // significant digits always.
+        let cases: &[(&str, &str)] = &[
+            ("'%e'.format([1500.0])", "1.500000×10⁰³"),
+            ("'%.2e'.format([1500.0])", "1.500000×10⁰³"),
+            ("'%.2e'.format([0.0000015])", "1.500000×10⁻⁰⁶"),
+            ("'%.20e'.format([-1500.0])", "      -1.500000×10⁰³"),
+            ("'%e'.format([double('NaN')])", "   NaN"),
+            ("'%.0e'.format([double('NaN')])", "NaN"),
+            ("'%e'.format(['Infinity'])", "     ∞"),
+            ("'%e'.format([1234567.5])", "1.234568×10⁰⁶"),
+            ("'%.10000010e'.format([1.5])", "%!(NOVERB)"),
+        ];
+        for (expr, want) in cases {
+            assert_eq!(eval_str(expr), *want, "{expr}");
+        }
+        // `{:.65535e}` panicked inside Rust's formatter (precision + 1 wraps).
+        assert_eq!(eval_str("'%.65535e'.format([1.5])").chars().count(), 65535);
+    }
+
+    #[test]
+    fn test_format_precision_parses_as_int64() {
         // Verbs that ignore the precision take any int64 one, as in cel-go.
         assert_eq!(eval_str("'%.65536s'.format(['hello'])"), "hello");
         assert_eq!(eval_str("'%.9223372036854775807d'.format([12])"), "12");
         // Past int64 it is an error for every verb (Go strconv.Atoi).
-        assert!(crate::functions::eval("'%.9223372036854775808s'.format(['a'])").is_err());
+        eval_err("'%.9223372036854775808s'.format(['a'])");
+        eval_err("'%.f'.format([1.0])");
+        eval_err("'%.5'.format([1.0])");
+    }
+
+    #[test]
+    fn test_format_negative_ints_are_sign_and_magnitude() {
+        assert_eq!(eval_str("'%b'.format([-5])"), "-101");
+        assert_eq!(eval_str("'%o'.format([-8])"), "-10");
+        assert_eq!(eval_str("'%x'.format([-255])"), "-ff");
+        assert_eq!(eval_str("'%X'.format([-255])"), "-FF");
+        assert_eq!(
+            eval_str("'%x'.format([-9223372036854775808])"),
+            "-8000000000000000"
+        );
+    }
+
+    #[test]
+    fn test_format_s_residuals_follow_cel_go() {
+        // Go's shortest digits break a tie towards even.
+        assert_eq!(
+            eval_str("'%s'.format([1000000000000000.25])"),
+            "1.0000000000000002e+15"
+        );
+        // Go 1.26.2's strconv.IsPrint (Unicode 15.0.0) escapes U+0378 and
+        // U+FFFF, unassigned, and U+1C89 / U+1FAE9, assigned only later.
+        assert_eq!(
+            eval_str("'%s'.format([['\\u0378', '\\uffff', '\\u1c89', '\\U0001fae9']])"),
+            "[\"\\u0378\", \"\\uffff\", \"\\u1c89\", \"\\U0001fae9\"]"
+        );
+        // A type stays a type: bare in a list or map, its name at top level.
+        assert_eq!(
+            eval_str("'%s'.format([[type(1), type('a'), type(null)]])"),
+            "[int, string, null_type]"
+        );
+        assert_eq!(eval_str("'%s'.format([{'k': type(1u)}])"), "{\"k\":uint}");
+        assert_eq!(eval_str("'%s'.format([type(1)])"), "int");
+        assert_eq!(
+            eval_str("'%s'.format([duration('1.000000001s')])"),
+            "1.000000001s"
+        );
     }
 
     #[test]

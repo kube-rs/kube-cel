@@ -217,9 +217,22 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     a top-level timestamp is RFC 3339 and a duration its seconds (`5400s`).
     Bytes that are not UTF-8, and values with no `%s` form (an IP, a quantity),
     are errors.
-  - Not yet: `%f`, `%e`, `%b`, `%o`, `%x`, `%X` and a few `%s` cases still
-    print differently from the apiserver; this is a documented fail-open,
-    to be fixed before 0.9.0.
+  - The other verbs too: `format()` is a port of cel-go v0.26's formatter
+    (`ext.Strings` version 2). `%f` and `%e` print through golang.org/x/text's
+    en-US number formatter, as the apiserver's do: `%f` groups thousands
+    (`'%.2f'.format([1500.0])` is `1,500.00`), `%e` always shows seven
+    significant digits with a superscript exponent and reads the precision
+    as a field width (`'%.2e'.format([1500.0])` is `1.500000×10⁰³`), both
+    write NaN and the infinities as `NaN`, `∞`, `-∞`, take the strings
+    `"NaN"`, `"Infinity"`, `"-Infinity"`, refuse an int, and keep a large
+    precision the way x/text does (`'%.65536f'.format([1.5])` is `2`). A
+    negative `%b` / `%o` / `%x` / `%X` is a sign and the magnitude (`-101`,
+    not two's complement). `%s` takes Go's shortest digits, which break a
+    rounding tie towards even (`1.0000000000000002e+15`), escapes in a list
+    or map every code point go1.26.2's `strconv.IsPrint` does not print
+    (Unicode 15.0.0, so `["\u0378"]`), and writes a type value bare
+    (`[int]`). The output differed before, a documented **fail-open**, now
+    closed.
 
 ### Added
 - `new_env() -> cel::Env`: kube-cel's environment, the apiserver's base CEL
@@ -275,10 +288,10 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
 - `format.datetime().validate(..)` on a time with a multi-byte character in
   the seconds (`'2024-01-15T12:30:0é:00Z'`) reports an invalid date-time
   instead of panicking.
-- `format()`'s `%f` / `%e` with a precision past 65535 (`'%.65536f'`) are an
-  evaluation error instead of a panic in Rust's formatter (the apiserver
-  formats the value: a documented fail-closed limit). A precision past the
-  int64 range is an error for every verb, as in cel-go.
+- `format()` with a precision past 65535 (`'%.65536f'`, `'%.65535e'`) no
+  longer panics in Rust's formatter (see "Strings and `format()`" above for
+  what it prints). A precision past the int64 range is an error for every
+  verb, as in cel-go.
 - A quantity whose exponent is near the `i32` bounds (`0.1e-2147483647`,
   `10e2147483647`) keeps its exact value: the scale arithmetic overflowed (a
   panic in debug builds, a wrapped scale in release).

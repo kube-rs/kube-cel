@@ -367,10 +367,7 @@ apiserver rejects at registration for a type, arity or call-shape error can
 still pass client-side. And `cel` has no cost model yet (on its roadmap,
 [cel-rust#230](https://github.com/cel-rust/cel-rust/discussions/230)), so a rule
 the apiserver rejects for its estimated cost at registration, or an object it
-rejects for a rule's runtime cost, can still pass client-side. Besides those,
-part of `format()`'s output (`%f`, `%e`, `%b`, `%o`, `%x`, `%X`, and `%s` in a
-few cases) differs from the cel-go v0.26 the apiserver uses, a gap to be fixed
-before 0.9.0 ([#14](https://github.com/kube-rs/kube-cel/issues/14)). These
+rejects for a rule's runtime cost, can still pass client-side. These
 divergences are pinned by
 `tests/apiserver_divergence.rs`.
 
@@ -385,12 +382,10 @@ divergences are pinned by
 | `lists.range(-1)`; `sort()` on a list holding a NaN (`[double('NaN')].sort()`) | evaluates: `lists.range(-1)` is `[]`, and the list sorts | `EvaluationError` | fail-closed |
 | `<IP>.string()`, `<CIDR>.string()` | rejects the CRD at registration (no matching overload; only `string(<IP>)`) | `UnsupportedReference` | fail-closed |
 | A rule reading `oldSelf` in the items of a list that is not `x-kubernetes-list-type: map`, or `optionalOldSelf` on a rule that does not read `oldSelf` | rejects the CRD at registration | `CompilationFailure` | fail-closed |
-| `format()` `%f` / `%e` with a precision past 65535 (`'%.65536f'.format([1.5])`) | formats the value (its locale printer keeps only part of such a precision) | `EvaluationError` (precision too large) | fail-closed |
 | Quantity `add` / `sub` past `i128` (`quantity('2e38').add(quantity('1'))`) | exact (`inf.Dec`), so `….isGreaterThan(quantity('2e38'))` holds | `EvaluationError` (quantity overflow) | fail-closed |
 | An object reaching more than 64 levels of schema nesting | no nesting limit; evaluates rules at any depth | `SchemaTooDeep` error | fail-closed |
 | Rule whose `messageExpression` does not compile (a syntax error, or a call refused above) | rejects the CRD at registration | `CompilationFailure` (the rule is rejected, not just its message) | fail-closed |
 | Functions the apiserver declares that kube-cel does not implement: `optional.unwrap(..)`, `<list>.unwrapOpt()`, the authz library (`authorizer.*` in a VAP), or a function whose kube-cel feature is disabled | evaluates (the authz library against the cluster) | compiles, and passes where evaluation does not reach the call; `UnsupportedReference` where it does | fail-closed (the authz library is out of scope) |
-| `format()` output: `%f`, `%e`, `%b`, `%o`, `%x`, `%X`, and `%s` in a few cases | prints `%f` / `%e` through a locale printer (`'%.2f'.format([1500.0])` is `1,500.00`, `'%.2e'.format([1500.0])` is `1.500000×10⁰³`, the precision ignored), a negative `%b` / `%o` / `%x` as sign and magnitude (`'%b'.format([-5])` is `-101`), and refuses `%f` / `%e` on a non-double; `%s` breaks a `%g` rounding tie Go's way (`1.0000000000000002e+15`), escapes unassigned code points (`["\u0378"]`) and writes a nested type as `[int]` | `1500.00`, `1.50e+03`, two's complement (`1111…1011`), `%f` on an int, `1.0000000000000003e+15`, the raw code point, `["int"]` | **fail-open** (to be fixed before 0.9.0) |
 | No type checker: type errors (`[1, 2] == [1.0, 2.0]`, `[1, 2.0].isSorted()`), arity errors (`'a'.lowerAscii(42)`), call-shape errors (`family(ip(..))`, and the `reverse()` / `.string()` rows above), a non-string `messageExpression`, and an undeclared identifier (such as `authorizer` in a CRD rule), where evaluation does not reach the error | rejects the CRD at registration (type-checks every expression) | passes; `cel` has no type checker yet ([cel-rust#350](https://github.com/cel-rust/cel-rust/issues/350)) | **fail-open** (exception class) |
 | No cost model: a rule whose estimated cost exceeds the budget (`self.l.all(x, self.l.exists(y, x == y))` on a list with no `maxItems`), or whose evaluation exceeds the per-expression cost limit (`lists.range(1000000).size() > 0`, `lists.range(600000).map(x, x).size() > 0`) | rejects the CRD at registration ("estimated rule cost exceeds budget"), or the object at evaluation ("actual cost limit exceeded") | passes; `cel` has no cost model yet ([cel-rust#230](https://github.com/cel-rust/cel-rust/discussions/230)) | **fail-open** (exception class) |
 

@@ -22,6 +22,7 @@
 #[cfg(feature = "semver_funcs")] mod semver_funcs;
 
 #[cfg(feature = "format")] mod format;
+#[cfg(feature = "format")] mod go_isprint;
 
 #[cfg(feature = "quantity")] mod quantity;
 

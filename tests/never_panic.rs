@@ -318,7 +318,7 @@ proptest! {
     #![proptest_config(config())]
 
     #[test]
-    fn format_never_panics(f in format_str(), args in prop::collection::vec(format_arg(), 0..4)) {
+    fn format_never_panics(f in format_str(), args in prop::collection::vec(format_arg(), 0..10)) {
         thread_local! {
             static E: Exprs = Exprs::new(&[
                 "f.format(args)",
