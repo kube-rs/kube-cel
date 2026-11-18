@@ -159,17 +159,12 @@ fn convert_number(n: &serde_json::Number, format: &SchemaFormat) -> Value {
 #[inline]
 fn convert_string_with_format(s: &str, format: &SchemaFormat) -> Value {
     match format {
-        SchemaFormat::DateTime => {
-            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
-                return Value::Timestamp(dt);
-            }
-            Value::String(Arc::new(s.to_string()))
-        }
-        // `strfmt.RFC3339FullDate` is Go's fixed-width `2006-01-02`, so a
-        // one-digit month/day ("2026-7-2") is a parse error there while chrono's
-        // `%m`/`%d` would accept it — hence the exact-length guard.
-        // An invalid date stays a string here; the validator reports it as an
-        // error at its field (see `binding_error`), as the apiserver does.
+        // A date-time or date that does not bind stays a string here; the
+        // validator reports it as an error at its field (see `binding_error`).
+        SchemaFormat::DateTime => match crate::functions::parse_date_time(s) {
+            Ok(ts) => Value::Timestamp(ts),
+            Err(_) => Value::String(Arc::new(s.to_string())),
+        },
         SchemaFormat::Date => match parse_date(s) {
             Some(ts) => Value::Timestamp(ts),
             None => Value::String(Arc::new(s.to_string())),
@@ -192,27 +187,45 @@ fn convert_string_with_format(s: &str, format: &SchemaFormat) -> Value {
 }
 
 /// A `format: date` string as the apiserver binds it:
-/// `time.Parse(strfmt.RFC3339FullDate, s)`, Go's fixed-width `2006-01-02`, so
-/// a one-digit month or day ("2026-7-2") is an error there while chrono's
-/// `%m`/`%d` would accept it, hence the exact-length guard.
+/// `time.Parse(strfmt.RFC3339FullDate, s)`, Go's `2006-01-02` at fixed width
+/// with ASCII digits only. chrono's `%Y-%m-%d` reads more (`+024-01-01`,
+/// `2026- 1-01`), so the shape is checked first.
 pub(crate) fn parse_date(s: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
-    if s.len() != 10 {
-        return None;
-    }
-    let date = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()?;
+    let (year, month, day) = crate::functions::date_parts(s)?;
+    let date = chrono::NaiveDate::from_ymd_opt(i32::try_from(year).ok()?, month, day)?;
     Some(date.and_hms_opt(0, 0, 0)?.and_utc().fixed_offset())
 }
 
-/// Why the apiserver cannot bind `value` under `format`, if it cannot: its
-/// binding returns an error, and its OpenAPI format check refuses the object
-/// whether or not a rule reads the field. Only formats whose parser here
-/// matches the apiserver's exactly (`date`, `duration`) are checked, so this
-/// never refuses a value the apiserver accepts.
+/// Why `value` under `format` refuses the object, if it does.
+///
+/// For `date` and `duration` the apiserver's OpenAPI format check refuses the
+/// object whether or not a rule reads the field, and kube-cel's parsers match
+/// the apiserver's exactly, so this never refuses a value the apiserver
+/// accepts. For `date-time` the check is `strfmt.IsDateTime` and the binding
+/// `strfmt.ParseDateTime`, which differ: a value the check refuses is refused
+/// here as there, and one the check takes and the binding refuses (`t` / `z` in
+/// lowercase, an offset past `+24:60`, `2024-01-15T10:30:00ZtXYZ`) is refused
+/// too, where the apiserver binds an error that only fails a rule reading the
+/// field. kube-cel cannot bind such an error (`==` on it would answer), so
+/// that, and an offset of 24 hours or more that `chrono` cannot hold, is
+/// fail-closed (README "apiserver divergence").
 pub(crate) fn binding_error(value: &serde_json::Value, format: &SchemaFormat) -> Option<String> {
     let s = value.as_str()?;
     match format {
         SchemaFormat::Date if parse_date(s).is_none() => Some(format!("Invalid date formatted string {s}")),
         SchemaFormat::Duration if parse_schema_duration(s).is_none() => Some(format!("Invalid duration {s}")),
+        SchemaFormat::DateTime => match crate::functions::parse_date_time(s) {
+            _ if !crate::functions::is_date_time(s) => {
+                Some(format!("Invalid date-time formatted string {s}"))
+            }
+            Ok(_) => None,
+            Err(crate::functions::DateTimeRefusal::Unparsed) => {
+                Some(format!("Invalid date-time formatted string {s}"))
+            }
+            Err(crate::functions::DateTimeRefusal::OffsetOutOfRange) => Some(format!(
+                "date-time {s} has a zone offset of 24 hours or more, which kube-cel does not support"
+            )),
+        },
         _ => None,
     }
 }
@@ -599,11 +612,80 @@ mod tests {
         let format = SchemaFormat::from_schema(&schema);
         // Go's fixed-width layout rejects a one-digit month, and Go's calendar
         // a day out of range; so must we.
-        for s in ["2024-3-05", "2024-02-30", "not-a-date", "2024-03-05T00:00:00Z"] {
+        // Nor does it take a sign, a space or a short field that chrono's
+        // `%Y-%m-%d` reads (all refused by v1.36.1).
+        for s in [
+            "2024-3-05",
+            "2024-02-30",
+            "not-a-date",
+            "2024-03-05T00:00:00Z",
+            "+024-01-01",
+            "+2026-1-01",
+            "2026- 1-01",
+            "２０２４-03-05",
+        ] {
             assert!(parse_date(s).is_none(), "{s} should not parse as a date");
             assert!(binding_error(&json!(s), &format).is_some(), "{s}");
         }
         assert!(binding_error(&json!("2024-03-05"), &format).is_none());
+        // Go takes year 0000 (a leap year), as does the apiserver.
+        assert_eq!(
+            parse_date("0000-02-29").map(|t| t.to_rfc3339()),
+            Some("0000-02-29T00:00:00+00:00".into())
+        );
+    }
+
+    #[test]
+    fn date_time_binds_as_strfmt_parse_date_time() {
+        let format = SchemaFormat::DateTime;
+        let bound = |s: &str| match convert_string_with_format(s, &format) {
+            Value::Timestamp(t) => Some(t.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)),
+            _ => None,
+        };
+        // Go's RFC 3339 parse: a `,` fraction (nine digits kept), the offset kept.
+        assert_eq!(
+            bound("2024-01-15T10:30:00,5Z").as_deref(),
+            Some("2024-01-15T10:30:00.500+00:00")
+        );
+        assert_eq!(
+            bound("2024-01-15T10:30:00.123456789123Z").as_deref(),
+            Some("2024-01-15T10:30:00.123456789+00:00")
+        );
+        assert_eq!(
+            bound("2024-01-15T10:30:00+05:30").as_deref(),
+            Some("2024-01-15T10:30:00+05:30")
+        );
+        // No zone is UTC (ISO8601LocalTime), but strfmt.IsDateTime refuses it.
+        assert_eq!(
+            bound("2024-01-15T10:30:00").as_deref(),
+            Some("2024-01-15T10:30:00+00:00")
+        );
+        // What chrono's RFC 3339 took and Go does not: lowercase, a space, a
+        // leap second.
+        for s in [
+            "2024-01-15t10:30:00z",
+            "2024-01-15 10:30:00Z",
+            "2024-12-31T23:59:60Z",
+        ] {
+            assert_eq!(bound(s), None, "{s}");
+        }
+        for (s, refused) in [
+            ("2024-01-15T10:30:00Z", false),
+            ("2024-01-15T10:30:00,5Z", false),
+            // strfmt.IsDateTime refuses: the object is invalid (v1.36.1).
+            ("2024-01-15T10:30:00", true),
+            ("", true),
+            ("2024-01-15T1:30:00Z", true),
+            ("2024-12-31T23:59:60Z", true),
+            // IsDateTime takes, ParseDateTime refuses: fail-closed here.
+            ("2024-01-15t10:30:00z", true),
+            ("2024-01-15T10:30:00+99:99", true),
+            ("2024-01-15T10:30:00ZtXYZ", true),
+            // Both take it; chrono cannot hold the offset: fail-closed.
+            ("2024-01-15T10:30:00+24:00", true),
+        ] {
+            assert_eq!(binding_error(&json!(s), &format).is_some(), refused, "{s:?}");
+        }
     }
 
     #[test]

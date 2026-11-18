@@ -1636,7 +1636,7 @@ fn bind_go(go: &Go, shape: Option<&Arc<Shape>>, strict: bool) -> Result<Box<dyn 
 fn strict_string(s: &str, format: &SchemaFormat) -> Option<Value> {
     use base64::Engine;
     Some(match format {
-        SchemaFormat::DateTime => Value::Timestamp(chrono::DateTime::parse_from_rfc3339(s).ok()?),
+        SchemaFormat::DateTime => Value::Timestamp(crate::functions::parse_date_time(s).ok()?),
         SchemaFormat::Date => Value::Timestamp(crate::validation::values::parse_date(s)?),
         SchemaFormat::Duration => Value::Duration(crate::validation::values::parse_schema_duration(s)?),
         SchemaFormat::Bytes => Value::Bytes(Arc::new(

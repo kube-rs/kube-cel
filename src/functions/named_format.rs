@@ -16,7 +16,10 @@ use cel::{
 };
 use std::{fmt, sync::Arc};
 
-use crate::functions::Registrar;
+use crate::functions::{
+    Registrar,
+    strfmt::{is_date, is_date_time},
+};
 
 // ---------------------------------------------------------------------------
 // Format kind enum
@@ -479,14 +482,6 @@ fn is_std_base64(s: &str) -> bool {
 
 // -- Date --
 
-/// A non-empty run of ASCII digits. Go's `time.Parse` (and strfmt's RFC3339
-/// regex `[0-9]{2}`) accept only digits in numeric fields, but Rust's
-/// `parse::<u32>` also accepts a leading `+` (e.g. `"+024"` → `24`); this guard
-/// closes that gap so date/time components match the apiserver.
-fn all_ascii_digits(s: &str) -> bool {
-    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
-}
-
 /// kube-openapi's `strfmt.IsDate`, Go's `time.Parse("2006-01-02", s)`, with the
 /// apiserver's message.
 fn validate_date(s: &str) -> Vec<String> {
@@ -495,45 +490,6 @@ fn validate_date(s: &str) -> Vec<String> {
     } else {
         vec!["invalid date".to_string()]
     }
-}
-
-fn is_date(s: &str) -> bool {
-    // YYYY-MM-DD, digits only, and a day that exists in that month.
-    let bytes = s.as_bytes();
-    if s.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
-        return false;
-    }
-    let (year_str, month_str, day_str) = (&s[0..4], &s[5..7], &s[8..10]);
-    if !all_ascii_digits(year_str) || !all_ascii_digits(month_str) || !all_ascii_digits(day_str) {
-        return false;
-    }
-    let (Ok(year), Ok(month), Ok(day)) = (
-        year_str.parse::<u32>(),
-        month_str.parse::<u32>(),
-        day_str.parse::<u32>(),
-    ) else {
-        return false;
-    };
-    (1..=12).contains(&month) && (1..=days_in_month(year, month)).contains(&day)
-}
-
-fn days_in_month(year: u32, month: u32) -> u32 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 => {
-            if is_leap_year(year) {
-                29
-            } else {
-                28
-            }
-        }
-        _ => 0,
-    }
-}
-
-fn is_leap_year(year: u32) -> bool {
-    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 // -- DateTime --
@@ -550,68 +506,6 @@ fn validate_datetime(s: &str) -> Vec<String> {
         Vec::new()
     } else {
         vec!["invalid datetime".to_string()]
-    }
-}
-
-fn is_date_time(s: &str) -> bool {
-    // Lowercasing only matters for `T` and `Z`: no other character lowercases
-    // to `t`, `z`, a digit, `:`, `+`, `-` or a newline, and Go's simple case
-    // mapping keeps one character per character.
-    let mut pieces = s.split(['T', 't']);
-    let date = pieces.next().unwrap_or_default();
-    let Some(time) = pieces.next() else {
-        return false;
-    };
-    is_date(date) && is_strfmt_time(time)
-}
-
-/// The time piece of [`is_date_time`].
-fn is_strfmt_time(t: &str) -> bool {
-    let b = t.as_bytes();
-    let two_digits = |i: usize| b.get(i..i + 2).is_some_and(|d| d.iter().all(u8::is_ascii_digit));
-    if !(two_digits(0)
-        && b.get(2) == Some(&b':')
-        && two_digits(3)
-        && b.get(5) == Some(&b':')
-        && two_digits(6))
-    {
-        return false;
-    }
-    // Two ASCII digits compare as strings the way they do as numbers.
-    if &t[0..2] > "23" || &t[3..5] > "59" || &t[6..8] > "59" {
-        return false;
-    }
-    let rest = &t[8..];
-    // The zone ends the string: `z` (or `Z`), else `[+-]dd:dd`.
-    let fraction = match rest.strip_suffix(['z', 'Z']) {
-        Some(fraction) => fraction,
-        None => {
-            let Some(at) = rest.len().checked_sub(6) else {
-                return false;
-            };
-            let zone = &rest.as_bytes()[at..];
-            let offset = matches!(zone[0], b'+' | b'-')
-                && zone[1].is_ascii_digit()
-                && zone[2].is_ascii_digit()
-                && zone[3] == b':'
-                && zone[4].is_ascii_digit()
-                && zone[5].is_ascii_digit();
-            if !offset {
-                return false;
-            }
-            // The zone is ASCII, so `at` is a character boundary.
-            &rest[..at]
-        }
-    };
-    // `(.[0-9]+)?`: nothing, or any character but a newline and then digits.
-    let mut chars = fraction.chars();
-    match chars.next() {
-        None => true,
-        Some('\n') => false,
-        Some(_) => {
-            let digits = chars.as_str();
-            !digits.is_empty() && digits.bytes().all(|d| d.is_ascii_digit())
-        }
     }
 }
 

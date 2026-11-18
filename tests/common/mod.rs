@@ -945,6 +945,146 @@ pub fn cases() -> Vec<ParityCase> {
             expect: Expect::Reject,
             note: "invalid date no rule reads is still refused → REJECT",
         },
+        // Go's `2006-01-02` takes ASCII digits at fixed width only; chrono's
+        // `%Y-%m-%d` also read a sign, a space and a short field, so these
+        // bound as timestamps and passed (fail-open).
+        ParityCase {
+            kind: "PdateSigned",
+            plural: "pdatesigneds",
+            schema: json!({
+                "type": "object",
+                "properties": { "v": { "type": "string", "format": "date" } },
+                "x-kubernetes-validations": [{ "rule": "self.v.getFullYear() >= -100", "message": "v" }]
+            }),
+            object: json!({"v": "+024-01-01"}),
+            expect: Expect::Reject,
+            note: "a signed year is not a date → REJECT",
+        },
+        ParityCase {
+            kind: "PdateShortMonth",
+            plural: "pdateshortmonths",
+            schema: json!({
+                "type": "object",
+                "properties": { "v": { "type": "string", "format": "date" } },
+                "x-kubernetes-validations": [{ "rule": "true", "message": "v" }]
+            }),
+            object: json!({"v": "+2026-1-01"}),
+            expect: Expect::Reject,
+            note: "a short month is not a date → REJECT",
+        },
+        ParityCase {
+            kind: "PdateSpaceMonth",
+            plural: "pdatespacemonths",
+            schema: json!({
+                "type": "object",
+                "properties": { "v": { "type": "string", "format": "date" } },
+                "x-kubernetes-validations": [{ "rule": "true", "message": "v" }]
+            }),
+            object: json!({"v": "2026- 1-01"}),
+            expect: Expect::Reject,
+            note: "a space in the month is not a date → REJECT",
+        },
+        ParityCase {
+            kind: "PdateYearZero",
+            plural: "pdateyearzeros",
+            schema: json!({
+                "type": "object",
+                "properties": { "v": { "type": "string", "format": "date" } },
+                "x-kubernetes-validations": [{ "rule": "self.v.getFullYear() == 0", "message": "v" }]
+            }),
+            object: json!({"v": "0000-02-29"}),
+            expect: Expect::Accept,
+            note: "year 0000 is a date (a leap year) → ACCEPT",
+        },
+        // `format: date-time` binds with strfmt.ParseDateTime (Go's RFC 3339
+        // parse, a zone-less ISO 8601 layout), behind the OpenAPI check
+        // strfmt.IsDateTime. kube-cel parsed with chrono's RFC 3339, which
+        // refused a `,` fraction and took lowercase `t` / `z` and a leap
+        // second.
+        ParityCase {
+            kind: "PdtComma",
+            plural: "pdtcommas",
+            schema: json!({
+                "type": "object",
+                "properties": { "v": { "type": "string", "format": "date-time" } },
+                "x-kubernetes-validations": [{ "rule": "self.v.getFullYear() == 2024 && self.v.getMilliseconds() == 500", "message": "v" }]
+            }),
+            object: json!({"v": "2024-01-15T10:30:00,5Z"}),
+            expect: Expect::Accept,
+            note: "a `,` fraction binds → ACCEPT",
+        },
+        ParityCase {
+            kind: "PdtLongFraction",
+            plural: "pdtlongfractions",
+            schema: json!({
+                "type": "object",
+                "properties": { "v": { "type": "string", "format": "date-time" } },
+                "x-kubernetes-validations": [{ "rule": "self.v.getMilliseconds() == 123", "message": "v" }]
+            }),
+            object: json!({"v": "2024-01-15T10:30:00.123456789123Z"}),
+            expect: Expect::Accept,
+            note: "a fraction past nine digits is cut → ACCEPT",
+        },
+        ParityCase {
+            kind: "PdtOffsetKept",
+            plural: "pdtoffsetkepts",
+            schema: json!({
+                "type": "object",
+                "properties": { "v": { "type": "string", "format": "date-time" } },
+                "x-kubernetes-validations": [{ "rule": "string(self.v) == '2024-01-15T10:30:00+05:30'", "message": "v" }]
+            }),
+            object: json!({"v": "2024-01-15T10:30:00+05:30"}),
+            expect: Expect::Accept,
+            note: "the offset is kept → ACCEPT",
+        },
+        ParityCase {
+            kind: "PdtLowerRead",
+            plural: "pdtlowerreads",
+            schema: json!({
+                "type": "object",
+                "properties": { "v": { "type": "string", "format": "date-time" } },
+                "x-kubernetes-validations": [{ "rule": "self.v.getFullYear() == 2024", "message": "v" }]
+            }),
+            object: json!({"v": "2024-01-15t10:30:00z"}),
+            expect: Expect::Reject,
+            note: "lowercase t/z does not bind, read → REJECT",
+        },
+        ParityCase {
+            kind: "PdtNoZone",
+            plural: "pdtnozones",
+            schema: json!({
+                "type": "object",
+                "properties": { "v": { "type": "string", "format": "date-time" } },
+                "x-kubernetes-validations": [{ "rule": "true", "message": "v" }]
+            }),
+            object: json!({"v": "2024-01-15T10:30:00"}),
+            expect: Expect::Reject,
+            note: "no zone fails IsDateTime → REJECT",
+        },
+        ParityCase {
+            kind: "PdtLeapSecond",
+            plural: "pdtleapseconds",
+            schema: json!({
+                "type": "object",
+                "properties": { "v": { "type": "string", "format": "date-time" } },
+                "x-kubernetes-validations": [{ "rule": "true", "message": "v" }]
+            }),
+            object: json!({"v": "2024-12-31T23:59:60Z"}),
+            expect: Expect::Reject,
+            note: "a leap second fails IsDateTime → REJECT",
+        },
+        ParityCase {
+            kind: "PdtEmpty",
+            plural: "pdtemptys",
+            schema: json!({
+                "type": "object",
+                "properties": { "v": { "type": "string", "format": "date-time" } },
+                "x-kubernetes-validations": [{ "rule": "true", "message": "v" }]
+            }),
+            object: json!({"v": ""}),
+            expect: Expect::Reject,
+            note: "an empty date-time fails IsDateTime → REJECT",
+        },
         // ── FIDELITY-SWEEP findings (2026-06-19), fixed in 0.8 ────────────────
         // Each row reproduces a measured divergence with the OLD (buggy) expected
         // value, so it pins that kube-cel now agrees with the apiserver.

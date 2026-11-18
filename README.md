@@ -120,9 +120,13 @@ let schema = json!({
 ```
 
 A `format: date` or `format: duration` string the apiserver cannot parse is an
-`EvaluationError` at its field, as the apiserver refuses it (durations follow
-its `strfmt.ParseDuration`, so `1d` is a day); other invalid strings fall back
-to `Value::String`.
+`EvaluationError` at its field, as the apiserver refuses it (dates are Go's
+fixed-width `2006-01-02`; durations follow its `strfmt.ParseDuration`, so `1d`
+is a day). A `format: date-time` string binds as the apiserver's
+`strfmt.ParseDateTime` does (Go's RFC 3339 parse, so a `,` fraction is taken
+and lowercase `t` / `z` are not); one its OpenAPI check `strfmt.IsDateTime`
+refuses is an `EvaluationError` at its field, and so, fail-closed, is one that
+check takes and the parse refuses (see "apiserver divergence" below).
 
 ### Schema-aware lists and objects
 
@@ -425,6 +429,7 @@ divergences are pinned by
 | A regular expression past the `regex` crate's limits once translated: nesting past about 250 levels (Go takes 1000), or a compiled size past 128 MiB, which a Unicode class repeated up to Go's 1000 stays under but four of them do not (`\pL{1000}` four times) | compiles and matches it (Go's `regexp`) | `CompilationFailure` for a pattern the apiserver compiles at registration (the constant pattern of `matches`, `find` or `findAll`, a literal or a conversion of one such as `dyn('..')`, and the literal first argument of `matches`); otherwise an `EvaluationError` when it runs, even where CEL absorbs the error (`… \|\| true`) | fail-closed |
 | A regular expression that reads Unicode tables (a Unicode class such as `\pL` or `\p{Greek}`, or case folding of a character that has a case, not `(?i)[0-9]`) matched against a string holding a character Go's tables may read otherwise than the `regex` crate's: one Unicode 15.0 does not assign (`'\u1C89'.matches('\\pL')`, a letter since Unicode 16.0), or one of a few the two fold or class otherwise (`ΐ`, `ɤ`) | reads Go's Unicode 15.0.0 tables: U+1C89 is not a letter, `false` | `EvaluationError`, even where CEL absorbs the error (`… \|\| true`): the `regex` crate has Unicode 16.0.0's tables, which the translation cannot carry over (and on any string where `regex` resolves to other tables, which kube-cel checks once) | fail-closed |
 | The standard `timestamp(string)` conversion with a zone offset of 24 hours or more (`+24:00`, `+23:60`, `-24:00`; Go takes up to `+24:60`) | parses it (Go's `time.Parse`) | `EvaluationError`, even where CEL absorbs the error (`… \|\| true`); a literal one compiles | fail-closed |
+| A `format: date-time` value `strfmt.IsDateTime` takes and `strfmt.ParseDateTime` refuses (`t` / `z` in lowercase, an offset past `+24:60` such as `+99:99`, a trailing `tXYZ`, `10:30:00x5Z`), or one with a zone offset of 24 hours or more (`+24:00`) | passes the object; binds an error (refused only by a rule reading the field), or the 24-hour offset | `EvaluationError` at the field, whatever the rules read: kube-cel cannot bind an error value (`==` on it would answer), nor hold a 24-hour offset | fail-closed |
 | `double(string)` of a decimal with more than 800 significant digits, trailing zeros included, read two ways by Go (`'1' + 800 zeros + 'e-800'`) | Go's `strconv.ParseFloat` gives the Eisel-Lemire value (`1.0`) or, where that step gives up, a decimal of 800 digits that drops the magnitude of the rest (`0.1`) | `EvaluationError` where the two readings differ, even where CEL absorbs the error (`… \|\| true`); a literal one compiles | fail-closed |
 | A URL component that is not UTF-8 once unescaped (`url('http://h%80x/').getHost()`) | returns the bytes as a string | `EvaluationError` (a CEL string here must be UTF-8), even where CEL absorbs the error (`… \|\| true`) | fail-closed |
 | An object reaching more than 64 levels of schema nesting | no nesting limit; evaluates rules at any depth | `SchemaTooDeep` error | fail-closed |

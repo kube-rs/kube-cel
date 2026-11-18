@@ -1065,7 +1065,7 @@ fn duration_comparison_fails() {
 }
 
 #[test]
-fn invalid_datetime_string_falls_back_to_string() {
+fn invalid_datetime_string_is_refused() {
     let schema = json!({
         "type": "object",
         "properties": {
@@ -1081,9 +1081,11 @@ fn invalid_datetime_string_falls_back_to_string() {
     });
 
     let obj = json!({"expiresAt": "not-a-date"});
-    // The invalid date-time string falls back to Value::String,
-    // so string comparison works
-    assert!(validate(&schema, &obj, None).is_ok());
+    // The apiserver's OpenAPI check (strfmt.IsDateTime) refuses the object
+    // whatever the rules say; kube-cel refuses it at the field. It used to bind
+    // the value as a string, so this rule passed.
+    let errors = validate(&schema, &obj, None).unwrap_err();
+    assert_eq!(errors[0].field_path, "expiresAt");
 }
 
 #[test]

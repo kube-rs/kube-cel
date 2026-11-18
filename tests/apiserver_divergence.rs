@@ -1409,6 +1409,60 @@ fn timestamp_offset_of_a_day_fails_closed() {
     );
 }
 
+// ── A `format: date-time` value the binding refuses — fails CLOSED ─────────
+// apiserver: checks the value with strfmt.IsDateTime (OpenAPI validation, which
+//            refuses the object) and binds it with strfmt.ParseDateTime when a
+//            rule reads it (kube-openapi v0.0.0-20260317180543-43fb72c5454a).
+//            IsDateTime lowercases, reads only the first two `t`-separated
+//            pieces and leaves the offset unchecked, so `t` / `z` in
+//            lowercase, an offset past `+24:60` or a trailing `tXYZ` pass it;
+//            ParseDateTime then fails, which only a rule reading the field
+//            sees (the object passes otherwise). Both take an offset of 24
+//            hours up to `+24:60` and bind it.
+// kube-cel:  refuses such a value at its field whatever the rules read: it
+//            cannot bind an error value (`==` on it would answer), nor hold a
+//            24-hour offset in `chrono`. Everything else matches (parity rows
+//            PdtComma, PdtLowerRead, PdtNoZone, ..).
+
+#[test]
+fn date_time_the_binding_refuses_fails_closed() {
+    let schema = |rule: &str| {
+        json!({
+            "type": "object",
+            "properties": { "v": { "type": "string", "format": "date-time" } },
+            "x-kubernetes-validations": [{ "rule": rule, "message": "v" }]
+        })
+    };
+    // The apiserver accepts each of these with `rule: true`, and the last two
+    // also with the rule reading the value (checked on v1.36.1).
+    for (value, rule) in [
+        ("2024-01-15t10:30:00z", "true"),
+        ("2024-01-15T10:30:00+99:99", "true"),
+        ("2024-01-15T10:30:00ZtXYZ", "true"),
+        ("2024-01-15T10:30:00x5Z", "true"),
+        ("2024-01-15T10:30:00+24:00", "true"),
+        ("2024-01-15T10:30:00+24:00", "self.v.getFullYear() == 2024"),
+    ] {
+        let errors = Validator::new()
+            .validate(&schema(rule), &json!({ "v": value }), None)
+            .unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.field_path == "v" && e.kind == ErrorKind::EvaluationError),
+            "{value}: {errors:?}"
+        );
+    }
+    // Under a day the offset binds and is kept.
+    Validator::new()
+        .validate(
+            &schema("string(self.v) == '2024-01-15T10:30:00+23:59'"),
+            &json!({ "v": "2024-01-15T10:30:00+23:59" }),
+            None,
+        )
+        .unwrap();
+}
+
 // ── A decimal Go reads one of two ways — fails CLOSED ──────────────────────
 // apiserver: cel-go converts `double(string)` with Go's `strconv.ParseFloat`
 //            (go1.26.2). Past 800 significant digits (trailing zeros

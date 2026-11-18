@@ -367,11 +367,23 @@ Each group below follows kube-apiserver v1.36.1, checked live.
   - `type: number` binds as `double` even when the JSON number is integral
     (`self.x / 2.0` with `x: 1` is `0.5`), whatever its `format`; `format:
     date` binds as a timestamp, and a `format: date` string that is not a
-    valid date is an `EvaluationError` at its field. A schema `format:
-    duration` parses as the apiserver's `strfmt.ParseDuration`: Go's
-    `time.ParseDuration` exactly (`µs` / `μs`, a `+` sign, every overflow
-    refused), then strfmt's word units (`1d`, `2 hours`); a duration it
-    cannot parse is an `EvaluationError` at its field.
+    valid date, Go's `2006-01-02` at fixed width with ASCII digits only
+    (`+024-01-01` and `2026- 1-01` are not), is an `EvaluationError` at its
+    field. `format: date-time` binds as the apiserver's
+    `strfmt.ParseDateTime`, Go's RFC 3339 parse: a `,` fraction binds (it was
+    left a string, so `getFullYear()` failed), and lowercase `t` / `z`, a
+    space for the `T` and a leap second do not (chrono's parse took them, a
+    **fail-open**). A value the apiserver's OpenAPI check `strfmt.IsDateTime`
+    refuses (`not-a-date`, no zone, a one-digit hour) is an `EvaluationError`
+    at its field, as the apiserver refuses the object; it used to bind as a
+    string that a rule could compare. One the check takes and the parse
+    refuses, or with an offset of 24 hours or more, is refused too, where the
+    apiserver fails only a rule reading it (fail-closed, a README row). A
+    schema `format: duration` parses as the apiserver's
+    `strfmt.ParseDuration`: Go's `time.ParseDuration` exactly (`µs` / `μs`, a
+    `+` sign, every overflow refused), then strfmt's word units (`1d`,
+    `2 hours`); a duration it cannot parse is an `EvaluationError` at its
+    field.
   - Map-list number keys compare as the apiserver decodes JSON: an integer
     past int64 is a float (2^63 and 2^63 + 1 are one key), and a single float
     key `-0.0` equals `0.0`.

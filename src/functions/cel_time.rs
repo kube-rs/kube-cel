@@ -132,7 +132,8 @@ fn literal_converts(conversion: &str, literal: &LiteralValue) -> bool {
         ("timestamp", LiteralValue::String(s)) => {
             // A zone offset of 24 hours or more is Go's, which `chrono` cannot
             // hold: evaluation fails on it (see `go_timestamp`), compiling does not.
-            parse_rfc3339(s.inner().as_bytes()).is_some_and(|t| (MIN_UNIX..=MAX_UNIX).contains(&t.unix))
+            parse_rfc3339(s.inner().as_bytes(), false)
+                .is_some_and(|t| (MIN_UNIX..=MAX_UNIX).contains(&t.unix))
         }
         ("timestamp", LiteralValue::Int(i)) => (MIN_UNIX..=MAX_UNIX).contains(i.inner()),
         ("timestamp", _) => false,
@@ -387,10 +388,10 @@ pub(crate) fn time_string(v: &Value) -> Option<String> {
 /// A time as Go's `time.Parse(time.RFC3339, ..)` reads it: seconds from the
 /// Unix epoch (floored), the nanoseconds past them and the zone offset in
 /// seconds.
-struct GoTime {
-    unix: i64,
-    nanos: u32,
-    offset: i32,
+pub(super) struct GoTime {
+    pub(super) unix: i64,
+    pub(super) nanos: u32,
+    pub(super) offset: i32,
 }
 
 /// `timestamp(<string>)` as cel-go has it: Go's parse, then cel-go's range. A
@@ -398,7 +399,7 @@ struct GoTime {
 /// error here, `chrono` cannot hold it, and noted as unsupported: the
 /// validation engine refuses the rule even where CEL absorbs the error.
 fn go_timestamp(s: &str) -> Result<DateTime<FixedOffset>, ExecutionError> {
-    let t = parse_rfc3339(s.as_bytes())
+    let t = parse_rfc3339(s.as_bytes(), false)
         .ok_or_else(|| conversion_error("timestamp", "google.protobuf.Timestamp"))?;
     if !(MIN_UNIX..=MAX_UNIX).contains(&t.unix) {
         return Err(ExecutionError::function_error("timestamp", "timestamp overflow"));
@@ -422,8 +423,10 @@ fn go_timestamp(s: &str) -> Result<DateTime<FixedOffset>, ExecutionError> {
 /// result): a four-digit year, two-digit month and day, a `T`, a one- or
 /// two-digit hour, two-digit minute and second, an optional fraction after a
 /// `.` or `,` (any number of digits, nine kept), then `Z` or `±hh:mm` with
-/// `hh` up to 24 and `mm` up to 60. `None` where Go fails.
-fn parse_rfc3339(s: &[u8]) -> Option<GoTime> {
+/// `hh` up to 24 and `mm` up to 60. `None` where Go fails. With `zone_optional`
+/// the zone may also be left out, read as UTC, as Go's parse with the layout
+/// `2006-01-02T15:04:05` (strfmt's `ISO8601LocalTime`) has it.
+pub(super) fn parse_rfc3339(s: &[u8], zone_optional: bool) -> Option<GoTime> {
     /// Go's `getnum`: one or two digits, exactly two if `fixed`.
     fn getnum(s: &[u8], fixed: bool) -> Option<(u32, &[u8])> {
         let d0 = u32::from(s.first().filter(|c| c.is_ascii_digit())? - b'0');
@@ -466,6 +469,8 @@ fn parse_rfc3339(s: &[u8]) -> Option<GoTime> {
     }
     let offset = if let Some(rest) = skip(s, b'Z') {
         s = rest;
+        0
+    } else if zone_optional && s.is_empty() {
         0
     } else {
         if s.len() < 6 || s[3] != b':' {

@@ -43,6 +43,9 @@ pub(crate) use quantity::parses as quantity_parses;
 
 #[cfg(any(feature = "urls", feature = "named_format"))] mod go_url;
 #[cfg(feature = "named_format")] mod named_format;
+#[cfg(any(feature = "named_format", feature = "validation"))] mod strfmt;
+#[cfg(feature = "validation")]
+pub(crate) use strfmt::{DateTimeRefusal, date_parts, is_date_time, parse_date_time};
 
 #[cfg(any(
     feature = "strings",
