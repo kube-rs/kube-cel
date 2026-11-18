@@ -30,7 +30,7 @@ semver = { version = "1", optional = true }
 base64 = { version = "0.23", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
-chrono = { version = "0.4", default-features = false, features = ["alloc"], optional = true }
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 # "Never panics" property tests over the string parsers (tests/never_panic.rs).
@@ -52,7 +52,7 @@ semver_funcs = ["dep:semver"]
 format = []
 quantity = []
 named_format = []
-validation = ["dep:serde_json", "dep:serde", "dep:chrono", "dep:base64"]
+validation = ["dep:serde_json", "dep:serde", "dep:base64"]
 # Umbrella: every extension-function library (the 10 in `default`) plus the
 # `validation` engine. `default` enables the 10 libraries only, NOT validation.
 # Use `default-features = false` to narrow to a subset, then `full` to restore

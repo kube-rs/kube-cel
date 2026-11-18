@@ -260,6 +260,31 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     `v` and refuse a fourth component (`1.2.3.4`).
   - Quantity comparison is exact for magnitudes beyond `i128` scaling
     (`compareTo` used to call quantities 3 apart equal there).
+- **The standard time conversions, `string()` of a time value and duration
+  arithmetic follow cel-go v0.26**: `new_env()` puts cel-go's in front of
+  `cel`'s, through macros, so general use and validation both see them (each
+  checked live on v1.36.1):
+  - `duration(string)` is Go's `time.ParseDuration` and `timestamp(string)`
+    Go's `time.Parse(time.RFC3339, ..)` with cel-go's range. A duration past
+    int64 nanoseconds, an exponent, a sign between components, trailing text,
+    a lowercase `t` / `z`, a space for the `T` and a leap second are errors;
+    they were accepted, a **fail-open**, now closed. A `,` before the
+    fraction, a one-digit hour, an offset minute of 60 and the units `µs` /
+    `μs` convert; they were errors. A timestamp offset of 24 hours or more,
+    which Go takes, is still an error (fail-closed).
+  - A literal argument the conversion refuses fails to compile, reached or not
+    (`true || duration('1e3s') > duration('0s')`), as the apiserver's
+    literal validators refuse it at registration; so does `timestamp(n)` with
+    an int literal outside cel-go's range, and a literal of any other type.
+  - `string(<duration>)` prints float64 seconds (`9223372036.854776s`, it
+    printed exact nanoseconds), and `string(<timestamp>)` keeps the
+    timestamp's offset (`2024-01-15T10:30:00+09:00`, it printed UTC).
+  - Duration `+` and `-`, the difference of two timestamps and a timestamp
+    minus a duration stay within int64 nanoseconds, with cel-go's overflow
+    checks; they went up to `cel`'s ±315,576,000,000 seconds. `-` negates a
+    duration reached through `dyn`, and `int(<duration>)` is its nanoseconds;
+    both were errors.
+  - Migration: none for rules the apiserver accepts.
 - **Every rule in the schema is compiled before the object is walked**, as
   the apiserver compiles them all when it registers the CRD. A rule or
   `messageExpression` that does not compile on a node the object does not
@@ -442,6 +467,9 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   ([#17](https://github.com/kube-rs/kube-cel/issues/17)).
 
 ### Changed
+- `chrono` is a dependency whatever the features (it was one of `validation`):
+  the standard time conversions build `cel`'s time values. `cel` depends on it
+  already.
 - The validation engine (`Validator`, `compile_schema`, `VapEvaluator`, static
   analysis) compiles with `Env::compile` on a shared `Env` from `new_env()`
   instead of `Program::compile`, so it sees the environment's macros and

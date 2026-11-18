@@ -1348,6 +1348,83 @@ pub fn cases() -> Vec<ParityCase> {
             expect: Expect::Reject,
             note: "== with an add/sub result on the right is an error → REJECT",
         },
+        // The standard time conversions, `string()` of a time value and duration
+        // operators are cel-go's (src/functions/cel_time.rs).
+        ParityCase {
+            kind: "PtimeGo",
+            plural: "ptimegos",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "string(duration('9223372036.854775807s')) == '9223372036.854776s' && string(timestamp('2024-01-15T10:30:00+09:00')) == '2024-01-15T10:30:00+09:00' && timestamp('2024-01-15T1:30:00,5Z') == timestamp('2024-01-15T01:30:00.5Z') && timestamp('2024-01-15T10:30:00+00:60') == timestamp('2024-01-15T09:30:00Z') && duration('1µs') == duration('1us') && duration('1s1s') == duration('2s') && int(duration('1.5s')) == 1500000000 && -dyn(duration('1s')) == duration('-1s')",
+                    "message": "ptimegos"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "time conversions, printing and duration operators follow cel-go → ACCEPT",
+        },
+        ParityCase {
+            kind: "PtimeDynamic",
+            plural: "ptimedynamics",
+            schema: json!({
+                "type": "object",
+                "properties": { "s": { "type": "string" }, "d": { "type": "string" } },
+                "x-kubernetes-validations": [{
+                    "rule": "timestamp(self.s) == timestamp('2024-01-15T10:30:00Z') || duration(self.d) > duration('0s')",
+                    "message": "ptimedynamics"
+                }]
+            }),
+            object: json!({ "s": "2024-01-15t10:30:00Z", "d": "1e3s" }),
+            expect: Expect::Reject,
+            note: "timestamp() refuses a lowercase t, duration() an exponent → REJECT",
+        },
+        ParityCase {
+            kind: "PtimeArith",
+            plural: "ptimeariths",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "duration('9223372036s') + duration('1s') > duration('0s') || timestamp('2000-01-01T00:00:00Z') - duration('-9223372036.854775808s') > timestamp(0)",
+                    "message": "ptimeariths"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Reject,
+            note: "duration arithmetic past int64 nanoseconds is an error → REJECT",
+        },
+        ParityCase {
+            kind: "PtimeLiteralDuration",
+            plural: "ptimeliteraldurations",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "true || duration('9223372036.854775808s') > duration('0s')",
+                    "message": "ptimeliteraldurations"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "a duration literal past int64 nanoseconds fails to compile → rejected at registration",
+        },
+        ParityCase {
+            kind: "PtimeLiteralTimestamp",
+            plural: "ptimeliteraltimestamps",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "true || timestamp('2024-01-15t10:30:00Z') == timestamp(0)",
+                    "message": "ptimeliteraltimestamps"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "a timestamp literal with a lowercase t fails to compile → rejected at registration",
+        },
         ParityCase {
             kind: "PquantSignMember",
             plural: "pquantsignmembers",

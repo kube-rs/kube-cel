@@ -417,7 +417,7 @@ divergences are pinned by
 | Quantity `!=` with an `add` / `sub` result on the right (`quantity('2') != quantity('1').add(1)`) | `true` (`==` there is an error: the right side of `Equal` must not be the pointer `add` returns) | `EvaluationError`, as for `==` (`cel`'s `==` and `!=` share one comparison that cannot fail) | fail-closed |
 | Quantity `add` / `sub` past `i128` (`quantity('2e38').add(quantity('1'))`) | exact (`inf.Dec`), so `….isGreaterThan(quantity('2e38'))` holds | `EvaluationError` (quantity overflow), even where CEL absorbs the error (`… \|\| true`) | fail-closed |
 | A quantity past kube-cel's supported range: an exponent or scale outside ±1000, before or after trailing zeros are moved into it (`1e1001`, `10e1000`, `1e4294967296`, the sum `5e1000 + 5e1000`), or a mantissa past the `i128` range | parses it: narrows the exponent to int32 (`quantity('1e4294967296') == quantity('1')`), and near the int32 bounds computes a power of ten of hundreds of MiB or panics | `EvaluationError` for a rule or VAP expression that reaches it, even where CEL absorbs the error (`… \|\| true`); `quantity()` / `isQuantity()` error | fail-closed |
-| The standard `timestamp(string)` / `duration(string)` conversions (from `cel`): an offset of hour 24 or minute 60 (`+24:00`, `+23:60`, `-24:00`, `+00:60`), a `,` before the fraction (`10:30:00,5Z`), a one-digit hour (`T1:30:00Z`), the units `µs` / `μs` (`duration('1µs')`) | parses them (Go's `time.Parse` and `time.ParseDuration`) | `EvaluationError` | fail-closed |
+| The standard `timestamp(string)` conversion with a zone offset of 24 hours or more (`+24:00`, `+23:60`, `-24:00`; Go takes up to `+24:60`) | parses it (Go's `time.Parse`) | `EvaluationError`; a literal one compiles | fail-closed |
 | A URL component that is not UTF-8 once unescaped (`url('http://h%80x/').getHost()`) | returns the bytes as a string | `EvaluationError` (a CEL string here must be UTF-8) | fail-closed |
 | An object reaching more than 64 levels of schema nesting | no nesting limit; evaluates rules at any depth | `SchemaTooDeep` error | fail-closed |
 | Rule whose `messageExpression` does not compile (a syntax error, or a call refused above) | rejects the CRD at registration | `CompilationFailure` (the rule is rejected, not just its message) | fail-closed |
@@ -455,7 +455,14 @@ base environment) are checked against a live apiserver by `just parity`. CRD
 rules, their `messageExpression`s and VAP expressions share them, since the
 apiserver declares the same functions for all three. A function the apiserver declares but
 kube-cel does not implement (`optional.unwrap`, `<list>.unwrapOpt()`, the authz
-library) therefore compiles, and fails only when evaluation reaches it. Every
+library) therefore compiles, and fails only when evaluation reaches it. As
+the apiserver's base environment does, a literal argument of `duration(..)` or
+`timestamp(..)` the conversion refuses fails to compile, reached or not
+(`true || duration('1e3s') > duration('0s')`); `new_env()` puts cel-go's
+conversions, printing and duration arithmetic in front of `cel`'s standard
+ones (Go's `time.ParseDuration` and `time.Parse(time.RFC3339, ..)`, a duration
+within int64 nanoseconds, `string(<duration>)` in float64 seconds,
+`string(<timestamp>)` in its own offset). Every
 rule in the schema is compiled before the object is walked, including those on
 nodes the object does not reach (an omitted property, the items of an empty
 list), and if any fails to compile the object is rejected with those errors

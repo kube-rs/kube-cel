@@ -1286,26 +1286,24 @@ fn quantity_past_supported_range_fails_closed() {
     assert_eq!(passed, [false, true]);
 }
 
-// ── Standard timestamp() / duration() parsing — fails CLOSED ───────────────
-// apiserver: cel-go parses with Go's `time.Parse(time.RFC3339, ..)` and
-//            `time.ParseDuration`, which take an offset of hour 24 or minute
-//            60 (normalized: `+23:60` is `+24:00`), a `,` before the fraction,
-//            a one-digit hour, and the units `µs` / `μs` (k8s.io/apiserver
-//            v0.36.1 `MustBaseEnvSet(1.36)`).
-// kube-cel:  `cel`'s standard conversions refuse them: EvaluationError.
+// ── A timestamp offset of a day or more — fails CLOSED ─────────────────────
+// apiserver: cel-go parses `timestamp(string)` with Go's
+//            `time.Parse(time.RFC3339, ..)`, which takes a zone offset up to
+//            hour 24 and minute 60 (`+24:60`; `+23:60` is `+24:00`)
+//            (k8s.io/apiserver v0.36.1 `MustBaseEnvSet(1.36)`).
+// kube-cel:  ports that parser (src/functions/cel_time.rs), but `chrono`
+//            holds an offset under 24 hours, so such a timestamp is an
+//            EvaluationError. A literal one still compiles, as on the apiserver.
+//            Everything else the conversions take or refuse matches the
+//            apiserver (parity rows PtimeGo, PtimeDynamic, ..).
 
 #[test]
-fn stdlib_time_parsing_fails_closed() {
+fn timestamp_offset_of_a_day_fails_closed() {
     for rule in [
         "timestamp('2024-01-15T10:30:00+24:00') == timestamp('2024-01-14T10:30:00Z')",
         "timestamp('2024-01-15T10:30:00+23:60') == timestamp('2024-01-14T10:30:00Z')",
         "timestamp('2024-01-15T10:30:00-24:00') == timestamp('2024-01-16T10:30:00Z')",
-        "timestamp('2024-01-15T10:30:00+00:60') == timestamp('2024-01-15T09:30:00Z')",
         "'%s'.format([timestamp('2024-01-15T10:30:00+24:00')]) == '2024-01-15T10:30:00+24:00'",
-        "timestamp('2024-01-15T10:30:00,5Z') == timestamp('2024-01-15T10:30:00.5Z')",
-        "timestamp('2024-01-15T1:30:00Z') == timestamp('2024-01-15T01:30:00Z')",
-        "duration('1µs') == duration('1us')",
-        "duration('1μs') == duration('1us')",
     ] {
         let errors = run_rule(rule).unwrap_err();
         assert!(
@@ -1313,6 +1311,11 @@ fn stdlib_time_parsing_fails_closed() {
             "{rule}: {errors:?}"
         );
     }
+    // Under a day the offset is kept, as cel-go keeps it.
+    assert_passes(
+        "timestamp('2024-01-15T10:30:00+00:60') == timestamp('2024-01-15T09:30:00Z') \
+         && string(timestamp('2024-01-15T10:30:00+23:59')) == '2024-01-15T10:30:00+23:59'",
+    );
 }
 
 // ── URL components that are not UTF-8 — fail CLOSED ────────────────────────

@@ -21,7 +21,10 @@
 
 #[cfg(feature = "semver_funcs")] mod semver_funcs;
 
+mod cel_time;
+#[cfg(feature = "validation")] pub(crate) use cel_time::go_parse_duration;
 #[cfg(feature = "format")] mod format;
+mod go_float;
 #[cfg(any(feature = "format", feature = "urls", feature = "named_format"))]
 mod go_isprint;
 #[cfg(feature = "lists")] mod go_sort;
@@ -106,8 +109,11 @@ impl<'c, 'p, 'v> Registrar<'c, 'p, 'v> {
 /// - the two-variable comprehension macros (`all(i, v, ..)`, `transformList`,
 ///   `transformMap`, ..);
 /// - with the `ip` feature, `string(<IP>)` and `string(<CIDR>)`: `string` is a
-///   standard-library overload, which `cel` refuses as a context function.
+///   standard-library overload, which `cel` refuses as a context function;
+/// - cel-go's standard time conversions and duration arithmetic, in front of
+///   `cel`'s (see `cel_time`).
 pub(crate) fn declare_env(env: &mut cel::Env) -> Result<(), cel::DeclarationError> {
+    cel_time::declare(env)?;
     #[cfg(feature = "lists")]
     lists_ext::declare(env)?;
     env.add_extension(cel::extensions::two_var_comprehensions)?;

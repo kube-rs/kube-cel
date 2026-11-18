@@ -221,7 +221,7 @@ pub(crate) fn binding_error(value: &serde_json::Value, format: &SchemaFormat) ->
 /// fractional part through `float64` as Go does it, and every overflow an
 /// error (`None`).
 pub(crate) fn parse_go_duration(input: &str) -> Option<chrono::Duration> {
-    go_parse_duration(input.as_bytes()).map(chrono::Duration::nanoseconds)
+    crate::functions::go_parse_duration(input.as_bytes()).map(chrono::Duration::nanoseconds)
 }
 
 /// The apiserver's `format: duration`, kube-openapi `strfmt.ParseDuration`:
@@ -302,124 +302,6 @@ fn duration_matches(s: &str) -> Vec<(&str, &str)> {
         }
     }
     out
-}
-
-fn go_parse_duration(orig: &[u8]) -> Option<i64> {
-    const LIMIT: u64 = 1 << 63;
-    let mut s = orig;
-    let mut neg = false;
-    if let Some(&c) = s.first()
-        && (c == b'-' || c == b'+')
-    {
-        neg = c == b'-';
-        s = &s[1..];
-    }
-    if s == b"0" {
-        return Some(0);
-    }
-    if s.is_empty() {
-        return None;
-    }
-    let mut d: u64 = 0;
-    while !s.is_empty() {
-        if !(s[0] == b'.' || s[0].is_ascii_digit()) {
-            return None;
-        }
-        let before = s.len();
-        let (v, rest) = leading_int(s)?;
-        s = rest;
-        let pre = before != s.len();
-        let (mut f, mut scale, mut post) = (0u64, 1f64, false);
-        if s.first() == Some(&b'.') {
-            s = &s[1..];
-            let before = s.len();
-            (f, scale, s) = leading_fraction(s);
-            post = before != s.len();
-        }
-        if !pre && !post {
-            return None;
-        }
-        let unit_len = s
-            .iter()
-            .position(|&c| c == b'.' || c.is_ascii_digit())
-            .unwrap_or(s.len());
-        if unit_len == 0 {
-            return None;
-        }
-        let unit: u64 = match &s[..unit_len] {
-            b"ns" => 1,
-            b"us" | b"\xc2\xb5s" | b"\xce\xbcs" => 1_000,
-            b"ms" => 1_000_000,
-            b"s" => 1_000_000_000,
-            b"m" => 60_000_000_000,
-            b"h" => 3_600_000_000_000,
-            _ => return None,
-        };
-        s = &s[unit_len..];
-        if v > LIMIT / unit {
-            return None;
-        }
-        let mut v = v * unit;
-        if f > 0 {
-            v += (f as f64 * (unit as f64 / scale)) as u64;
-            if v > LIMIT {
-                return None;
-            }
-        }
-        d = d.wrapping_add(v);
-        if d > LIMIT {
-            return None;
-        }
-    }
-    if neg {
-        return Some((d as i64).wrapping_neg());
-    }
-    if d > LIMIT - 1 {
-        return None;
-    }
-    Some(d as i64)
-}
-
-/// Go's `leadingInt`: the leading `[0-9]*`, `None` past 2^63.
-fn leading_int(s: &[u8]) -> Option<(u64, &[u8])> {
-    let mut x: u64 = 0;
-    let mut i = 0;
-    while let Some(&c) = s.get(i).filter(|c| c.is_ascii_digit()) {
-        if x > (1u64 << 63) / 10 {
-            return None;
-        }
-        x = x * 10 + u64::from(c - b'0');
-        if x > 1u64 << 63 {
-            return None;
-        }
-        i += 1;
-    }
-    Some((x, &s[i..]))
-}
-
-/// Go's `leadingFraction`: the leading `[0-9]*` as `x / scale`, which stops
-/// gaining precision (but keeps consuming digits) once it would overflow.
-fn leading_fraction(s: &[u8]) -> (u64, f64, &[u8]) {
-    let (mut x, mut scale, mut overflow) = (0u64, 1f64, false);
-    let mut i = 0;
-    while let Some(&c) = s.get(i).filter(|c| c.is_ascii_digit()) {
-        i += 1;
-        if overflow {
-            continue;
-        }
-        if x > ((1u64 << 63) - 1) / 10 {
-            overflow = true;
-            continue;
-        }
-        let y = x * 10 + u64::from(c - b'0');
-        if y > 1u64 << 63 {
-            overflow = true;
-            continue;
-        }
-        x = y;
-        scale *= 10.0;
-    }
-    (x, scale, &s[i..])
 }
 
 #[cfg(test)]
