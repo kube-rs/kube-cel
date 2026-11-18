@@ -80,9 +80,115 @@ pub(crate) fn escape_field_name(name: &str) -> String {
     name.to_string()
 }
 
+/// The apiserver's `cel.Escape` exactly: `None` for a name it cannot escape
+/// (empty, a leading digit, a character outside `[A-Za-z0-9_./-]`), which
+/// [`escape_field_name`] passes through.
+#[must_use]
+pub(crate) fn go_escape(ident: &str) -> Option<String> {
+    if ident.is_empty() || ident.as_bytes()[0].is_ascii_digit() {
+        return None;
+    }
+    if CEL_RESERVED_WORDS.contains(&ident) {
+        return Some(format!("__{ident}__"));
+    }
+    let mut escaped = String::with_capacity(ident.len());
+    let mut chars = ident.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '_' if chars.peek() == Some(&'_') => {
+                chars.next();
+                escaped.push_str("__underscores__");
+            }
+            '.' => escaped.push_str("__dot__"),
+            '-' => escaped.push_str("__dash__"),
+            '/' => escaped.push_str("__slash__"),
+            c if c.is_ascii_alphanumeric() || c == '_' => escaped.push(c),
+            _ => return None,
+        }
+    }
+    Some(escaped)
+}
+
+/// The apiserver's `cel.Unescape` exactly: each `__x__` (two underscores, a
+/// run without one, two underscores) becomes `__`, `.`, `-` or `/` for
+/// `underscores`, `dot`, `dash`, `slash`, or a reserved word when it is the
+/// whole name; any other `__x__` makes the name unescapable (`None`).
+#[must_use]
+pub(crate) fn go_unescape(escaped: &str) -> Option<String> {
+    let bytes = escaped.as_bytes();
+    let mut out = String::with_capacity(escaped.len());
+    let mut i = 0;
+    let mut copied = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'_' && bytes[i + 1] == b'_' {
+            let run_end = bytes[i + 2..]
+                .iter()
+                .position(|&b| b == b'_')
+                .map_or(bytes.len(), |p| i + 2 + p);
+            if run_end > i + 2 && bytes.get(run_end + 1) == Some(&b'_') {
+                let contents = &escaped[i + 2..run_end];
+                out.push_str(&escaped[copied..i]);
+                match contents {
+                    "underscores" => out.push_str("__"),
+                    "dot" => out.push('.'),
+                    "dash" => out.push('-'),
+                    "slash" => out.push('/'),
+                    word if CEL_RESERVED_WORDS.contains(&word) && run_end + 2 - i == escaped.len() => {
+                        out.push_str(word);
+                    }
+                    _ => return None,
+                }
+                i = run_end + 2;
+                copied = i;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&escaped[copied..]);
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `cel.Unescape` (apiserver v0.36.1, `pkg/cel/escaping.go`).
+    #[test]
+    fn go_unescape_follows_the_apiserver() {
+        for (name, want) in [
+            ("a__dot__b", Some("a.b")),
+            ("a__dash__b__slash__c", Some("a-b/c")),
+            ("a__underscores__b", Some("a__b")),
+            ("__namespace__", Some("namespace")),
+            ("x__namespace__", None),
+            ("__foo__", None),
+            ("___dot__", Some("_.")),
+            ("a__b", Some("a__b")),
+            ("__", Some("__")),
+            ("plain", Some("plain")),
+        ] {
+            assert_eq!(go_unescape(name).as_deref(), want, "{name}");
+        }
+    }
+
+    /// `cel.Escape` (apiserver v0.36.1, `pkg/cel/escaping.go`).
+    #[test]
+    fn go_escape_follows_the_apiserver() {
+        for (name, want) in [
+            ("a-b", Some("a__dash__b")),
+            ("namespace", Some("__namespace__")),
+            ("a__b", Some("a__underscores__b")),
+            ("a___b", Some("a__underscores___b")),
+            ("x.y/z", Some("x__dot__y__slash__z")),
+            ("plain_1", Some("plain_1")),
+            ("1abc", None),
+            ("a b", None),
+            ("", None),
+        ] {
+            assert_eq!(go_escape(name).as_deref(), want, "{name}");
+        }
+    }
 
     #[test]
     fn reserved_word_namespace() {

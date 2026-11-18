@@ -11,6 +11,7 @@ pub(crate) mod compilation;
 pub(crate) mod defaults;
 pub(crate) mod escaping;
 pub(crate) mod references;
+pub(crate) mod structural;
 pub(crate) mod values;
 pub(crate) mod vap;
 
@@ -18,12 +19,9 @@ pub(crate) mod vap;
 // private validation environment.
 #[cfg(test)] mod probe;
 
-use crate::validation::{
-    compilation::{
-        ChildSchema, CompilationError, CompilationResult, CompiledSchema, child_schemas,
-        compile_schema_validations,
-    },
-    values::{json_to_cel_with_compiled, json_to_cel_with_schema},
+use crate::validation::compilation::{
+    ChildSchema, CompilationError, CompilationResult, CompiledSchema, child_schemas,
+    compile_schema_validations,
 };
 use cel::{Context, Env, Program};
 pub(crate) use references::Scope;
@@ -541,6 +539,16 @@ fn registration_errors_compiled(
     }
 }
 
+/// The resource root is depth 0 of the walk; `allOf`-style branches of it are
+/// walked one deeper and hold no rules.
+fn node_kind(depth: usize) -> structural::Node {
+    if depth == 0 {
+        structural::Node::Root
+    } else {
+        structural::Node::Inner
+    }
+}
+
 fn schema_too_deep_error(path: &str) -> ValidationError {
     ValidationError {
         rule: String::new(),
@@ -753,9 +761,13 @@ impl Validator {
         if let Some(message) = values::binding_error(value, &values::SchemaFormat::from_schema(schema)) {
             errors.push(binding_failure(message, &path));
         }
-        let cel_value = json_to_cel_with_schema(value, schema);
-        let cel_old = old_value.map(|o| json_to_cel_with_schema(o, schema));
-        self.evaluate_validations(schema, &cel_value, cel_old.as_ref(), &path, errors, base_ctx);
+        let rules = compile_schema_validations(schema);
+        if !rules.is_empty() {
+            let node = node_kind(depth);
+            let self_val = structural::json_to_val_with_schema(value, schema, node);
+            let old = old_value.map(|o| (structural::json_to_val_with_schema(o, schema, node), o));
+            self.evaluate_compiled_results(&rules, self_val, old, &path, errors, base_ctx);
+        }
 
         if let (Some(properties), Some(obj)) = (
             schema.get("properties").and_then(|p| p.as_object()),
@@ -854,19 +866,6 @@ impl Validator {
         }
     }
 
-    fn evaluate_validations(
-        &self,
-        schema: &serde_json::Value,
-        cel_value: &cel::Value,
-        cel_old: Option<&cel::Value>,
-        path: &str,
-        errors: &mut Vec<ValidationError>,
-        base_ctx: &Context<'_, '_>,
-    ) {
-        let compiled = compile_schema_validations(schema);
-        self.evaluate_compiled_results(&compiled, cel_value, cel_old, path, errors, base_ctx);
-    }
-
     // ── CompiledSchema-based walking ────────────────────────────────
 
     #[allow(clippy::too_many_arguments)]
@@ -894,16 +893,12 @@ impl Validator {
         if let Some(message) = values::binding_error(value, &compiled.format) {
             errors.push(binding_failure(message, &path));
         }
-        let cel_value = json_to_cel_with_compiled(value, compiled);
-        let cel_old = old_value.map(|o| json_to_cel_with_compiled(o, compiled));
-        self.evaluate_compiled_results(
-            &compiled.validations,
-            &cel_value,
-            cel_old.as_ref(),
-            &path,
-            errors,
-            base_ctx,
-        );
+        if !compiled.validations.is_empty() {
+            let node = node_kind(depth);
+            let self_val = structural::json_to_val_with_compiled(value, compiled, node);
+            let old = old_value.map(|o| (structural::json_to_val_with_compiled(o, compiled, node), o));
+            self.evaluate_compiled_results(&compiled.validations, self_val, old, &path, errors, base_ctx);
+        }
 
         if let Some(obj) = value.as_object() {
             for (prop_name, child_compiled) in &compiled.properties {
@@ -983,23 +978,26 @@ impl Validator {
     fn evaluate_compiled_results(
         &self,
         results: &[Result<CompilationResult, CompilationError>],
-        cel_value: &cel::Value,
-        cel_old: Option<&cel::Value>,
+        self_val: Box<dyn cel::common::value::Val>,
+        // The bound old value, and its JSON (see `structural::optional_value`).
+        old: Option<(Box<dyn cel::common::value::Val>, &serde_json::Value)>,
         path: &str,
         errors: &mut Vec<ValidationError>,
         base_ctx: &Context<'_, '_>,
     ) {
-        // Create a node-level scope once with self/oldSelf bound
+        let (old_val, old_raw) = old.unzip();
+        // Create a node-level scope once with self/oldSelf bound, the
+        // schema-aware values the apiserver binds (see `structural`).
         let mut node_ctx = base_ctx.new_inner_scope();
-        node_ctx.add_variable_from_value("self", cel_value.clone());
-        if let Some(old) = cel_old {
-            node_ctx.add_variable_from_value("oldSelf", old.clone());
+        node_ctx.add_variable_as_val("self", self_val);
+        if let Some(old) = &old_val {
+            node_ctx.add_variable_as_val("oldSelf", old.clone_as_boxed());
         }
 
         for result in results {
             match result {
                 Ok(cr) => {
-                    self.evaluate_rule(cr, &node_ctx, cel_old, path, errors);
+                    self.evaluate_rule(cr, &node_ctx, old_val.as_deref(), old_raw, path, errors);
                 }
                 Err(e) => errors.push(compilation_error(e, path)),
             }
@@ -1010,7 +1008,8 @@ impl Validator {
         &self,
         cr: &CompilationResult,
         node_ctx: &Context<'_, '_>,
-        cel_old: Option<&cel::Value>,
+        cel_old: Option<&dyn cel::common::value::Val>,
+        old_raw: Option<&serde_json::Value>,
         path: &str,
         errors: &mut Vec<ValidationError>,
     ) {
@@ -1031,11 +1030,11 @@ impl Validator {
                 let mut s = node_ctx.new_inner_scope();
                 let old_self = match cel_old {
                     Some(old) => {
-                        cel::Value::Opaque(std::sync::Arc::new(cel::objects::OptionalValue::of(old.clone())))
+                        cel::common::types::CelOptional::of(structural::optional_value(old, old_raw))
                     }
-                    None => cel::Value::Opaque(std::sync::Arc::new(cel::objects::OptionalValue::none())),
+                    None => cel::common::types::CelOptional::none(),
                 };
-                s.add_variable_from_value("oldSelf", old_self);
+                s.add_variable_as_val("oldSelf", Box::new(old_self));
                 s
             };
             &opt_scope
@@ -1043,7 +1042,21 @@ impl Validator {
             node_ctx
         };
 
-        let result = execute_supported(&cr.program, effective_ctx);
+        // A rule that reached an operation on a schema-bound value kube-cel
+        // cannot carry out as the apiserver does (see `structural`) fails,
+        // whatever CEL made of the stand-in answer.
+        let result = match structural::tracking_inexact(|| execute_supported(&cr.program, effective_ctx)) {
+            (Ok(_), true) => Err(cel::ExecutionError::function_error(
+                "self",
+                "evaluation reached an operation on a schema-bound value that kube-cel cannot \
+                 carry out as the apiserver does: an == the apiserver fails (a value of another \
+                 kind, or undeclared fields against a plain map), a value no Go map key can be, \
+                 a map-list key of a plain map, an element a + added that its list's items \
+                 refuse where it can only be iterated, or a set + whose result hangs on state the \
+                 apiserver keeps between values",
+            )),
+            (result, _) => result,
+        };
         let error_path = effective_path(path, cr.rule.field_path.as_deref());
 
         match result {
@@ -1051,7 +1064,10 @@ impl Validator {
                 // Validation passed
             }
             Ok(cel::Value::Bool(false)) => {
-                let message = self.resolve_message(cr, effective_ctx);
+                // The apiserver evaluates a `messageExpression` on the node's
+                // activation, `oldSelf` not optional, even for an
+                // `optionalOldSelf` rule.
+                let message = self.resolve_message(cr, node_ctx);
                 errors.push(ValidationError {
                     rule: cr.rule.rule.clone(),
                     message,
@@ -1109,13 +1125,12 @@ impl Validator {
     /// static message, then default — applying apiserver's sanitisation rules
     /// (see [`resolve_failure_message`]).
     fn resolve_message(&self, cr: &CompilationResult, ctx: &Context<'_, '_>) -> String {
-        let expr_result = cr
-            .message_program
-            .as_ref()
-            .and_then(|prog| match prog.execute(ctx) {
-                Ok(cel::Value::String(s)) => Some((*s).clone()),
+        let expr_result = cr.message_program.as_ref().and_then(|prog| {
+            match structural::tracking_inexact(|| prog.execute(ctx)) {
+                (Ok(cel::Value::String(s)), false) => Some((*s).clone()),
                 _ => None,
-            });
+            }
+        });
         resolve_failure_message(expr_result.as_deref(), cr.rule.message.as_deref(), || {
             format!("failed rule: {}", cr.rule.rule.trim())
         })
@@ -2307,8 +2322,12 @@ mod tests {
 
     // ── x-kubernetes-embedded-resource tests ────────────────────────
 
+    /// An embedded resource declares `apiVersion`, `kind` and `metadata`
+    /// (`WithTypeAndObjectMeta`) but does not fill them in: one it lacks is
+    /// absent, as on the apiserver (whose objectmeta check requires
+    /// `apiVersion` and `kind` anyway).
     #[test]
-    fn embedded_resource_fields_accessible() {
+    fn embedded_resource_declares_type_and_metadata_unfilled() {
         let schema = json!({
             "type": "object",
             "x-kubernetes-embedded-resource": true,
@@ -2316,8 +2335,8 @@ mod tests {
                 "spec": {"type": "object"}
             },
             "x-kubernetes-validations": [{
-                "rule": "self.apiVersion.size() >= 0",
-                "message": "apiVersion must exist"
+                "rule": "!has(self.apiVersion) && !has(self.kind) && !has(self.metadata) && has(self.spec)",
+                "message": "absent"
             }]
         });
         let obj = json!({"spec": {}});
@@ -2344,8 +2363,8 @@ mod tests {
             "type": "object",
             "x-kubernetes-embedded-resource": true,
             "x-kubernetes-validations": [{
-                "rule": "self.kind.size() >= 0",
-                "message": "kind must exist"
+                "rule": "!has(self.kind) && size(dyn(self)) == 1",
+                "message": "absent"
             }]
         });
         let obj = json!({"spec": {}});

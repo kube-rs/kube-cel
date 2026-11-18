@@ -464,6 +464,9 @@ pub struct CompiledSchema {
     /// check walks it like a raw schema (the apiserver has no nesting limit),
     /// so the rules there are checked exactly as `validate` checks them.
     pub(crate) below_cap: Option<serde_json::Value>,
+    /// The node as the apiserver's `UnstructuredToVal` reads it, for binding
+    /// a rule's `self` and `oldSelf` (see `structural`).
+    pub(crate) shape: std::sync::Arc<crate::validation::structural::Shape>,
 }
 
 impl CompiledSchema {
@@ -622,6 +625,7 @@ fn compile_schema_inner(schema: &serde_json::Value, depth: usize) -> CompiledSch
         return CompiledSchema {
             validations: vec![Err(CompilationError::SchemaTooDeep { depth })],
             below_cap: Some(schema.clone()),
+            shape: crate::validation::structural::Shape::from_json(schema),
             properties: HashMap::new(),
             items: None,
             additional_properties: None,
@@ -643,7 +647,7 @@ fn compile_schema_inner(schema: &serde_json::Value, depth: usize) -> CompiledSch
 
     let validations = compile_schema_validations(schema);
 
-    let mut properties = HashMap::new();
+    let mut properties: HashMap<String, CompiledSchema> = HashMap::new();
     if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
         for (name, prop_schema) in props {
             properties.insert(name.clone(), compile_schema_inner(prop_schema, depth + 1));
@@ -698,6 +702,24 @@ fn compile_schema_inner(schema: &serde_json::Value, depth: usize) -> CompiledSch
         Vec::new()
     };
 
+    // Built from the children's shapes, so the tree is walked once.
+    let shape = crate::validation::structural::Shape::node(
+        schema,
+        Some(
+            properties
+                .iter()
+                .map(|(name, child)| (name.clone(), std::sync::Arc::clone(&child.shape)))
+                .collect(),
+        ),
+        items
+            .as_ref()
+            .filter(|_| schema.get("items").is_some_and(serde_json::Value::is_object))
+            .map(|c| std::sync::Arc::clone(&c.shape)),
+        additional_properties
+            .as_ref()
+            .map(|c| std::sync::Arc::clone(&c.shape)),
+    );
+
     CompiledSchema {
         validations,
         properties,
@@ -717,6 +739,7 @@ fn compile_schema_inner(schema: &serde_json::Value, depth: usize) -> CompiledSch
         list_map_keys,
         nullable,
         below_cap: None,
+        shape,
     }
 }
 

@@ -153,7 +153,11 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   - Under `optionalOldSelf: true`, `oldSelf` is a CEL optional:
     `optional.none()` on create, `optional.of(old)` on update. Write
     `!oldSelf.hasValue() || … oldSelf.value() …` instead of
-    `oldSelf == null || …`.
+    `oldSelf == null || …`. As cel-go resolves an optional variable through
+    its native value, `oldSelf.value()` holds a list or map of the old
+    object as plain JSON (a set a plain list, an object's `null` and
+    undeclared fields present, numbers as JSON has them), and the rule's
+    `messageExpression` sees `oldSelf` itself, not the optional.
   - Item-level transition rules pair each new list item with the old item of
     the same `x-kubernetes-list-map-keys` in an `x-kubernetes-list-type: map`
     list, instead of the old item at the same index. With several keys, float
@@ -167,6 +171,65 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   - Map-list number keys compare as the apiserver decodes JSON: an integer
     past int64 is a float (2^63 and 2^63 + 1 are one key), and a single float
     key `-0.0` equals `0.0`.
+  - An `x-kubernetes-list-type: set` list compares as a set (`["b", "a"] ==
+    ['a', 'b']`; the apiserver's test is equal size and every right-hand
+    element held, so `["a", "b"] == ['a', 'a']` too) and `+` on it is a union
+    keeping its order. An `x-kubernetes-list-type: map` list compares by its
+    keys, and `+` merges by key: the right-hand item replaces the left one in
+    place, new keys are appended. Both used to compare by position and
+    concatenate, so `self.s != oldSelf.s` held for a reordered set
+    (fail-open). Set `==` and `+` look up each right-hand item's value among
+    the elements as the apiserver holds them: a number set decoded from
+    `[1, 2]` is unequal to itself (`int64` keys, double items), a duration
+    set compares strings against durations, and a set of bytes or objects
+    fails (a Go panic). `+` binds what it adds under the left list's items:
+    `(self.s + dyn([1]))[0]` is a double in a number set, and an added
+    map-list item hides its null fields. Where the apiserver's set `+`
+    state could change the outcome, the rule is refused (fail-closed). A map
+    list keys its items as the apiserver does, by the key fields read from
+    each decoded item under their escaped names: a key field whose name
+    escaping changes (`a-b`, `namespace`) is nil in every item, and four
+    keys or more meet where Go's `%v` of the tuples does. An object finds a
+    field from its CEL name through the apiserver's exact unescaping, and
+    its equality passes each JSON name to that lookup, as the apiserver's
+    does, so a field whose name does not unescape to itself (`__foo__`,
+    `a__dot__b`) is skipped there.
+  - A nullable property that is `null` is absent: `has(self.o.x)` is false,
+    `self.o.?x` is `optional.none()` and `'x' in self.o` is false, while
+    `size(self.o)` and iteration still count it, and formatting the object
+    fails, as in the apiserver. A key the schema does not declare
+    (`x-kubernetes-preserve-unknown-fields`) is absent as well, counted, and
+    iterated as `null`. It used to read as `null`, so `has(self.o.x)`
+    held (fail-open).
+  - Every value binds by its own schema node, below `additionalProperties`
+    too (a set there compares as a set). An object with neither
+    `properties` nor `additionalProperties` (free-form under
+    `x-kubernetes-preserve-unknown-fields`, or `additionalProperties: true`)
+    hides its keys, as in the apiserver: `dyn(self.f).a` is no such key and
+    `has()` is false, while `size()` counts them. The `metadata` of the
+    resource root and of an embedded resource declares `name` and
+    `generateName` only, and an embedded resource no longer gets an empty
+    `apiVersion`, `kind` and `metadata` filled in. All of them used to read
+    as plain maps (`has(dyn(self.metadata).labels)` held: fail-open).
+    Migration: a rule reading a free-form object's keys, or `metadata`
+    beyond `name` and `generateName`, is one the apiserver refuses at
+    registration (undefined field) or fails.
+  - A value under a schema node with no `type` but
+    `x-kubernetes-preserve-unknown-fields` binds as the apiserver's
+    `unknownPreserved`: `dyn(self).u == 'x'` compares its JSON, `has()` on it
+    is false, and `size()`, `+`, indexing, `string()` and `type()` fail
+    (refused even where `|| true` would absorb the error, but for indexing:
+    fail-closed). It used to bind as plain JSON (`dyn(self).u.size() == 1`
+    held: fail-open).
+  - `==` between such a list or object and a value of another kind (`dyn`)
+    fails, as the apiserver's no-such-overload error, and so does `==`
+    between an object holding fields its schema does not declare and a map
+    not of its kind. The apiserver's `!=` holds there; kube-cel refuses it
+    too (fail-closed), as `cel`'s equality answers only true or false.
+  - kube-cel's list functions (`join`, `sum`, `min`, `max`, `isSorted`,
+    `indexOf`, `lastIndexOf`, `first`, `last`, `sets.*`, `format`) take such
+    lists and objects; `indexOf`, `lastIndexOf` and `sets.*` compare a set
+    element as a set, and `first` / `last` return it as one.
   - Migration: none for rules the apiserver accepts.
 - **Kubernetes library functions follow the apiserver in more places** (each
   checked live on v1.36.1):
@@ -403,7 +466,9 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   over-5 KiB result falls back to `message` (CRD rules and VAP validations).
 - VAP `object` / `oldObject` / `params` / `namespaceObject` are bound without
   field-name escaping, so `object.metadata.labels['app.kubernetes.io/name']`
-  resolves.
+  resolves. An integer past `i64` in them (and in an `optionalOldSelf`
+  rule's `oldSelf.value()`) binds as a `double`, as Kubernetes' JSON decoder
+  reads it, not a `uint`.
 - A `null` field or map value under a schema node that is neither
   `nullable` nor has a `default` is pruned before defaulting and before the
   rules run, as the apiserver does (`apply_defaults` included): a rule sees

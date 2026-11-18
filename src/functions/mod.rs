@@ -40,7 +40,7 @@ mod go_isprint;
     feature = "ip"
 ))]
 mod dispatch;
-mod val_args;
+pub(crate) mod val_args;
 mod value_ops;
 
 /// Adds functions to a root [`cel::Context`], keeping the first failure instead

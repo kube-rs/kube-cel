@@ -11,10 +11,13 @@
 //!   piece: the errors only a type checker catches (cel-rust#350), see
 //!   [`no_type_checker_fails_open`], and the rules only a cost model refuses
 //!   (on `cel`'s roadmap, cel-rust discussion #230), see
-//!   [`no_cost_model_fails_open`]. Rules on schema nodes the object does not
-//!   reach used to be another, and `format()`'s output a third; since 0.9
-//!   every rule in the schema is compiled before the object is walked, and
-//!   `format()` ports cel-go v0.26's formatter.
+//!   [`no_cost_model_fails_open`]. Besides those, until `cel` carries
+//!   cel-rust#462 (before 0.9.0), a list or map `cel` builds compared with a
+//!   schema-bound one, see [`cel_built_operand_until_cel_rust_462`]. Rules on
+//!   schema nodes the object does not reach used to be another, and
+//!   `format()`'s output a third; since 0.9 every rule in the schema is
+//!   compiled before the object is walked, and `format()` ports cel-go v0.26's
+//!   formatter.
 //!
 //! Each test locks the *current measured* behavior so a divergence cannot
 //! change silently. The human-readable summary lives in the README
@@ -293,6 +296,446 @@ fn dotted_self_fails_closed() {
             message_expression: None,
         }]);
     assert!(results[0].passed, ".object evaluates in a policy");
+}
+
+/// `==` between a list or object of the schema and a value of another kind
+/// (`dyn` gets it past the type checker), or between an object holding fields
+/// its schema does not declare and a map that is not of its kind, is the
+/// apiserver's no-such-overload error, and cel-go's `!=` is
+/// `Equal(..) != true`, so there `!=` holds (Go oracle, kind v1.36.1). `cel`'s
+/// equality can only answer true or false, so kube-cel refuses both.
+#[test]
+fn equality_with_another_kind_fails_closed() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "o": { "type": "object", "properties": { "x": { "type": "integer" } } },
+            "s": { "type": "array", "x-kubernetes-list-type": "set", "items": { "type": "string" } }
+        },
+        "x-kubernetes-validations": [
+            { "rule": "self.o != dyn([1])" },
+            { "rule": "self.s != dyn({'a': 1})" }
+        ]
+    });
+    let object = json!({ "o": { "x": 1 }, "s": ["a"] });
+    let errors = Validator::new().validate(&schema, &object, None).unwrap_err();
+    assert_eq!(errors.len(), 2, "{errors:?}");
+    assert!(
+        errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
+        "{errors:?}"
+    );
+}
+
+/// A two-variable comprehension over an object holding fields its schema
+/// does not declare: the apiserver iterates an undeclared key as `null` and
+/// binds its value as an error, which a body that ignores it never reads
+/// (`all(k, v, true)` holds; Go oracle, kind v1.36.1). `cel` looks the value
+/// up as it binds it, and the lookup of `null` fails the comprehension.
+#[test]
+fn two_variable_comprehension_over_undeclared_fields_fails_closed() {
+    let schema = json!({
+        "type": "object",
+        "properties": { "o": {
+            "type": "object",
+            "properties": { "x": { "type": "integer" } },
+            "x-kubernetes-preserve-unknown-fields": true
+        } },
+        "x-kubernetes-validations": [{ "rule": "dyn(self.o).all(k, v, true)" }]
+    });
+    let errors = Validator::new()
+        .validate(&schema, &json!({ "o": { "x": 1, "z": 2 } }), None)
+        .unwrap_err();
+    assert!(
+        errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
+        "{errors:?}"
+    );
+}
+
+/// The apiserver's set `+` keeps state on its receiver: it adds the new keys
+/// to the receiver's cached set, which a later `+` or `==` on that receiver
+/// reads, and appends into the receiver's slice, whose spare capacity
+/// another `+` on the same elements may share (Go oracle, kind v1.36.1).
+/// kube-cel computes each `+` afresh and refuses the rule where that state
+/// could change the outcome, though here the apiserver accepts.
+#[test]
+fn set_add_state_fails_closed() {
+    let schema = |rule: &str| {
+        json!({
+            "type": "object",
+            "properties": { "s": { "type": "array", "x-kubernetes-list-type": "set", "items": { "type": "integer" } } },
+            "x-kubernetes-validations": [{ "rule": rule }]
+        })
+    };
+    for rule in [
+        "[self.s].all(x, (x + [3]).size() == 3 && x == [1, 3])",
+        "(self.s + [3]).size() == 3 && (self.s + [4]).size() == 3",
+    ] {
+        let errors = Validator::new()
+            .validate(&schema(rule), &json!({ "s": [1, 2] }), None)
+            .unwrap_err();
+        assert!(
+            errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
+            "{rule}: {errors:?}"
+        );
+    }
+    // Across the rules of a set node, which share its `self` (one
+    // activation): the apiserver's `==` finds the 3 the first rule cached.
+    let node = json!({
+        "type": "object",
+        "properties": { "s": {
+            "type": "array",
+            "x-kubernetes-list-type": "set",
+            "items": { "type": "integer" },
+            "x-kubernetes-validations": [
+                { "rule": "(self + [3]).size() == 3" },
+                { "rule": "self == [1, 3]" }
+            ]
+        } }
+    });
+    let errors = Validator::new()
+        .validate(&node, &json!({ "s": [1, 2] }), None)
+        .unwrap_err();
+    assert!(
+        errors.len() == 1 && errors[0].kind == ErrorKind::EvaluationError,
+        "{errors:?}"
+    );
+}
+
+/// `+` onto a set or map list binds each added item under the left list's
+/// items from its Go value, and a map list's `==` keys each right-hand item
+/// by it. kube-cel holds an `additionalProperties` map as a plain map, whose
+/// Go value (its decoded map) it cannot tell from a CEL-built map's, so the
+/// rule is refused; the apiserver binds or keys the decoded map
+/// (`!has(..x)` and `self.m == dyn(self.r)` hold; Go oracle, kind v1.36.1).
+#[test]
+fn plain_map_against_a_map_list_fails_closed() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "l": {
+                "type": "array",
+                "x-kubernetes-list-type": "map",
+                "x-kubernetes-list-map-keys": ["k"],
+                "items": { "type": "object", "properties": { "k": { "type": "string" }, "x": { "type": "integer", "nullable": true } } }
+            },
+            "r": { "type": "array", "items": { "type": "object", "additionalProperties": { "x-kubernetes-int-or-string": true, "nullable": true } } }
+        },
+        "x-kubernetes-validations": [{ "rule": "!has((self.l + dyn(self.r))[0].x)" }]
+    });
+    let errors = Validator::new()
+        .validate(&schema, &json!({ "l": [], "r": [{ "k": "a", "x": null }] }), None)
+        .unwrap_err();
+    assert!(
+        errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
+        "{errors:?}"
+    );
+    // A typeless preserve-unknown value against a plain list field: the
+    // apiserver compares the field's decoded list (`dyn(self).u == dyn(self.a)`
+    // holds), which kube-cel cannot tell from a CEL-built list.
+    let preserved = json!({
+        "type": "object",
+        "properties": {
+            "u": { "x-kubernetes-preserve-unknown-fields": true },
+            "a": { "type": "array", "items": { "type": "integer" } }
+        },
+        "x-kubernetes-validations": [{ "rule": "dyn(self).u == dyn(self.a)" }]
+    });
+    let errors = Validator::new()
+        .validate(&preserved, &json!({ "u": [1], "a": [1] }), None)
+        .unwrap_err();
+    assert!(
+        errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
+        "{errors:?}"
+    );
+    let mut equal = schema.clone();
+    equal["x-kubernetes-validations"] = json!([{ "rule": "self.l == dyn(self.r)" }]);
+    let errors = Validator::new()
+        .validate(
+            &equal,
+            &json!({ "l": [{ "k": "a", "x": 1 }], "r": [{ "k": "a", "x": 1 }] }),
+            None,
+        )
+        .unwrap_err();
+    assert!(
+        errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
+        "{errors:?}"
+    );
+}
+
+/// With four `x-kubernetes-list-map-keys` or more, the apiserver keys a map
+/// list by Go's `%v` of the key tuple; kube-cel prints strings, integers,
+/// booleans and nil as Go does, but not a float, so a map-list `==` or `+`
+/// reaching one is refused (the apiserver evaluates it).
+#[test]
+fn map_list_four_keys_with_a_float_fail_closed() {
+    let s = json!({ "type": "string" });
+    let schema = json!({
+        "type": "object",
+        "properties": { "m": {
+            "type": "array",
+            "x-kubernetes-list-type": "map",
+            "x-kubernetes-list-map-keys": ["a", "b", "c", "d"],
+            "items": { "type": "object", "properties": { "a": s, "b": s, "c": s, "d": { "type": "number" } } }
+        } },
+        "x-kubernetes-validations": [{ "rule": "self.m == self.m" }]
+    });
+    let object = json!({ "m": [{ "a": "a", "b": "b", "c": "c", "d": 1.5 }] });
+    let errors = Validator::new().validate(&schema, &object, None).unwrap_err();
+    assert!(
+        errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
+        "{errors:?}"
+    );
+}
+
+/// A list or map `cel` builds (a literal, a macro's result, a plain list
+/// field) compares unequal to any list or map of another type, so on the
+/// left of `==` / `!=` it never equals a set list, map list or object, which
+/// the apiserver compares by position or key (cel-go `baseList.Equal`,
+/// `baseMap.Equal`); and `cel`'s `in` asks the list's element, where cel-go's
+/// `baseList.Contains` asks the searched value. cel-rust#462 fixes both (the
+/// `in` direction included). These assertions pin today's verdicts, each the
+/// apiserver's opposite (Go oracle, kind v1.36.1), so they fail once `cel`
+/// carries the fix: then drop this test and its README row, before 0.9.0.
+/// kube-cel builds no workaround.
+///
+/// One more waits on the same fix: `+` onto a plain list field binds what it
+/// adds under the list's items on the apiserver, while kube-cel binds a plain
+/// list as `cel`'s own list (a schema-aware one would break `[..] == self.l`
+/// until cel-rust#462), so an added value keeps its own binding. That
+/// assertion flips once kube-cel binds plain lists as schema-aware ones, the
+/// work planned for after the `cel` bump.
+#[test]
+fn cel_built_operand_until_cel_rust_462() {
+    let schema = |rule: &str| {
+        json!({
+            "type": "object",
+            "properties": {
+                "s": { "type": "array", "x-kubernetes-list-type": "set", "items": { "type": "string" } },
+                "a": { "type": "array", "items": { "type": "string" } },
+                "m": {
+                    "type": "array",
+                    "x-kubernetes-list-type": "map",
+                    "x-kubernetes-list-map-keys": ["k"],
+                    "items": { "type": "object", "properties": { "k": { "type": "string" } } }
+                },
+                "o": { "type": "object", "properties": { "y": { "type": "integer" } } },
+                "l": { "type": "array", "items": { "type": "number" } },
+                "u": { "x-kubernetes-preserve-unknown-fields": true }
+            },
+            "x-kubernetes-validations": [{ "rule": rule }]
+        })
+    };
+    let object = json!({
+        "s": ["b", "a"],
+        "a": ["b", "a"],
+        "m": [{ "k": "b" }, { "k": "a" }],
+        "o": { "y": 1 },
+        "l": [],
+        "u": "x"
+    });
+    // (rule, whether the apiserver accepts the object)
+    for (rule, apiserver_accepts) in [
+        // Fail-open today.
+        ("['b', 'a'] != self.s", false),
+        ("self.a != self.s", false),
+        ("self.s.filter(x, true) != self.s", false),
+        ("self.m.map(x, x) != self.m", false),
+        ("dyn({'y': 1}) != dyn(self.o)", false),
+        ("['a', 'b'] in [self.s]", false),
+        ("'x' in [dyn(self).u]", false),
+        // Fail-closed today.
+        ("['b', 'a'] == self.s", true),
+        ("self.s in [['a', 'b']]", true),
+    ] {
+        let kube_cel_accepts = Validator::new().validate(&schema(rule), &object, None).is_ok();
+        assert_eq!(
+            kube_cel_accepts, !apiserver_accepts,
+            "{rule}: no longer diverges; if `cel` now carries cel-rust#462, drop this test and its README row"
+        );
+    }
+    // The added int is a double on the apiserver, an int in kube-cel today.
+    let rule = "type((self.l + dyn([1]))[0]) == int";
+    assert!(
+        Validator::new().validate(&schema(rule), &object, None).is_ok(),
+        "{rule}: no longer diverges; if plain lists now bind as schema-aware lists, drop this assertion and its part of the README row"
+    );
+}
+
+/// `+` stores what it adds, and the apiserver binds an element under the
+/// list's items when it reads it: one they refuse is an error value then,
+/// which a comprehension's body may not read (`all(x, true)` holds; Go
+/// oracle, kind v1.36.1). kube-cel binds it lazily too, so `size()` and
+/// `|| true` agree, but `cel` iterates values, not errors, so iterating it is
+/// refused.
+#[test]
+fn iterating_a_refused_added_element_fails_closed() {
+    let schema = |rule: &str| {
+        json!({
+            "type": "object",
+            "properties": { "s": { "type": "array", "x-kubernetes-list-type": "set", "items": { "type": "integer" } } },
+            "x-kubernetes-validations": [{ "rule": rule }]
+        })
+    };
+    let object = json!({ "s": [] });
+    let validator = Validator::new();
+    assert!(
+        validator
+            .validate(
+                &schema(
+                    "(self.s + dyn(['a'])).size() == 1 && ((self.s + dyn(['a']))[0] == dyn('a') || true)"
+                ),
+                &object,
+                None
+            )
+            .is_ok()
+    );
+    let errors = validator
+        .validate(&schema("(self.s + dyn(['a'])).all(x, true)"), &object, None)
+        .unwrap_err();
+    assert!(
+        errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
+        "{errors:?}"
+    );
+}
+
+/// An element `+` added binds lazily, and so does each field of it, but a
+/// list or map field binds its values at once: one value its schema refuses
+/// makes the whole field an error where read, while the apiserver binds the
+/// field's values only as they are read (`x.size() == 2` holds; Go oracle,
+/// kind v1.36.1).
+#[test]
+fn nested_field_of_an_added_element_fails_closed() {
+    let map_of = |x: serde_json::Value| {
+        json!({
+            "type": "array",
+            "x-kubernetes-list-type": "map",
+            "x-kubernetes-list-map-keys": ["k"],
+            "items": { "type": "object", "properties": { "k": { "type": "string" }, "x": x } }
+        })
+    };
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "l": map_of(json!({ "type": "array", "items": { "type": "integer" } })),
+            "r": map_of(json!({ "type": "array", "items": { "x-kubernetes-int-or-string": true } }))
+        },
+        "x-kubernetes-validations": [{ "rule": "(self.l + dyn(self.r))[0].x.size() == 2" }]
+    });
+    let errors = Validator::new()
+        .validate(
+            &schema,
+            &json!({ "l": [], "r": [{ "k": "a", "x": ["a", 1] }] }),
+            None,
+        )
+        .unwrap_err();
+    assert!(
+        errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
+        "{errors:?}"
+    );
+}
+
+/// The apiserver's `unknownPreserved` fails every operation but `==` and a
+/// field test, and `|| true` absorbs the error (Go oracle, kind v1.36.1).
+/// `cel` reads the value's type for `type()`, which cannot fail, and for
+/// overload lookup and error messages too; kube-cel refuses every such read,
+/// so the absorbed forms are refused, but for indexing, which errors
+/// without reading the type.
+#[test]
+fn absorbed_operation_on_a_preserved_value_fails_closed() {
+    let schema = |rule: &str| {
+        json!({
+            "type": "object",
+            "properties": { "u": { "x-kubernetes-preserve-unknown-fields": true } },
+            "x-kubernetes-validations": [{ "rule": rule }]
+        })
+    };
+    let object = json!({ "u": "x" });
+    let validator = Validator::new();
+    for rule in [
+        "type(dyn(self).u) != string || true",
+        "(dyn(self).u.size() == 1) || true",
+        "(dyn(self).u + 1 == 2) || true",
+    ] {
+        let errors = validator.validate(&schema(rule), &object, None).unwrap_err();
+        assert!(
+            errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
+            "{rule}: {errors:?}"
+        );
+    }
+    assert!(
+        validator
+            .validate(&schema("dyn(self).u[0] == 1 || true"), &object, None)
+            .is_ok()
+    );
+}
+
+/// A set held in a list or map is bound afresh on each `Get` / `Find`, so a
+/// variable holding the whole container carries no `+` state between two
+/// reads of the set (Go oracle, kind v1.36.1). `cel` copies the set when it
+/// copies its container, through the same `clone_as_boxed` as when a
+/// variable holds the set itself (`[self.l[0]]`, where the state does
+/// carry), so kube-cel keeps one wrapper and refuses the second `+`.
+#[test]
+fn set_in_a_held_container_fails_closed() {
+    let int_set = json!({ "type": "array", "x-kubernetes-list-type": "set", "items": { "type": "integer" } });
+    let schema = |rule: &str| {
+        json!({
+            "type": "object",
+            "properties": {
+                "l": { "type": "array", "items": int_set },
+                "d": { "type": "object", "additionalProperties": int_set }
+            },
+            "x-kubernetes-validations": [{ "rule": rule }]
+        })
+    };
+    let object = json!({ "l": [[1, 2]], "d": { "k": [1, 2] } });
+    for rule in [
+        "[self.l].all(x, (x[0] + [3]).size() == 3 && (x[0] + [3]).size() == 3)",
+        "[self.d].all(x, (x['k'] + [3]).size() == 3 && (x['k'] + [3]).size() == 3)",
+    ] {
+        let errors = Validator::new()
+            .validate(&schema(rule), &object, None)
+            .unwrap_err();
+        assert!(
+            errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
+            "{rule}: {errors:?}"
+        );
+    }
+}
+
+/// A presence test on a scalar: the apiserver's cel-go answers `has()` with
+/// false and `.?` with none (Go oracle, kind v1.36.1), while `cel` refuses
+/// it, as cel-spec has it. An `optionalOldSelf` rule's `oldSelf.value()`
+/// holds a typeless preserve-unknown value as a plain scalar, so it reaches
+/// this too.
+#[test]
+fn presence_test_on_a_scalar_fails_closed() {
+    let schema = |props: serde_json::Value, rule: serde_json::Value| json!({ "type": "object", "properties": props, "x-kubernetes-validations": [rule] });
+    let string = json!({ "s": { "type": "string" } });
+    for rule in ["!has(dyn(self.s).a)", "!dyn(self.s).?a.hasValue()"] {
+        let errors = Validator::new()
+            .validate(
+                &schema(string.clone(), json!({ "rule": rule })),
+                &json!({ "s": "x" }),
+                None,
+            )
+            .unwrap_err();
+        assert!(
+            errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
+            "{rule}: {errors:?}"
+        );
+    }
+    let preserved = schema(
+        json!({ "u": { "x-kubernetes-preserve-unknown-fields": true } }),
+        json!({ "rule": "!oldSelf.hasValue() || !has(dyn(oldSelf.value()).u.a)", "optionalOldSelf": true }),
+    );
+    let errors = Validator::new()
+        .validate(&preserved, &json!({ "u": "x" }), Some(&json!({ "u": "x" })))
+        .unwrap_err();
+    assert!(
+        errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
+        "{errors:?}"
+    );
 }
 
 /// `variables` is declared for a policy with `spec.variables` only

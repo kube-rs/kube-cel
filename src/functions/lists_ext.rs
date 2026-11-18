@@ -248,8 +248,14 @@ fn flatten_into<'v>(
 /// `1`, `1u` and `1.0` are one element.
 fn distinct<'b, 'v>(args: Vec<CowVal<'b, 'v>>) -> Result<CowVal<'b, 'v>, ExecutionError> {
     let [list] = take_args(args)?;
+    let items = elements(list.as_ref())?;
+    // cel-go's `distinctList` returns an empty list itself, so an empty set
+    // stays a set (its `+` a union).
+    if items.is_empty() {
+        return Ok(list);
+    }
     let mut unique: Vec<&dyn Val> = Vec::new();
-    for item in elements(list.as_ref())? {
+    for item in items {
         if !unique.iter().any(|seen| item.equals(*seen)) {
             unique.push(item);
         }
@@ -275,6 +281,12 @@ fn reverse<'b, 'v>(args: Vec<CowVal<'b, 'v>>) -> Result<CowVal<'b, 'v>, Executio
 fn sort<'b, 'v>(args: Vec<CowVal<'b, 'v>>) -> Result<CowVal<'b, 'v>, ExecutionError> {
     let [list] = take_args(args)?;
     let items = elements(list.as_ref())?;
+    // cel-go's `sortListByAssociatedKeys` returns an empty list itself, so an
+    // empty set stays a set. (`sortBy` binds its target first and comes out
+    // a plain list on the apiserver, as here.)
+    if items.is_empty() {
+        return Ok(list);
+    }
     let order = sorted_indices(&items, "sort")?;
     Ok(owned_list(
         order.into_iter().map(|i| items[i].clone_as_boxed()).collect(),

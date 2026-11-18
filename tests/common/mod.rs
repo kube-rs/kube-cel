@@ -286,6 +286,219 @@ pub fn transition_cases() -> Vec<TransitionCase> {
             expect: Expect::Reject,
             note: "single key -0.0 and 0.0 compare equal → correlated, 1 < 5 → REJECT",
         },
+        // A set compares as a set and a map list by key, whatever the order;
+        // map list + map list merges by key, the right item replacing the
+        // left in place and new keys appended (`unstructuredMapList`).
+        TransitionCase {
+            kind: "TxSetEqual",
+            plural: "txsetequals",
+            schema: json!({
+                "type": "object",
+                "properties": { "s": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "set", "items": { "type": "string", "maxLength": 4 } } },
+                "x-kubernetes-validations": [{ "rule": "self.s == oldSelf.s", "message": "m" }]
+            }),
+            old: json!({ "s": ["a", "b"] }),
+            object: json!({ "s": ["b", "a"] }),
+            expect: Expect::Accept,
+            note: "reordered set == old set → accepted",
+        },
+        TransitionCase {
+            kind: "TxSetNotEqual",
+            plural: "txsetnotequals",
+            schema: json!({
+                "type": "object",
+                "properties": { "s": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "set", "items": { "type": "string", "maxLength": 4 } } },
+                "x-kubernetes-validations": [{ "rule": "self.s != oldSelf.s", "message": "m" }]
+            }),
+            old: json!({ "s": ["a", "b"] }),
+            object: json!({ "s": ["b", "a"] }),
+            expect: Expect::Reject,
+            note: "reordered set is not != old set → rejected",
+        },
+        TransitionCase {
+            kind: "TxMapListEqual",
+            plural: "txmaplistequals",
+            schema: json!({
+                "type": "object",
+                "properties": { "m": {
+                        "type": "array",
+                        "maxItems": 4,
+                        "x-kubernetes-list-type": "map",
+                        "x-kubernetes-list-map-keys": ["k"],
+                        "items": {
+                            "type": "object",
+                            "required": ["k"],
+                            "properties": { "k": { "type": "string", "maxLength": 4 }, "v": { "type": "integer" } }
+                        }
+                    } },
+                "x-kubernetes-validations": [{ "rule": "self.m == oldSelf.m", "message": "m" }]
+            }),
+            old: json!({ "m": [{ "k": "a", "v": 2 }, { "k": "b", "v": 1 }] }),
+            object: json!({ "m": [{ "k": "b", "v": 1 }, { "k": "a", "v": 2 }] }),
+            expect: Expect::Accept,
+            note: "reordered map list == old map list → accepted",
+        },
+        TransitionCase {
+            kind: "TxMapListNotEqual",
+            plural: "txmaplistnotequals",
+            schema: json!({
+                "type": "object",
+                "properties": { "m": {
+                        "type": "array",
+                        "maxItems": 4,
+                        "x-kubernetes-list-type": "map",
+                        "x-kubernetes-list-map-keys": ["k"],
+                        "items": {
+                            "type": "object",
+                            "required": ["k"],
+                            "properties": { "k": { "type": "string", "maxLength": 4 }, "v": { "type": "integer" } }
+                        }
+                    } },
+                "x-kubernetes-validations": [{ "rule": "self.m != oldSelf.m", "message": "m" }]
+            }),
+            old: json!({ "m": [{ "k": "a", "v": 2 }, { "k": "b", "v": 1 }] }),
+            object: json!({ "m": [{ "k": "b", "v": 1 }, { "k": "a", "v": 2 }] }),
+            expect: Expect::Reject,
+            note: "reordered map list is not != old map list → rejected",
+        },
+        TransitionCase {
+            kind: "TxMapListMerge",
+            plural: "txmaplistmerges",
+            schema: json!({
+                "type": "object",
+                "properties": { "m": {
+                        "type": "array",
+                        "maxItems": 4,
+                        "x-kubernetes-list-type": "map",
+                        "x-kubernetes-list-map-keys": ["k"],
+                        "items": {
+                            "type": "object",
+                            "required": ["k"],
+                            "properties": { "k": { "type": "string", "maxLength": 4 }, "v": { "type": "integer" } }
+                        }
+                    } },
+                "x-kubernetes-validations": [{ "rule": "size(oldSelf.m + self.m) == 2 && (oldSelf.m + self.m)[0].v == 3 && (oldSelf.m + self.m)[1].k == 'b'", "message": "m" }]
+            }),
+            old: json!({ "m": [{ "k": "a", "v": 1 }] }),
+            object: json!({ "m": [{ "k": "b", "v": 2 }, { "k": "a", "v": 3 }] }),
+            expect: Expect::Accept,
+            note: "old + new merges by key: [a: 3, b: 2] → accepted",
+        },
+        TransitionCase {
+            kind: "TxMapListEscapedMerge",
+            plural: "txmaplistescapedmerges",
+            schema: json!({
+                "type": "object",
+                "properties": { "m": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "map", "x-kubernetes-list-map-keys": ["a-b"], "items": { "type": "object", "required": ["a-b"], "properties": { "a-b": { "type": "string", "maxLength": 8 }, "v": { "type": "integer" } } } } },
+                "x-kubernetes-validations": [{ "rule": "size(self.m + oldSelf.m) == 2 && (self.m + oldSelf.m)[1].v == 3", "message": "m" }]
+            }),
+            old: json!({ "m": [{ "a-b": "b", "v": 22 }, { "a-b": "c", "v": 3 }] }),
+            object: json!({ "m": [{ "a-b": "a", "v": 1 }, { "a-b": "b", "v": 2 }] }),
+            expect: Expect::Accept,
+            note: "all keys nil: both old items replace the last new one in turn → accepted",
+        },
+        // An `optionalOldSelf` rule's `oldSelf.value()` is the old value's
+        // `Value()` bound again by cel-go's `NativeToValue`: plain JSON, so a
+        // set is a plain list (its `+` concatenates) and an object shows its
+        // `null` and undeclared fields.
+        TransitionCase {
+            kind: "TxOptionalSetPlain",
+            plural: "txoptionalsetplains",
+            schema: json!({
+                "type": "object",
+                "properties": { "s": {
+                    "type": "array",
+                    "maxItems": 4,
+                    "x-kubernetes-list-type": "set",
+                    "items": { "type": "integer" },
+                    "x-kubernetes-validations": [{
+                        "rule": "!oldSelf.hasValue() || (oldSelf.value() + dyn([1u, 1u])).size() == 3",
+                        "message": "m",
+                        "optionalOldSelf": true
+                    }]
+                } }
+            }),
+            old: json!({ "s": [1, 2] }),
+            object: json!({ "s": [1, 4] }),
+            expect: Expect::Reject,
+            note: "oldSelf.value() is a plain list: + keeps both 1u → size 4, rejected",
+        },
+        TransitionCase {
+            kind: "TxOptionalObjectPlain",
+            plural: "txoptionalobjectplains",
+            schema: json!({
+                "type": "object",
+                "properties": { "o": {
+                    "type": "object",
+                    "properties": { "x": { "type": "integer", "nullable": true }, "n": { "type": "number" } },
+                    "x-kubernetes-preserve-unknown-fields": true
+                } },
+                "x-kubernetes-validations": [{
+                    "rule": "!oldSelf.hasValue() || (has(oldSelf.value().o.x) && type(oldSelf.value().o.n) == int && dyn(oldSelf.value().o).z == 2)",
+                    "message": "m",
+                    "optionalOldSelf": true
+                }]
+            }),
+            old: json!({ "o": { "x": null, "n": 1, "z": 2 } }),
+            object: json!({ "o": { "x": null, "n": 2, "z": 2 } }),
+            expect: Expect::Accept,
+            note: "oldSelf.value() is plain JSON: null x present, n an int, z visible → accepted",
+        },
+        // `oldSelf.value()` is the old JSON as Kubernetes' decoder reads it:
+        // an integer past int64 is a float64, a double in CEL. (`type: number`,
+        // as OpenAPI refuses such a float64 under `type: integer`.)
+        TransitionCase {
+            kind: "TxOptionalBigInt",
+            plural: "txoptionalbigints",
+            schema: json!({
+                "type": "object",
+                "properties": { "n": { "type": "number" } },
+                "x-kubernetes-validations": [{
+                    "rule": "!oldSelf.hasValue() || type(oldSelf.value().n) == double",
+                    "message": "m",
+                    "optionalOldSelf": true
+                }]
+            }),
+            old: json!({ "n": 9223372036854775808u64 }),
+            object: json!({ "n": 9223372036854775808u64 }),
+            expect: Expect::Accept,
+            note: "an integer past int64 decodes as a float64 → double, accepted",
+        },
+        // An `optionalOldSelf` rule's `messageExpression` compiles against the
+        // optional `oldSelf` (so it reads it through `dyn`) and evaluates on
+        // the node's activation, where `oldSelf` is the plain old object.
+        TransitionCase {
+            kind: "TxOptionalMessage",
+            plural: "txoptionalmessages",
+            schema: json!({
+                "type": "object",
+                "properties": { "s": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "set", "items": { "type": "integer" } } },
+                "x-kubernetes-validations": [{
+                    "rule": "!oldSelf.hasValue()",
+                    "messageExpression": "size(dyn(oldSelf).s) == 2 ? 'old 2' : 'other'",
+                    "optionalOldSelf": true
+                }]
+            }),
+            old: json!({ "s": [1, 2] }),
+            object: json!({ "s": [1, 4] }),
+            expect: Expect::Reject,
+            note: "the message registers and the rule fails on update → rejected (message: old 2)",
+        },
+        // Object equality passes each raw field name to `Find`, which
+        // unescapes it: `__foo__` and `a__dot__b` are absent on both sides.
+        TransitionCase {
+            kind: "TxObjectUnescapedEqual",
+            plural: "txobjectunescapedequals",
+            schema: json!({
+                "type": "object",
+                "properties": { "o": { "type": "object", "properties": { "__foo__": { "type": "integer" }, "a__dot__b": { "type": "integer" }, "a-b": { "type": "integer" }, "namespace": { "type": "integer" }, "x": { "type": "integer" } } } },
+                "x-kubernetes-validations": [{ "rule": "self.o != oldSelf.o", "message": "m" }]
+            }),
+            old: json!({ "o": { "__foo__": 2, "a__dot__b": 2, "x": 0 } }),
+            object: json!({ "o": { "__foo__": 1, "a__dot__b": 1, "x": 0 } }),
+            expect: Expect::Reject,
+            note: "fields whose names do not unescape are skipped: the objects are equal → rejected",
+        },
     ]
 }
 
@@ -2288,6 +2501,670 @@ pub fn cases() -> Vec<ParityCase> {
             object: json!({ "l": [{ "1abc": 1, "ok": 1 }, { "1abc": 2, "ok": 1 }, { "1abc": 2, "a b": 1, "ok": 1 }] }),
             expect: Expect::Accept,
             note: "objects differing only in a field name CEL cannot spell are not equal → accepted",
+        },
+        // `x-kubernetes-list-type: set` lists compare as sets and add as
+        // unions (`unstructuredSetList`); a nullable property set to null is
+        // absent to `has()` and `.?`, yet counted by `size` and iteration
+        // (`unstructuredMap`); kube-cel's functions read these values, keeping
+        // a set element's equality (`indexOf` puts the element on the left).
+        ParityCase {
+            kind: "PsetEqual",
+            plural: "psetequals",
+            schema: json!({
+                "type": "object",
+                "properties": { "s": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "set", "items": { "type": "string", "maxLength": 4 } } },
+                "x-kubernetes-validations": [{ "rule": "self.s == ['a', 'b']", "message": "m" }]
+            }),
+            object: json!({ "s": ["b", "a"] }),
+            expect: Expect::Accept,
+            note: "a set equals the same elements in another order → accepted",
+        },
+        ParityCase {
+            kind: "PsetNotEqual",
+            plural: "psetnotequals",
+            schema: json!({
+                "type": "object",
+                "properties": { "s": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "set", "items": { "type": "string", "maxLength": 4 } } },
+                "x-kubernetes-validations": [{ "rule": "self.s != ['a', 'b']", "message": "m" }]
+            }),
+            object: json!({ "s": ["b", "a"] }),
+            expect: Expect::Reject,
+            note: "a set is not unequal to the same elements in another order → rejected",
+        },
+        ParityCase {
+            kind: "PsetEqualRepeats",
+            plural: "psetequalrepeatss",
+            schema: json!({
+                "type": "object",
+                "properties": { "s": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "set", "items": { "type": "string", "maxLength": 4 } } },
+                "x-kubernetes-validations": [{ "rule": "self.s == ['a', 'a']", "message": "m" }]
+            }),
+            object: json!({ "s": ["a", "b"] }),
+            expect: Expect::Accept,
+            note: "set equality is equal size and every right element held, so [a, b] == [a, a] → accepted",
+        },
+        ParityCase {
+            kind: "PsetUnion",
+            plural: "psetunions",
+            schema: json!({
+                "type": "object",
+                "properties": { "s": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "set", "items": { "type": "string", "maxLength": 4 } } },
+                "x-kubernetes-validations": [{ "rule": "size(self.s + ['c', 'a']) == 3 && (self.s + ['c', 'a'])[2] == 'c'", "message": "m" }]
+            }),
+            object: json!({ "s": ["b", "a"] }),
+            expect: Expect::Accept,
+            note: "set + list is a union keeping the set's order: [b, a, c] → accepted",
+        },
+        ParityCase {
+            kind: "PnullPropAbsent",
+            plural: "pnullpropabsents",
+            schema: json!({
+                "type": "object",
+                "properties": { "o": { "type": "object", "properties": { "x": { "type": "integer", "nullable": true }, "y": { "type": "integer" } } } },
+                "x-kubernetes-validations": [{ "rule": "!has(self.o.x) && !self.o.?x.hasValue() && !('x' in dyn(self.o)) && size(dyn(self.o)) == 2 && dyn(self.o).exists(k, k == 'x')", "message": "m" }]
+            }),
+            object: json!({ "o": { "x": null, "y": 1 } }),
+            expect: Expect::Accept,
+            note: "a null property is absent to has(), .? and in, yet counted by size and iteration → accepted",
+        },
+        ParityCase {
+            kind: "PnullPropHas",
+            plural: "pnullprophass",
+            schema: json!({
+                "type": "object",
+                "properties": { "o": { "type": "object", "properties": { "x": { "type": "integer", "nullable": true }, "y": { "type": "integer" } } } },
+                "x-kubernetes-validations": [{ "rule": "has(self.o.x)", "message": "m" }]
+            }),
+            object: json!({ "o": { "x": null, "y": 1 } }),
+            expect: Expect::Reject,
+            note: "has() of a null property is false → rejected",
+        },
+        ParityCase {
+            kind: "PnullPropOptional",
+            plural: "pnullpropoptionals",
+            schema: json!({
+                "type": "object",
+                "properties": { "o": { "type": "object", "properties": { "x": { "type": "integer", "nullable": true }, "y": { "type": "integer" } } } },
+                "x-kubernetes-validations": [{ "rule": "self.o.?x.hasValue()", "message": "m" }]
+            }),
+            object: json!({ "o": { "x": null, "y": 1 } }),
+            expect: Expect::Reject,
+            note: ".? of a null property is none → rejected",
+        },
+        ParityCase {
+            kind: "PsetFunctions",
+            plural: "psetfunctionss",
+            schema: json!({
+                "type": "object",
+                "properties": { "s": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "set", "items": { "type": "string", "maxLength": 4 } }, "n": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "set", "items": { "type": "integer" } } },
+                "x-kubernetes-validations": [{ "rule": "self.s.join(',') == 'b,a' && self.s.indexOf('a') == 1 && self.s.lastIndexOf('b') == 0 && self.n.sum() == 3 && self.n.min() == 1 && self.n.max() == 2 && !self.n.isSorted() && self.s.first().value() == 'b' && self.s.last().value() == 'a' && sets.contains(self.s, ['a']) && sets.equivalent(self.s, ['a', 'b']) && sets.intersects(self.s, ['a']) && '%s'.format([self.s]) == '[\"b\", \"a\"]' && '%s'.format([self.n]) == '[2, 1]'", "message": "m" }]
+            }),
+            object: json!({ "s": ["b", "a"], "n": [2, 1] }),
+            expect: Expect::Accept,
+            note: "list functions read a set in its stored order → accepted",
+        },
+        ParityCase {
+            kind: "PsetNested",
+            plural: "psetnesteds",
+            schema: json!({
+                "type": "object",
+                "properties": { "l": { "type": "array", "maxItems": 3, "items": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "set", "items": { "type": "string", "maxLength": 4 } } } },
+                "x-kubernetes-validations": [{ "rule": "self.l.indexOf(['a', 'b']) == 0 && self.l.lastIndexOf(['a', 'b']) == 0 && self.l[0] == ['a', 'b'] && ['a', 'b'] in self.l && sets.contains(self.l, [['a', 'b']]) && self.l.first().value() == ['a', 'b']", "message": "m" }]
+            }),
+            object: json!({ "l": [["b", "a"], ["c"]] }),
+            expect: Expect::Accept,
+            note: "a set inside a list is found and returned as a set → accepted",
+        },
+        ParityCase {
+            kind: "PsetNestedIndex",
+            plural: "psetnestedindexs",
+            schema: json!({
+                "type": "object",
+                "properties": { "l": { "type": "array", "maxItems": 3, "items": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "set", "items": { "type": "string", "maxLength": 4 } } } },
+                "x-kubernetes-validations": [{ "rule": "self.l.indexOf(['a', 'b']) == -1", "message": "m" }]
+            }),
+            object: json!({ "l": [["b", "a"], ["c"]] }),
+            expect: Expect::Reject,
+            note: "indexOf finds a set element through set equality → index 0, rejected",
+        },
+        // `==` with a value of another kind (past the type checker by `dyn`)
+        // is the apiserver's no-such-overload error, and so is an object with
+        // undeclared fields against a map not of its kind; `null` compares
+        // plainly, and sizes are compared first.
+        ParityCase {
+            kind: "PobjEqualOtherKind",
+            plural: "pobjequalotherkinds",
+            schema: json!({
+                "type": "object",
+                "properties": { "o": { "type": "object", "properties": { "x": { "type": "integer", "nullable": true } } } },
+                "x-kubernetes-validations": [{ "rule": "self.o == dyn([1])", "message": "m" }]
+            }),
+            object: json!({ "o": { "x": null } }),
+            expect: Expect::Reject,
+            note: "object == list is a no-such-overload error → rejected",
+        },
+        ParityCase {
+            kind: "PobjUnknownEqualMap",
+            plural: "pobjunknownequalmaps",
+            schema: json!({
+                "type": "object",
+                "properties": { "o": { "type": "object", "properties": { "x": { "type": "integer" } }, "x-kubernetes-preserve-unknown-fields": true } },
+                "x-kubernetes-validations": [{ "rule": "self.o == dyn({'x': 1, 'z': 999})", "message": "m" }]
+            }),
+            object: json!({ "o": { "x": 1, "z": 2 } }),
+            expect: Expect::Reject,
+            note: "an undeclared field against a plain map is an error → rejected",
+        },
+        ParityCase {
+            kind: "PobjUnknownSizeFirst",
+            plural: "pobjunknownsizefirsts",
+            schema: json!({
+                "type": "object",
+                "properties": { "o": { "type": "object", "properties": { "x": { "type": "integer" } }, "x-kubernetes-preserve-unknown-fields": true } },
+                "x-kubernetes-validations": [{ "rule": "self.o != dyn({'x': 1}) && self.o == self.o", "message": "m" }]
+            }),
+            object: json!({ "o": { "x": 1, "z": 2 } }),
+            expect: Expect::Accept,
+            note: "sizes differ before any field is compared; an object equals itself → accepted",
+        },
+        ParityCase {
+            kind: "PobjNotNull",
+            plural: "pobjnotnulls",
+            schema: json!({
+                "type": "object",
+                "properties": { "o": { "type": "object", "properties": { "x": { "type": "integer", "nullable": true } } }, "s": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "set", "items": { "type": "string", "maxLength": 4 } } },
+                "x-kubernetes-validations": [{ "rule": "self.o != null && dyn(self.o) != null && dyn(self.s) != null", "message": "m" }]
+            }),
+            object: json!({ "o": { "x": 1 }, "s": ["a"] }),
+            expect: Expect::Accept,
+            note: "null on one side compares plainly → accepted",
+        },
+        // The apiserver iterates an object's raw keys: a declared property,
+        // then a nil per undeclared one, which a comprehension binds as `null`
+        // and the formatter fails on.
+        ParityCase {
+            kind: "PobjUnknownIterate",
+            plural: "pobjunknowniterates",
+            schema: json!({
+                "type": "object",
+                "properties": { "o": { "type": "object", "properties": { "x": { "type": "integer" } }, "x-kubernetes-preserve-unknown-fields": true } },
+                "x-kubernetes-validations": [{ "rule": "dyn(self.o).all(k, k == 'x')", "message": "m" }]
+            }),
+            object: json!({ "o": { "x": 1, "z": 2 } }),
+            expect: Expect::Reject,
+            note: "the undeclared key iterates as null, not x → rejected",
+        },
+        ParityCase {
+            kind: "PobjUnknownKeysNull",
+            plural: "pobjunknownkeysnulls",
+            schema: json!({
+                "type": "object",
+                "properties": { "o": { "type": "object", "properties": { "x": { "type": "integer" } }, "x-kubernetes-preserve-unknown-fields": true } },
+                "x-kubernetes-validations": [{ "rule": "dyn(self.o).map(k, 1).size() == 2 && !dyn(self.o).exists(k, k == 'z') && dyn(self.o).exists(k, k == null) && dyn(self.o).filter(k, k != null) == ['x']", "message": "m" }]
+            }),
+            object: json!({ "o": { "x": 1, "z": 2 } }),
+            expect: Expect::Accept,
+            note: "two keys iterate: x, then null for z → accepted",
+        },
+        ParityCase {
+            kind: "PobjUnknownFormat",
+            plural: "pobjunknownformats",
+            schema: json!({
+                "type": "object",
+                "properties": { "o": { "type": "object", "properties": { "x": { "type": "integer" } }, "x-kubernetes-preserve-unknown-fields": true } },
+                "x-kubernetes-validations": [{ "rule": "'%s'.format([dyn(self.o)]) != ''", "message": "m" }]
+            }),
+            object: json!({ "o": { "x": 1, "z": 2 } }),
+            expect: Expect::Reject,
+            note: "formatting an object with an undeclared key fails → rejected",
+        },
+        // A value binds by its own schema node at any depth: below
+        // `additionalProperties` too. An object with neither `properties` nor
+        // `additionalProperties` (free-form, or `additionalProperties: true`)
+        // hides every key; an embedded resource declares `apiVersion`, `kind`
+        // and `metadata` (`name`, `generateName`) and fills in none of them.
+        ParityCase {
+            kind: "PaddlSet",
+            plural: "paddlsets",
+            schema: json!({
+                "type": "object",
+                "properties": { "a": { "type": "object", "maxProperties": 4, "additionalProperties": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "set", "items": { "type": "string", "maxLength": 4 } } } },
+                "x-kubernetes-validations": [{ "rule": "(self.a['k'] + ['a', 'b']).size() == 2 && self.a['k'] == ['a', 'b']", "message": "m" }]
+            }),
+            object: json!({ "a": { "k": ["b", "a"] } }),
+            expect: Expect::Accept,
+            note: "a set below additionalProperties is a set → accepted",
+        },
+        ParityCase {
+            kind: "PaddlObjectNull",
+            plural: "paddlobjectnulls",
+            schema: json!({
+                "type": "object",
+                "properties": { "a": { "type": "object", "maxProperties": 4, "additionalProperties": { "type": "object", "properties": { "x": { "type": "integer", "nullable": true } } } } },
+                "x-kubernetes-validations": [{ "rule": "has(self.a['k'].x)", "message": "m" }]
+            }),
+            object: json!({ "a": { "k": { "x": null } } }),
+            expect: Expect::Reject,
+            note: "a null property below additionalProperties is absent → rejected",
+        },
+        ParityCase {
+            kind: "PaddlNested",
+            plural: "paddlnesteds",
+            schema: json!({
+                "type": "object",
+                "properties": { "l": { "type": "array", "maxItems": 2, "items": { "type": "object", "maxProperties": 4, "additionalProperties": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "set", "items": { "type": "string", "maxLength": 4 } } } } },
+                "x-kubernetes-validations": [{ "rule": "self.l[0]['k'] == ['a', 'b']", "message": "m" }]
+            }),
+            object: json!({ "l": [{ "k": ["b", "a"] }] }),
+            expect: Expect::Accept,
+            note: "list of maps of sets: the set compares as a set → accepted",
+        },
+        ParityCase {
+            kind: "PfreeFormHidden",
+            plural: "pfreeformhiddens",
+            schema: json!({
+                "type": "object",
+                "properties": { "f": { "type": "object", "x-kubernetes-preserve-unknown-fields": true }, "t": { "type": "object", "additionalProperties": true } },
+                "x-kubernetes-validations": [{ "rule": "!has(dyn(self.f).a) && size(dyn(self.f)) == 1 && dyn(self.f).all(k, k == null) && !('a.b/c' in dyn(self.t)) && size(dyn(self.t)) == 1", "message": "m" }]
+            }),
+            object: json!({ "f": { "a": 1 }, "t": { "a.b/c": "x" } }),
+            expect: Expect::Accept,
+            note: "a free-form object hides its keys, counted and iterated as null → accepted",
+        },
+        ParityCase {
+            kind: "PfreeFormGet",
+            plural: "pfreeformgets",
+            schema: json!({
+                "type": "object",
+                "properties": { "f": { "type": "object", "x-kubernetes-preserve-unknown-fields": true } },
+                "x-kubernetes-validations": [{ "rule": "dyn(self.f).a == 1", "message": "m" }]
+            }),
+            object: json!({ "f": { "a": 1 } }),
+            expect: Expect::Reject,
+            note: "reading a free-form object's key is no such key → rejected",
+        },
+        ParityCase {
+            kind: "PembeddedMeta",
+            plural: "pembeddedmetas",
+            schema: json!({
+                "type": "object",
+                "properties": { "e": { "type": "object", "x-kubernetes-embedded-resource": true, "x-kubernetes-preserve-unknown-fields": true } },
+                "x-kubernetes-validations": [{ "rule": "self.e.metadata.name == 'n' && !has(dyn(self.e.metadata).labels) && size(dyn(self.e.metadata)) == 2 && !has(dyn(self.e).spec)", "message": "m" }]
+            }),
+            object: json!({ "e": { "apiVersion": "v1", "kind": "K", "metadata": { "name": "n", "labels": { "a": "b" } }, "spec": { "a": 1 } } }),
+            expect: Expect::Accept,
+            note: "embedded metadata declares name and generateName only → accepted",
+        },
+        ParityCase {
+            kind: "PembeddedUnfilled",
+            plural: "pembeddedunfilleds",
+            schema: json!({
+                "type": "object",
+                "properties": { "e": { "type": "object", "x-kubernetes-embedded-resource": true, "x-kubernetes-preserve-unknown-fields": true } },
+                "x-kubernetes-validations": [{ "rule": "!has(self.e.metadata) && size(dyn(self.e)) == 2", "message": "m" }]
+            }),
+            object: json!({ "e": { "apiVersion": "v1", "kind": "K" } }),
+            expect: Expect::Accept,
+            note: "an embedded resource without metadata has none → accepted",
+        },
+        // Set `==` and `+` look up each right-hand item's `Value()` among the
+        // elements as Go holds them (an `int64` is not a double, a string
+        // not a duration; a map or bytes panics); `+` binds what it adds
+        // under the left list's items when read, and keeps state on the
+        // receiver: a second `+` on one wrapper skips what the first added.
+        ParityCase {
+            kind: "PsetNumberKeys",
+            plural: "psetnumberkeyss",
+            schema: json!({
+                "type": "object",
+                "properties": { "s": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "set", "items": { "type": "number" } } },
+                "x-kubernetes-validations": [{ "rule": "self.s != self.s && size(self.s + [1.0, 2.0]) == 4", "message": "m" }]
+            }),
+            object: json!({ "s": [1, 2] }),
+            expect: Expect::Accept,
+            note: "int64 keys against double items: unequal, nothing found → accepted",
+        },
+        ParityCase {
+            kind: "PsetDurationKeys",
+            plural: "psetdurationkeyss",
+            schema: json!({
+                "type": "object",
+                "properties": { "s": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "set", "items": { "type": "string", "format": "duration", "maxLength": 8 } } },
+                "x-kubernetes-validations": [{ "rule": "self.s != self.s", "message": "m" }]
+            }),
+            object: json!({ "s": ["1s", "2s"] }),
+            expect: Expect::Accept,
+            note: "string keys against duration items: unequal → accepted",
+        },
+        ParityCase {
+            kind: "PsetBytesPanic",
+            plural: "psetbytespanics",
+            schema: json!({
+                "type": "object",
+                "properties": { "s": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "set", "items": { "type": "string", "format": "byte", "maxLength": 8 } } },
+                "x-kubernetes-validations": [{ "rule": "self.s != self.s", "message": "m" }]
+            }),
+            object: json!({ "s": ["YQ=="] }),
+            expect: Expect::Reject,
+            note: "bytes as a map key panics → rejected",
+        },
+        ParityCase {
+            kind: "PsetAtomicPanic",
+            plural: "psetatomicpanics",
+            schema: json!({
+                "type": "object",
+                "properties": { "s": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "set", "items": { "type": "object", "x-kubernetes-map-type": "atomic", "properties": { "x": { "type": "integer" } } } } },
+                "x-kubernetes-validations": [{ "rule": "self.s[0].x == 1 && self.s != self.s", "message": "m" }]
+            }),
+            object: json!({ "s": [{ "x": 1 }] }),
+            expect: Expect::Reject,
+            note: "an object element as a map key panics → rejected",
+        },
+        ParityCase {
+            kind: "PsetAddRebind",
+            plural: "psetaddrebinds",
+            schema: json!({
+                "type": "object",
+                "properties": { "s": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "set", "items": { "type": "number" } } },
+                "x-kubernetes-validations": [{ "rule": "type((self.s + dyn([1]))[0]) == double", "message": "m" }]
+            }),
+            object: json!({ "s": [] }),
+            expect: Expect::Accept,
+            note: "an added int binds under number items as a double → accepted",
+        },
+        ParityCase {
+            kind: "PsetAddSameWrapper",
+            plural: "psetaddsamewrappers",
+            schema: json!({
+                "type": "object",
+                "properties": { "s": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "set", "items": { "type": "integer" } } },
+                "x-kubernetes-validations": [{ "rule": "[self.s].all(x, (x + [3]).size() == 3 && (x + [3]).size() == 3)", "message": "m" }]
+            }),
+            object: json!({ "s": [1, 2] }),
+            expect: Expect::Reject,
+            note: "the second + on one wrapper skips the 3 it cached → size 2, rejected",
+        },
+        ParityCase {
+            kind: "PsetAddEachRead",
+            plural: "psetaddeachreads",
+            schema: json!({
+                "type": "object",
+                "properties": { "s": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "set", "items": { "type": "integer" } } },
+                "x-kubernetes-validations": [{ "rule": "(self.s + [3]).size() == 3 && (self.s + [3]).size() == 3 && ((self.s + [3]) + [4]).size() == 4", "message": "m" }]
+            }),
+            object: json!({ "s": [1, 2] }),
+            expect: Expect::Accept,
+            note: "each read of a field is a new wrapper; chained + appends further on → accepted",
+        },
+        ParityCase {
+            kind: "PmapListAddRebind",
+            plural: "pmaplistaddrebinds",
+            schema: json!({
+                "type": "object",
+                "properties": { "l": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "map", "x-kubernetes-list-map-keys": ["k"], "items": { "type": "object", "required": ["k"], "properties": { "k": { "type": "string", "maxLength": 4 }, "x": { "type": "integer", "nullable": true } } } }, "m": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "map", "x-kubernetes-list-map-keys": ["k"], "items": { "type": "object", "required": ["k"], "properties": { "k": { "type": "string", "maxLength": 4 }, "x": { "x-kubernetes-int-or-string": true, "nullable": true } } } } },
+                "x-kubernetes-validations": [{ "rule": "!has((self.l + dyn(self.m))[0].x) && size(self.l + dyn(self.m)) == 1", "message": "m" }]
+            }),
+            object: json!({ "l": [], "m": [{ "k": "a", "x": null }] }),
+            expect: Expect::Accept,
+            note: "an added item binds under the left items: its null x is hidden → accepted",
+        },
+        ParityCase {
+            kind: "PmapListAddRefused",
+            plural: "pmaplistaddrefuseds",
+            schema: json!({
+                "type": "object",
+                "properties": { "l": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "map", "x-kubernetes-list-map-keys": ["k"], "items": { "type": "object", "required": ["k"], "properties": { "k": { "type": "string", "maxLength": 4 }, "x": { "type": "integer", "nullable": true } } } }, "m": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "map", "x-kubernetes-list-map-keys": ["k"], "items": { "type": "object", "required": ["k"], "properties": { "k": { "type": "string", "maxLength": 4 }, "x": { "x-kubernetes-int-or-string": true, "nullable": true } } } } },
+                "x-kubernetes-validations": [{ "rule": "(self.l + dyn(self.m))[0].x == 1", "message": "m" }]
+            }),
+            object: json!({ "l": [], "m": [{ "k": "a", "x": "s" }] }),
+            expect: Expect::Reject,
+            note: "a string x under integer items is an error when read → rejected",
+        },
+        // The apiserver keys a map list from each item's decoded map, by the
+        // key fields' escaped names: one escaping changes (`a-b`, `namespace`)
+        // reads as nil in every item; four keys or more key by Go's `%v`.
+        ParityCase {
+            kind: "PmapListEscapedKey",
+            plural: "pmaplistescapedkeys",
+            schema: json!({
+                "type": "object",
+                "properties": { "m": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "map", "x-kubernetes-list-map-keys": ["a-b"], "items": { "type": "object", "required": ["a-b"], "properties": { "a-b": { "type": "string", "maxLength": 8 }, "v": { "type": "integer" } } } } },
+                "x-kubernetes-validations": [{ "rule": "self.m != self.m", "message": "m" }]
+            }),
+            object: json!({ "m": [{ "a-b": "a", "v": 1 }, { "a-b": "b", "v": 2 }] }),
+            expect: Expect::Accept,
+            note: "every item keys as nil: the list is unequal to itself → accepted",
+        },
+        ParityCase {
+            kind: "PmapListReservedKey",
+            plural: "pmaplistreservedkeys",
+            schema: json!({
+                "type": "object",
+                "properties": { "m": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "map", "x-kubernetes-list-map-keys": ["namespace"], "items": { "type": "object", "required": ["namespace"], "properties": { "namespace": { "type": "string", "maxLength": 8 } } } } },
+                "x-kubernetes-validations": [{ "rule": "self.m != self.m", "message": "m" }]
+            }),
+            object: json!({ "m": [{ "namespace": "a" }, { "namespace": "b" }] }),
+            expect: Expect::Accept,
+            note: "a reserved-word key reads as nil → accepted",
+        },
+        ParityCase {
+            kind: "PmapListFourKeys",
+            plural: "pmaplistfourkeyss",
+            schema: json!({
+                "type": "object",
+                "properties": { "m": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "map", "x-kubernetes-list-map-keys": ["a", "b", "c", "d"], "items": { "type": "object", "required": ["a", "b", "c", "d"], "properties": { "a": { "type": "string", "maxLength": 8 }, "b": { "type": "string", "maxLength": 8 }, "c": { "type": "string", "maxLength": 8 }, "d": { "type": "string", "maxLength": 8 } } } } },
+                "x-kubernetes-validations": [{ "rule": "self.m != self.m", "message": "m" }]
+            }),
+            object: json!({ "m": [{ "a": "a b", "b": "c", "c": "d", "d": "e" }, { "a": "a", "b": "b c", "c": "d", "d": "e" }] }),
+            expect: Expect::Accept,
+            note: "two tuples print as one %v key → accepted",
+        },
+        // A CEL name finds a field through the apiserver's `Unescape`, and a
+        // key iterates through `Escape`.
+        ParityCase {
+            kind: "PobjEscapedNames",
+            plural: "pobjescapednamess",
+            schema: json!({
+                "type": "object",
+                "properties": { "o": { "type": "object", "properties": { "__foo__": { "type": "integer" }, "a__dot__b": { "type": "integer" }, "a-b": { "type": "integer" }, "namespace": { "type": "integer" }, "x": { "type": "integer" } } } },
+                "x-kubernetes-validations": [{ "rule": "self.o.__underscores__foo__underscores__ == 1 && self.o.a__underscores__dot__underscores__b == 1 && self.o.a__dash__b == 1 && self.o.__namespace__ == 1 && '__namespace__' in dyn(self.o) && 'namespace' in dyn(self.o)", "message": "m" }]
+            }),
+            object: json!({ "o": { "__foo__": 1, "a__dot__b": 1, "a-b": 1, "namespace": 1, "x": 0 } }),
+            expect: Expect::Accept,
+            note: "escaped CEL names find their fields, and so does a name Unescape leaves as it is → accepted",
+        },
+        // cel-go's `sort()` and `distinct()` return an empty list itself: an
+        // empty set stays a set, and `+` on it is a union.
+        ParityCase {
+            kind: "PsetEmptySort",
+            plural: "psetemptysorts",
+            schema: json!({
+                "type": "object",
+                "properties": { "s": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "set", "items": { "type": "integer" } } },
+                "x-kubernetes-validations": [{ "rule": "(self.s.sort() + [1, 1]).size() == 1 && (self.s.distinct() + [1, 1]).size() == 1 && (self.s.sortBy(x, x) + [1, 1]).size() == 2", "message": "m" }]
+            }),
+            object: json!({ "s": [] }),
+            expect: Expect::Accept,
+            note: "an empty set sorted or made distinct is still a set; sortBy's result is a plain list → accepted",
+        },
+        // `in` on an object with a key that is not a string (an undeclared
+        // key iterates as `null`) is a no-such-overload error.
+        ParityCase {
+            kind: "PobjUnknownMembership",
+            plural: "pobjunknownmemberships",
+            schema: json!({
+                "type": "object",
+                "properties": { "o": { "type": "object", "properties": { "x": { "type": "integer" } }, "x-kubernetes-preserve-unknown-fields": true } },
+                "x-kubernetes-validations": [{ "rule": "dyn(self.o).exists(k, !(k in dyn(self.o)))", "message": "m" }]
+            }),
+            object: json!({ "o": { "x": 1, "z": 2 } }),
+            expect: Expect::Reject,
+            note: "null in an object is an error → rejected",
+        },
+        // A set node's rules share its `self` (one activation): a `+` in one
+        // rule grows the cached set the next rule's `+` reads.
+        ParityCase {
+            kind: "PsetCrossRule",
+            plural: "psetcrossrules",
+            schema: json!({
+                "type": "object",
+                "properties": { "s": {
+                    "type": "array",
+                    "maxItems": 4,
+                    "x-kubernetes-list-type": "set",
+                    "items": { "type": "integer" },
+                    "x-kubernetes-validations": [
+                        { "rule": "(self + [3]).size() == 3", "message": "m" },
+                        { "rule": "(self + [3]).size() == 3", "message": "m" }
+                    ]
+                } }
+            }),
+            object: json!({ "s": [1, 2] }),
+            expect: Expect::Reject,
+            note: "the second rule's + skips the 3 the first cached → size 2, rejected",
+        },
+        // A map list keys a right-hand `additionalProperties` map by its
+        // decoded map on the apiserver; kube-cel cannot tell it from a
+        // CEL-built map and refuses the rule (the apiserver rejects it too).
+        ParityCase {
+            kind: "PmapListPlainMapRhs",
+            plural: "pmaplistplainmaprhss",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "m": {
+                        "type": "array",
+                        "maxItems": 4,
+                        "x-kubernetes-list-type": "map",
+                        "x-kubernetes-list-map-keys": ["k"],
+                        "items": { "type": "object", "required": ["k"], "properties": { "k": { "type": "string", "maxLength": 4 }, "v": { "type": "integer" } } }
+                    },
+                    "r": {
+                        "type": "array",
+                        "maxItems": 4,
+                        "items": { "type": "object", "maxProperties": 4, "additionalProperties": { "x-kubernetes-int-or-string": true } }
+                    }
+                },
+                "x-kubernetes-validations": [{ "rule": "self.m != dyn(self.r)", "message": "m" }]
+            }),
+            object: json!({ "m": [{ "k": "a", "v": 1 }], "r": [{ "k": "a", "v": 1 }] }),
+            expect: Expect::Reject,
+            note: "the lists are equal on the apiserver; kube-cel refuses → rejected",
+        },
+        // `+` stores what it adds and the apiserver binds an element (and an
+        // object's field) when it reads it: one its schema refuses is an error
+        // only there.
+        ParityCase {
+            kind: "PsetAddUnread",
+            plural: "psetaddunreads",
+            schema: json!({
+                "type": "object",
+                "properties": { "s": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "set", "items": { "type": "integer" } } },
+                "x-kubernetes-validations": [{ "rule": "(self.s + dyn(['a'])).size() == 1 && ((self.s + dyn(['a']))[0] == dyn('a') || true)", "message": "m" }]
+            }),
+            object: json!({ "s": [] }),
+            expect: Expect::Accept,
+            note: "the refused element is never bound by size(), and || absorbs its error → accepted",
+        },
+        ParityCase {
+            kind: "PmapListAddOtherField",
+            plural: "pmaplistaddotherfields",
+            schema: json!({
+                "type": "object",
+                "properties": { "l": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "map", "x-kubernetes-list-map-keys": ["k"], "items": { "type": "object", "required": ["k"], "properties": { "k": { "type": "string", "maxLength": 4 }, "x": { "type": "integer", "nullable": true } } } }, "m": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "map", "x-kubernetes-list-map-keys": ["k"], "items": { "type": "object", "required": ["k"], "properties": { "k": { "type": "string", "maxLength": 4 }, "x": { "x-kubernetes-int-or-string": true, "nullable": true } } } } },
+                "x-kubernetes-validations": [{ "rule": "(self.l + dyn(self.m))[0].k == 'a'", "message": "m" }]
+            }),
+            object: json!({ "l": [], "m": [{ "k": "a", "x": "s" }] }),
+            expect: Expect::Accept,
+            note: "only the refused field errors; k reads → accepted",
+        },
+        // A value under a node with no `type` but preserve-unknown-fields is
+        // the apiserver's `unknownPreserved`: `==` compares its JSON, it holds
+        // no field (`has()` false), and other operations fail.
+        ParityCase {
+            kind: "PpreservedEquality",
+            plural: "ppreservedequalitys",
+            schema: json!({
+                "type": "object",
+                "properties": { "u": { "x-kubernetes-preserve-unknown-fields": true } },
+                "x-kubernetes-validations": [{ "rule": "dyn(self).u == dyn(self).u && dyn(self).u != 'x' && !has(dyn(self).u.a) && !dyn(self).u.?a.hasValue()", "message": "m" }]
+            }),
+            object: json!({ "u": { "a": [1] } }),
+            expect: Expect::Accept,
+            note: "unknownPreserved compares its JSON and holds no field → accepted",
+        },
+        ParityCase {
+            kind: "PpreservedSize",
+            plural: "ppreservedsizes",
+            schema: json!({
+                "type": "object",
+                "properties": { "u": { "x-kubernetes-preserve-unknown-fields": true } },
+                "x-kubernetes-validations": [{ "rule": "dyn(self).u.size() == 1", "message": "m" }]
+            }),
+            object: json!({ "u": "x" }),
+            expect: Expect::Reject,
+            note: "size() of unknownPreserved has no overload → rejected",
+        },
+        // A typeless preserve-unknown value compared with a plain list field:
+        // the apiserver deep-compares the field's decoded list; kube-cel
+        // cannot tell it from a CEL-built list and refuses (rejected there too).
+        ParityCase {
+            kind: "PpreservedPlainList",
+            plural: "ppreservedplainlists",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "u": { "x-kubernetes-preserve-unknown-fields": true },
+                    "a": { "type": "array", "maxItems": 4, "items": { "type": "integer" } }
+                },
+                "x-kubernetes-validations": [{ "rule": "dyn(self).u != dyn(self.a)", "message": "m" }]
+            }),
+            object: json!({ "u": [1], "a": [1] }),
+            expect: Expect::Reject,
+            note: "u deep-equals the list field on the apiserver; kube-cel refuses → rejected",
+        },
+        // A uint one rule's `+` caches on a set node's `self` is a key the
+        // next rule's `+` finds, as an int is.
+        ParityCase {
+            kind: "PsetCrossRuleUint",
+            plural: "psetcrossruleuints",
+            schema: json!({
+                "type": "object",
+                "properties": { "s": {
+                    "type": "array",
+                    "maxItems": 4,
+                    "x-kubernetes-list-type": "set",
+                    "items": { "type": "integer" },
+                    "x-kubernetes-validations": [
+                        { "rule": "(self + dyn([1u])).size() == 3", "message": "m" },
+                        { "rule": "(self + dyn([1u])).size() == 3", "message": "m" }
+                    ]
+                } }
+            }),
+            object: json!({ "s": [1, 2] }),
+            expect: Expect::Reject,
+            note: "the second rule's + finds the cached 1u → size 2, rejected",
+        },
+        // A set held in an `additionalProperties` map is bound afresh on each
+        // `Find`: one rule's `+` leaves no state for the next.
+        ParityCase {
+            kind: "PsetInMapFresh",
+            plural: "psetinmapfreshs",
+            schema: json!({
+                "type": "object",
+                "properties": { "d": {
+                    "type": "object",
+                    "maxProperties": 4,
+                    "additionalProperties": { "type": "array", "maxItems": 4, "x-kubernetes-list-type": "set", "items": { "type": "integer" } }
+                } },
+                "x-kubernetes-validations": [
+                    { "rule": "(self.d['x'] + [3]).size() == 3", "message": "m" },
+                    { "rule": "(self.d['x'] + [3]).size() == 3", "message": "m" }
+                ]
+            }),
+            object: json!({ "d": { "x": [1, 2] } }),
+            expect: Expect::Accept,
+            note: "each read of d['x'] is a new set wrapper → accepted",
         },
         // Rule fields the apiserver refuses at registration, beside the
         // expressions (apiextensions validation.go): a blank or multi-line

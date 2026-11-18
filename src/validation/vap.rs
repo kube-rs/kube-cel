@@ -663,6 +663,21 @@ mod tests {
         assert!(results[0].passed);
     }
 
+    /// A policy's values are the request's decoded JSON: an integer past
+    /// `i64` is a `float64` there, so a `double` in CEL.
+    #[test]
+    fn integer_past_i64_binds_as_double() {
+        let evaluator = VapEvaluator::builder()
+            .object(json!({ "n": 9223372036854775808u64 }))
+            .build();
+        let results = evaluator.evaluate(&[VapExpression {
+            expression: "type(object.n) == double".into(),
+            message: None,
+            message_expression: None,
+        }]);
+        assert!(results[0].passed, "{results:?}");
+    }
+
     #[test]
     fn compile_failure_yields_vap_error_with_cause() {
         use std::error::Error;

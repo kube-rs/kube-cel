@@ -117,13 +117,15 @@ fn dry_run_verdict(kind: &str, (ok, out): (bool, String)) -> Verdict {
 }
 
 /// Apply a CRD wrapping `schema` under a unique `kind`, then server-dry-run the
-/// `object` as a CR and return the apiserver's CEL-admission verdict.
+/// `object` as a CR and return the apiserver's CEL-admission verdict. The CR is
+/// sent with `create`, not `apply`: client-side apply drops a field set to
+/// `null` before the request, so the apiserver would never see it.
 fn apiserver_verdict(kind: &str, plural: &str, schema: &Value, object: &Value) -> Verdict {
     register_crd(kind, plural, schema);
     let cr = cr_for(kind, object, json!({}));
     dry_run_verdict(
         kind,
-        kubectl(&["apply", "--dry-run=server", "-f", "-"], Some(&cr.to_string())),
+        kubectl(&["create", "--dry-run=server", "-f", "-"], Some(&cr.to_string())),
     )
 }
 

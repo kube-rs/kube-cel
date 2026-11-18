@@ -5,9 +5,9 @@
 //! values can then be bound as variables (e.g. `self`, `oldSelf`) in a CEL
 //! evaluation context.
 //!
-//! For schema-aware conversion that respects the schema's binding hints
-//! (`format: "date-time"`/`"date"`/`"duration"`/`"byte"`, and `type: "number"`),
-//! use [`json_to_cel_with_schema`] or [`json_to_cel_with_compiled`].
+//! A CRD rule's `self` and `oldSelf` are bound by `structural`, which binds
+//! scalars under the schema's hints (`format: "date-time"`/`"date"`/
+//! `"duration"`/`"byte"`, and `type: "number"`) with [`scalar_to_cel`].
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -17,7 +17,7 @@ use cel::{
     objects::{Key, Map},
 };
 
-use crate::validation::{compilation::CompiledSchema, escaping::escape_field_name};
+use crate::validation::escaping::escape_field_name;
 
 /// The `format` hint from an OpenAPI schema property.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -78,10 +78,9 @@ impl SchemaFormat {
 ///
 /// # Number conversion priority
 ///
-/// JSON numbers are converted using the following priority:
-/// 1. `i64` — if the number fits in a signed 64-bit integer
-/// 2. `u64` — if the number fits in an unsigned 64-bit integer (but not `i64`)
-/// 3. `f64` — for all other numeric values (floating-point)
+/// JSON numbers are converted as Kubernetes' JSON decoder reads them
+/// (`sigs.k8s.io/json`): an integer that fits in `i64` as `int`, any other
+/// number (`2^63` included) as `double`.
 #[must_use]
 pub(crate) fn json_to_cel(value: &serde_json::Value) -> Value {
     json_to_cel_impl(value, true)
@@ -103,7 +102,9 @@ fn json_to_cel_impl(value: &serde_json::Value, escape_keys: bool) -> Value {
     match value {
         serde_json::Value::Null => Value::Null,
         serde_json::Value::Bool(b) => Value::Bool(*b),
-        serde_json::Value::Number(n) => convert_number(n, &SchemaFormat::None),
+        serde_json::Value::Number(n) => n
+            .as_i64()
+            .map_or_else(|| Value::Float(n.as_f64().unwrap_or(f64::NAN)), Value::Int),
         serde_json::Value::String(s) => Value::String(Arc::new(s.clone())),
         serde_json::Value::Array(arr) => {
             let items: Vec<Value> = arr.iter().map(|v| json_to_cel_impl(v, escape_keys)).collect();
@@ -124,6 +125,16 @@ fn json_to_cel_impl(value: &serde_json::Value, escape_keys: bool) -> Value {
     }
 }
 
+/// A JSON scalar under a schema node's binding hint (`null`, a boolean, a
+/// number, a string); an array or object as plain JSON.
+pub(crate) fn scalar_to_cel(value: &serde_json::Value, format: &SchemaFormat) -> Value {
+    match value {
+        serde_json::Value::Number(n) => convert_number(n, format),
+        serde_json::Value::String(s) => convert_string_with_format(s, format),
+        _ => json_to_cel(value),
+    }
+}
+
 /// Convert a JSON number using the schema's binding hint.
 ///
 /// Under `type: number` the schema wins over the JSON representation: the
@@ -141,136 +152,6 @@ fn convert_number(n: &serde_json::Number, format: &SchemaFormat) -> Value {
         Value::UInt(u)
     } else {
         Value::Float(n.as_f64().unwrap_or(f64::NAN))
-    }
-}
-
-/// Convert a JSON value to a CEL value, using the raw JSON schema to recognize
-/// `format: "date-time"` and `format: "duration"` string fields.
-///
-/// This recursively walks both the value and the schema in parallel. For string
-/// values whose schema specifies a recognized format, the string is parsed into
-/// the corresponding CEL type (`Timestamp` or `Duration`). On parse failure,
-/// the value falls back to `Value::String`.
-#[must_use]
-pub(crate) fn json_to_cel_with_schema(value: &serde_json::Value, schema: &serde_json::Value) -> Value {
-    let format = SchemaFormat::from_schema(schema);
-    match value {
-        serde_json::Value::Null => Value::Null,
-        serde_json::Value::Bool(b) => Value::Bool(*b),
-        serde_json::Value::Number(n) => convert_number(n, &format),
-        serde_json::Value::String(s) => convert_string_with_format(s, &format),
-        serde_json::Value::Array(arr) => {
-            let items_schema = schema.get("items");
-            let items: Vec<Value> = arr
-                .iter()
-                .map(|item| match items_schema {
-                    Some(s) => json_to_cel_with_schema(item, s),
-                    None => json_to_cel(item),
-                })
-                .collect();
-            Value::List(Arc::new(items))
-        }
-        serde_json::Value::Object(obj) => {
-            let props = schema.get("properties").and_then(|p| p.as_object());
-            let additional = schema.get("additionalProperties");
-            let additional_schema = additional.filter(|a| a.is_object());
-            // A node whose `additionalProperties` is a schema or `true` (i.e. not
-            // absent/`false`) is a map: its keys are user-supplied data, not
-            // declared field names, so they are NOT escaped — matching the
-            // apiserver's `MapValue` behavior (kube-rs/kube-cel#8).
-            let is_map = !matches!(additional, None | Some(serde_json::Value::Bool(false)));
-
-            let mut map = HashMap::with_capacity(obj.len());
-            for (k, v) in obj {
-                let child_val = if let Some(prop_schema) = props.and_then(|p| p.get(k)) {
-                    json_to_cel_with_schema(v, prop_schema)
-                } else if let Some(additional_schema) = additional_schema {
-                    json_to_cel_with_schema(v, additional_schema)
-                } else {
-                    json_to_cel(v)
-                };
-                let key = if is_map { k.clone() } else { escape_field_name(k) };
-                map.insert(Key::String(Arc::new(key)), child_val);
-            }
-
-            let is_embedded = schema
-                .get("x-kubernetes-embedded-resource")
-                .and_then(|v| v.as_bool())
-                == Some(true);
-            if is_embedded {
-                map.entry(Key::String(Arc::new("apiVersion".into())))
-                    .or_insert_with(|| Value::String(Arc::new(String::new())));
-                map.entry(Key::String(Arc::new("kind".into())))
-                    .or_insert_with(|| Value::String(Arc::new(String::new())));
-                map.entry(Key::String(Arc::new("metadata".into())))
-                    .or_insert_with(|| {
-                        Value::Map(Map {
-                            map: Arc::new(HashMap::new()),
-                        })
-                    });
-            }
-
-            Value::Map(Map { map: Arc::new(map) })
-        }
-    }
-}
-
-/// Convert a JSON value to a CEL value using a pre-compiled [`CompiledSchema`].
-///
-/// Behaves like [`json_to_cel_with_schema`] but uses the format metadata stored
-/// in the compiled schema tree instead of parsing the raw JSON schema.
-#[must_use]
-pub(crate) fn json_to_cel_with_compiled(value: &serde_json::Value, compiled: &CompiledSchema) -> Value {
-    match value {
-        serde_json::Value::Null => Value::Null,
-        serde_json::Value::Bool(b) => Value::Bool(*b),
-        serde_json::Value::Number(n) => convert_number(n, &compiled.format),
-        serde_json::Value::String(s) => convert_string_with_format(s, &compiled.format),
-        serde_json::Value::Array(arr) => {
-            let items: Vec<Value> = arr
-                .iter()
-                .map(|item| match &compiled.items {
-                    Some(items_compiled) => json_to_cel_with_compiled(item, items_compiled),
-                    None => json_to_cel(item),
-                })
-                .collect();
-            Value::List(Arc::new(items))
-        }
-        serde_json::Value::Object(obj) => {
-            let mut map = HashMap::with_capacity(obj.len());
-            for (k, v) in obj {
-                let child_val = if let Some(prop_compiled) = compiled.properties.get(k) {
-                    json_to_cel_with_compiled(v, prop_compiled)
-                } else if let Some(ref additional) = compiled.additional_properties {
-                    json_to_cel_with_compiled(v, additional)
-                } else {
-                    json_to_cel(v)
-                };
-                // Map keys (additionalProperties) are user data, not field names,
-                // so they are not escaped — matching the apiserver (#8).
-                let key = if compiled.is_map {
-                    k.clone()
-                } else {
-                    escape_field_name(k)
-                };
-                map.insert(Key::String(Arc::new(key)), child_val);
-            }
-
-            if compiled.embedded_resource {
-                map.entry(Key::String(Arc::new("apiVersion".into())))
-                    .or_insert_with(|| Value::String(Arc::new(String::new())));
-                map.entry(Key::String(Arc::new("kind".into())))
-                    .or_insert_with(|| Value::String(Arc::new(String::new())));
-                map.entry(Key::String(Arc::new("metadata".into())))
-                    .or_insert_with(|| {
-                        Value::Map(Map {
-                            map: Arc::new(HashMap::new()),
-                        })
-                    });
-            }
-
-            Value::Map(Map { map: Arc::new(map) })
-        }
     }
 }
 
@@ -543,6 +424,23 @@ fn leading_fraction(s: &[u8]) -> (u64, f64, &[u8]) {
 
 #[cfg(test)]
 mod tests {
+    use crate::validation::structural::{Node, json_to_val_with_compiled, json_to_val_with_schema};
+
+    /// `value` as a rule's `self` binds it under `schema`, as a plain value.
+    fn json_to_cel_with_schema(value: &serde_json::Value, schema: &serde_json::Value) -> Value {
+        crate::functions::val_args::to_value(json_to_val_with_schema(value, schema, Node::Inner).as_ref())
+            .expect("the bound value converts")
+    }
+
+    /// As [`json_to_cel_with_schema`], under a compiled schema.
+    fn json_to_cel_with_compiled(
+        value: &serde_json::Value,
+        compiled: &crate::validation::compilation::CompiledSchema,
+    ) -> Value {
+        crate::functions::val_args::to_value(json_to_val_with_compiled(value, compiled, Node::Inner).as_ref())
+            .expect("the bound value converts")
+    }
+
     use super::*;
     use serde_json::json;
 
@@ -564,11 +462,12 @@ mod tests {
         assert_eq!(json_to_cel(&json!(0)), Value::Int(0));
     }
 
+    /// Kubernetes' JSON decoder reads an integer past `i64` as a `float64`.
     #[test]
     fn test_u64_beyond_i64() {
         let big: u64 = (i64::MAX as u64) + 1;
         let v = json_to_cel(&serde_json::Value::Number(serde_json::Number::from(big)));
-        assert_eq!(v, Value::UInt(big));
+        assert_eq!(v, Value::Float(big as f64));
     }
 
     #[test]
@@ -669,11 +568,11 @@ mod tests {
     fn test_number_priority() {
         // i64 range → Int
         assert_eq!(json_to_cel(&json!(42)), Value::Int(42));
-        // u64 beyond i64 → UInt
+        // past i64 → Float, as Kubernetes' JSON decoder reads it
         let big: u64 = (i64::MAX as u64) + 1;
         assert_eq!(
             json_to_cel(&serde_json::Value::Number(serde_json::Number::from(big))),
-            Value::UInt(big)
+            Value::Float(big as f64)
         );
         // float → Float
         assert_eq!(json_to_cel(&json!(1.5)), Value::Float(1.5));
@@ -1039,17 +938,23 @@ mod tests {
         assert!(!map_has_key(&result, "rio__dot__build__slash__fetcher"));
     }
 
+    /// `additionalProperties: true` declares no schema for the keys: the
+    /// apiserver binds such a map as a free-form object, every key absent to
+    /// CEL but counted (Go oracle, v0.36.1), whether or not it is escaped.
     #[test]
-    fn additional_properties_true_keys_not_escaped() {
-        // Free-form map: additionalProperties is `true`.
+    fn additional_properties_true_keys_are_absent() {
         let schema = json!({
             "type": "object",
-            "additionalProperties": true
+            "properties": { "m": { "type": "object", "additionalProperties": true } },
+            "x-kubernetes-validations": [{
+                "rule": "!('a.b/c' in dyn(self.m)) && !('a__dot__b__slash__c' in dyn(self.m)) && size(dyn(self.m)) == 1"
+            }]
         });
-        let value = json!({"a.b/c": "x"});
-        let result = json_to_cel_with_schema(&value, &schema);
-        assert!(map_has_key(&result, "a.b/c"));
-        assert!(!map_has_key(&result, "a__dot__b__slash__c"));
+        let object = json!({ "m": { "a.b/c": "x" } });
+        let validator = crate::validation::Validator::new();
+        assert!(validator.validate(&schema, &object, None).is_ok());
+        let compiled = crate::validation::compilation::compile_schema(&schema);
+        assert!(validator.validate_compiled(&compiled, &object, None).is_ok());
     }
 
     #[test]
@@ -1109,19 +1014,6 @@ mod tests {
     }
 
     #[test]
-    fn compiled_additional_properties_true_keys_not_escaped() {
-        let schema = json!({
-            "type": "object",
-            "additionalProperties": true
-        });
-        let compiled = crate::validation::compilation::compile_schema(&schema);
-        let value = json!({"a.b/c": "x"});
-        let result = json_to_cel_with_compiled(&value, &compiled);
-        assert!(map_has_key(&result, "a.b/c"));
-        assert!(!map_has_key(&result, "a__dot__b__slash__c"));
-    }
-
-    #[test]
     fn compiled_declared_properties_still_escaped() {
         let schema = json!({
             "type": "object",
@@ -1149,8 +1041,12 @@ mod cel_evaluation_tests {
     use cel::Value;
     use serde_json::json;
 
-    use super::{json_to_cel, json_to_cel_with_compiled};
-    use crate::validation::{compilation::compile_schema, validation_env};
+    use super::json_to_cel;
+    use crate::validation::{
+        compilation::compile_schema,
+        structural::{Node, json_to_val_with_compiled},
+        validation_env,
+    };
 
     /// Build a context with kube-cel functions, bind `self` from JSON, compile,
     /// and return the evaluation result.
@@ -1175,7 +1071,10 @@ mod cel_evaluation_tests {
         let self_val = json!({"m": {"a.b/c": "x"}});
 
         let mut ctx = crate::validation::base_context();
-        ctx.add_variable_from_value("self", json_to_cel_with_compiled(&self_val, &compiled));
+        ctx.add_variable_as_val(
+            "self",
+            json_to_val_with_compiled(&self_val, &compiled, Node::Inner),
+        );
 
         // Rule from the issue: must REJECT (false) when the forbidden key is present.
         let prog = validation_env().compile("!('a.b/c' in self.m)").unwrap();
