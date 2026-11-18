@@ -28,6 +28,7 @@ mod cel_time;
 #[cfg(feature = "validation")] pub(crate) use cel_time::go_parse_duration;
 #[cfg(feature = "format")] mod format;
 mod go_float;
+mod go_unicode;
 mod re2;
 #[cfg(feature = "validation")]
 pub(crate) use cel_regex::pattern_error as regex_pattern_error;

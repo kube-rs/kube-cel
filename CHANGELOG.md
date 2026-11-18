@@ -323,11 +323,23 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     `\p{^Greek}`, `\p{Cs}`, a group name starting with a digit or used twice,
     which the crate refused, are carried over, and the crate may compile up
     to 128 MiB (it stopped at 10 MiB, short of `^[\p{L}\p{N}_-]{1,253}$`).
+    Compiled patterns are kept process-wide, up to about 128 MiB of memory
+    (estimated from the size each compiled under); one that needs more than
+    32 MiB (`[\p{L}]{1,783}` and up) is compiled again on each use, in about
+    0.2 to 0.4 seconds as measured. When the cache is full it is emptied
+    whole, so patterns in use compile again too: the price of the bound.
     A translation past the crate's limits (nesting past about 250 levels; a
     size past 128 MiB, `\pL{1000}` four times) fails to compile where the
     apiserver compiles it at registration, and is an error noted as
-    unsupported at evaluation (fail-closed); Unicode classes read the crate's
-    newer tables, not Go's Unicode 15.0.0.
+    unsupported at evaluation (fail-closed). The crate's Unicode tables are
+    16.0.0's, not Go's 15.0.0, and it folds a few characters Go does not: a
+    match of a pattern that reads them (a Unicode class, or case folding of a
+    character that has a case; not `(?i)[0-9]`) on a string holding a
+    character the two may read otherwise (one Unicode
+    15.0.0 does not assign, such as U+1C89, a letter since 16.0; `ΐ`, `ɤ`, a
+    handful of others) is an error noted as unsupported (fail-closed); so is
+    any match of such a pattern where `regex` resolves to tables other than
+    16.0.0's, which kube-cel checks once.
   - Migration: none for rules the apiserver accepts.
 - **A type conversion of a constant that fails is refused at compile time**
   (`CompilationFailure`, reached or not): `int('x')`, `uint(-1)`,
@@ -337,7 +349,11 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
   `timestamp`, `type`, `uint`) of a literal, of a folded conversion or of a
   list or map literal of them, and rejects the CRD when one fails; such a
   rule passed client-side where evaluation did not reach it, a **fail-open**,
-  now closed. Nothing else is folded, as in cel-go.
+  now closed. Nothing else is folded, as in cel-go, except that cel-go also
+  folds a type name read as a value (`type(int)`, `dyn(int)`) and kube-cel
+  does not. No verdict changes: the only conversions of a type that
+  type-check (`type`, `dyn`) cannot fail, and any other (`int(int)`) is in
+  the no-type-checker exception.
 - **A quantity update whose result depends on evaluation order is refused**
   at compile time (`CompilationFailure`, reached or not): an `add`, `sub`,
   `compareTo`, `isGreaterThan` or `isLessThan` on a quantity held by a

@@ -16,8 +16,6 @@
 //!   schema-bound one, see [`cel_built_operand_until_cel_rust_462`], and until
 //!   it carries cel-rust#460 (before 0.9.0), the timestamp getters without a
 //!   time zone, see [`timestamp_getters_without_a_zone_until_cel_rust_460`].
-//!   And regular expressions read Unicode classes with the `regex` crate's
-//!   tables, not Go's Unicode 15.0.0, see [`regex_unicode_tables_fail_open`].
 //!   Rules on schema nodes the object does not reach used to be another, and
 //!   `format()`'s output a third; since 0.9 every rule in the schema is
 //!   compiled before the object is walked, and `format()` ports cel-go v0.26's
@@ -1338,18 +1336,42 @@ fn regex_past_the_regex_crate_s_limits_fails_closed() {
     assert_passes("'ab'.matches('^[\\\\p{L}]{1,1000}$') && 'a_1'.matches('^[\\\\p{L}\\\\p{N}_-]{1,253}$')");
 }
 
-// ── Unicode classes in a regular expression — fail OPEN ────────────────────
-// apiserver: Go's `regexp` reads Unicode classes with Go's Unicode 15.0.0
-//            tables (go1.26.2).
+// ── Unicode tables in a regular expression — fail CLOSED ───────────────────
+// apiserver: Go's `regexp` reads Unicode classes and case folding with Go's
+//            Unicode 15.0.0 tables (go1.26.2).
 // kube-cel:  translates Go's syntax and meaning for the `regex` crate, but not
-//            its tables: the crate's are newer, so a code point assigned since
-//            Unicode 15.0 (U+1C89, a letter since 16.0) is in `\pL` here.
+//            its tables, which are Unicode 16.0.0's: a code point assigned
+//            since 15.0 (U+1C89, a letter since 16.0) is in `\pL` there, and
+//            the crate folds a few characters Go does not (`ΐ`, U+0390, with
+//            U+1FD3). A match of a pattern that reads tables (a Unicode class,
+//            or case folding of a character that has a case) on a string
+//            holding a character the two may read otherwise
+//            (src/functions/go_unicode.rs) is an EvaluationError, even where
+//            CEL absorbs the error.
 
 #[test]
-fn regex_unicode_tables_fail_open() {
-    // The apiserver evaluates each to false.
-    assert_passes("'\\u1C89'.matches('\\\\pL')");
-    assert_passes("!'\\u1C89'.matches('\\\\PL')");
+fn regex_unicode_tables_fail_closed() {
+    // The apiserver evaluates the first two to false, the others to true.
+    let mut rules = vec![
+        "'\\u1C89'.matches('\\\\pL')",
+        "!'\\u1C89'.matches('\\\\PL')",
+        "'\\u1FD3'.matches('(?i)\\u0390') || true",
+    ];
+    if cfg!(feature = "regex_funcs") {
+        rules.push("'x\\u1C89'.find('\\\\pL') == 'x'");
+    }
+    for rule in rules {
+        let errors = run_rule(rule).unwrap_err();
+        assert!(
+            errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
+            "{rule}: {errors:?}"
+        );
+    }
+    // A pattern that reads no tables, or a string of characters both read
+    // alike, matches as Go's `regexp` does.
+    assert_passes("'\\u1C89'.matches('^.$') && 'é'.matches('^\\\\pL$') && 'Ω'.matches('(?i)ω')");
+    // Folding characters that have no case reads no tables.
+    assert_passes("!'\\u1C89'.matches('(?i)\\\\d') && '\\u1C89'.matches('(?i)[^0-9]')");
 }
 
 // ── A timestamp offset of a day or more — fails CLOSED ─────────────────────

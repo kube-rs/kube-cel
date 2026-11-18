@@ -7,10 +7,12 @@
 //! `\d`, `\w`, `\s`, `\b`, `\<` or `[a&&b]` otherwise than Go. A pattern
 //! is therefore parsed with a port of Go's parser (`re2`), refused as the
 //! apiserver refuses it, and otherwise translated into the crate's syntax with
-//! Go's meaning (Unicode tables aside: Go's are Unicode 15.0.0). One the crate
-//! still cannot compile (past its nesting limit, or a compiled size past 128
-//! MiB) is an error noted as unsupported, so the rule fails even where CEL
-//! absorbs it (fail-closed).
+//! Go's meaning. One the crate still cannot compile (past its nesting limit,
+//! or a compiled size past 128 MiB) is an error noted as unsupported, so the
+//! rule fails even where CEL absorbs it (fail-closed). So is a match of a
+//! pattern that reads Unicode tables (a Unicode class, or case folding of a
+//! character that has a case) on a string holding a character Go's tables
+//! (Unicode 15.0.0) may read otherwise than the crate's (`go_unicode`).
 //!
 //! [`declare`] adds macros that rewrite `s.matches(p)` and `matches(s, p)` to
 //! `@kube.matches(s, p)`, which checks, compiles and matches; and that refuse
@@ -87,49 +89,110 @@ fn check_literal(h: &MacroExprHelper<'_>, arg: &IdedExpr) -> Result<(), ParseErr
 /// (`\pL{1000}` four times).
 const SIZE_LIMIT: usize = 128 << 20;
 
-/// How a pattern compiled: the translated pattern compiled, Go's error, or
-/// the `regex` crate's.
+/// The compiled sizes a translation is tried at, smallest first: what a
+/// compiled pattern takes is known only as the size it compiles under.
+const TIERS: [usize; 4] = [256 << 10, 4 << 20, 32 << 20, SIZE_LIMIT];
+
+/// What the patterns [`CACHE`] keeps may take together, counting each as
+/// twice the size it compiled under (a compiled pattern takes up to about
+/// 1.4 times that). A pattern past half of it (one that needs more than 32
+/// MiB, `[\p{L}]{1,783}` and up) is not kept, and is compiled again where it
+/// is used, in about 0.2 to 0.4 seconds as measured (the sizes it is tried at
+/// included).
+const CACHE_BUDGET: usize = 128 << 20;
+
+/// The least an entry of [`CACHE`] counts for, whatever it holds: so many
+/// patterns that fail cheaply to compile cannot pile up (at most 2,048
+/// entries).
+const MIN_ENTRY: usize = 64 << 10;
+
+/// The largest size a pattern [`CACHE`] keeps may compile under: half of
+/// [`CACHE_BUDGET`] once counted twice.
+const LARGEST_KEPT: usize = CACHE_BUDGET / 4;
+
+/// How a pattern compiled: the translated pattern compiled, and whether it
+/// reads Unicode tables; Go's error; or the `regex` crate's.
 #[derive(Clone)]
 enum Compiled {
-    Regex(Regex),
+    Regex(std::sync::Arc<Regex>, re2::Tables),
     Go(String),
     Crate(String),
 }
 
-thread_local! {
-    /// Patterns compiled on this thread: compiling a large Unicode class can
-    /// take a tenth of a second, and a rule compiles its pattern on every
-    /// evaluation (for every element of a list it walks).
-    static COMPILED: std::cell::RefCell<std::collections::HashMap<String, Compiled>> =
-        std::cell::RefCell::default();
+/// Compiled patterns, shared by every thread of the process, up to
+/// [`CACHE_BUDGET`]: compiling a large Unicode class can take a tenth of a
+/// second or more, and a rule compiles its pattern on every evaluation (for
+/// every element of a list it walks). They are looked up under a read lock
+/// and handed out behind an `Arc`: cloning a `Regex` would give it a new pool
+/// of search caches, to fill again on every evaluation.
+#[derive(Default)]
+struct Cache {
+    patterns: std::collections::HashMap<String, (Compiled, usize)>,
+    used: usize,
 }
 
-/// How many patterns [`COMPILED`] keeps before it starts over: few, as one
-/// can take up to [`SIZE_LIMIT`].
-const CACHED: usize = 16;
+static CACHE: std::sync::LazyLock<std::sync::RwLock<Cache>> = std::sync::LazyLock::new(Default::default);
+
+fn cache() -> std::sync::RwLockReadGuard<'static, Cache> {
+    CACHE.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 fn compiled(pattern: &str) -> Compiled {
-    if let Some(hit) = COMPILED.with(|c| c.borrow().get(pattern).cloned()) {
-        return hit;
+    if let Some((hit, _)) = cache().patterns.get(pattern) {
+        return hit.clone();
     }
-    let result = match re2::translate(pattern) {
-        Err(e) => Compiled::Go(e.to_string()),
-        Ok(translated) => match regex::RegexBuilder::new(&translated)
-            .size_limit(SIZE_LIMIT)
-            .build()
-        {
-            Ok(re) => Compiled::Regex(re),
-            Err(e) => Compiled::Crate(e.to_string()),
-        },
-    };
-    COMPILED.with(|c| {
-        let mut c = c.borrow_mut();
-        if c.len() >= CACHED {
-            c.clear();
+    let (result, cost) = compile_uncached(pattern);
+    if let Some(cost) = cost {
+        let mut cache = CACHE.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Full: start over, dropping hot patterns too, which then compile
+        // again; a bound on memory bought with that, and with no bookkeeping
+        // of which pattern was used last.
+        if cache.used + cost > CACHE_BUDGET {
+            cache.patterns.clear();
+            cache.used = 0;
         }
-        c.insert(pattern.to_owned(), result.clone());
-    });
+        if let Some((_, replaced)) = cache.patterns.insert(pattern.to_owned(), (result.clone(), cost)) {
+            cache.used -= replaced;
+        }
+        cache.used += cost;
+    }
     result
+}
+
+/// Compiles `pattern`, and what keeping it in [`CACHE`] counts for: twice
+/// the size it compiled under, the pattern itself, and at least
+/// [`MIN_ENTRY`]; `None` where it is not kept. Go's error is not, as the
+/// translation finds it again as fast as it can be looked up, nor a pattern
+/// compiled past [`LARGEST_KEPT`]; the `regex` crate's error is (refusing a
+/// size past [`SIZE_LIMIT`] takes as long as compiling it).
+fn compile_uncached(pattern: &str) -> (Compiled, Option<usize>) {
+    let re2::Translation {
+        pattern: translated,
+        tables,
+    } = match re2::translate(pattern) {
+        Ok(translation) => translation,
+        Err(e) => return (Compiled::Go(e.to_string()), None),
+    };
+    let cost =
+        |size: usize| Some((2 * size + pattern.len()).max(MIN_ENTRY)).filter(|&cost| cost <= CACHE_BUDGET);
+    let mut error = None;
+    for limit in TIERS {
+        match regex::RegexBuilder::new(&translated).size_limit(limit).build() {
+            Ok(re) => {
+                let cost = cost(limit).filter(|_| limit <= LARGEST_KEPT);
+                return (Compiled::Regex(std::sync::Arc::new(re), tables), cost);
+            }
+            Err(e @ regex::Error::CompiledTooBig(_)) => error = Some(e),
+            Err(e) => {
+                let e = e.to_string();
+                let size = e.len();
+                return (Compiled::Crate(e), cost(size));
+            }
+        }
+    }
+    let error = error.map_or_else(String::new, |e| e.to_string());
+    let size = error.len();
+    (Compiled::Crate(error), cost(size))
 }
 
 /// Why `pattern` cannot be compiled where the apiserver compiles it when it
@@ -139,18 +202,48 @@ fn compiled(pattern: &str) -> Compiled {
 /// fail-closed.
 pub(crate) fn pattern_error(pattern: &str) -> Option<String> {
     match compiled(pattern) {
-        Compiled::Regex(_) => None,
+        Compiled::Regex(..) => None,
         Compiled::Go(e) => Some(e),
         Compiled::Crate(e) => Some(format!("kube-cel cannot compile this regular expression: {e}")),
     }
 }
 
-/// Compiles `pattern` for `function` at evaluation: an error where Go's
-/// `regexp.Compile` fails, and an error noted as unsupported where Go
-/// compiles it and the `regex` crate cannot compile its translation.
-pub(crate) fn compile(function: &str, pattern: &str) -> Result<Regex, ExecutionError> {
+/// Compiles `pattern` for `function` to match `input` at evaluation: an
+/// error where Go's `regexp.Compile` fails, and an error noted as unsupported
+/// where Go compiles it and the `regex` crate cannot compile its translation,
+/// or where the pattern reads Unicode tables and `input` holds a character
+/// Go's tables may read otherwise (any, if the crate's tables are not the
+/// ones kube-cel knows).
+pub(crate) fn compile(
+    function: &str,
+    pattern: &str,
+    input: &str,
+) -> Result<std::sync::Arc<Regex>, ExecutionError> {
     match compiled(pattern) {
-        Compiled::Regex(re) => Ok(re),
+        Compiled::Regex(re, tables) => {
+            let reason = if tables == re2::Tables::None {
+                None
+            } else if !crate::functions::go_unicode::known_tables() {
+                Some(
+                    "the regex crate's Unicode tables are not the 16.0.0 ones kube-cel knows how Go's \
+                     differ from, and this regular expression reads them",
+                )
+            } else if tables == re2::Tables::Read && input.chars().any(crate::functions::go_unicode::differs)
+            {
+                Some(
+                    "the string holds a character Go's Unicode 15.0 tables may read otherwise than \
+                     kube-cel's in this regular expression",
+                )
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                let error = || ExecutionError::function_error(function, reason);
+                crate::functions::note_unsupported_error(error);
+                return Err(error());
+            }
+            Ok(re)
+        }
         Compiled::Go(e) => Err(ExecutionError::function_error(function, e)),
         Compiled::Crate(e) => {
             let error = || {
@@ -177,7 +270,7 @@ fn matches<'b, 'v>(args: Vec<CowVal<'b, 'v>>) -> Result<CowVal<'b, 'v>, Executio
             "no such overload: matches takes two strings",
         ));
     };
-    let re = compile("matches", p.inner())?;
+    let re = compile("matches", p.inner(), s.inner())?;
     Ok(CowVal::owned(CelBool::from(re.is_match(s.inner()))))
 }
 
@@ -240,5 +333,34 @@ mod tests {
         holds(
             "!'٣'.matches('\\\\d') && !'é'.matches('^\\\\w$') && '&'.matches('[a&&b]') && '[]'.matches('^[a[b]]$')",
         );
+    }
+
+    /// The cache keeps a pattern compiled under 32 MiB and the `regex`
+    /// crate's errors, and not Go's errors, which are as fast to find again.
+    #[test]
+    fn the_cache_keeps_what_is_slow_to_compile_again() {
+        let kept = |pattern: &str| super::compile_uncached(pattern).1.is_some();
+        let deep = format!("{}a{}", "(".repeat(260), ")".repeat(260));
+        assert!(kept("^[\\p{L}\\p{N}_-]{1,253}$") && kept("a") && kept(&deep));
+        assert!(!kept("a**"));
+    }
+
+    /// A pattern that reads Unicode tables fails on a character Go's tables
+    /// may read otherwise, as unsupported; any other matches.
+    #[test]
+    fn unicode_tables_fail_on_characters_go_reads_otherwise() {
+        let fails = |expr: &str| {
+            let (result, unsupported) = crate::functions::tracking_unsupported(|| eval(expr));
+            assert!(result.is_err() && unsupported.is_some(), "{expr}");
+        };
+        fails("'\\u1C89'.matches('\\\\pL')");
+        fails("'\\u1FD3'.matches('(?i)\\u0390')");
+        holds("'\\u1C89'.matches('^.$') && 'é'.matches('^\\\\pL$') && 'Ω'.matches('(?i)ω')");
+        holds("!'\\u1C89'.matches('(?i)\\\\d') && '\\u1C89'.matches('(?i)[^0-9]')");
+        #[cfg(feature = "regex_funcs")]
+        {
+            fails("'a\\u0378'.findAll('(?i)a').size() == 1");
+            holds("'a\\u0378'.findAll('a').size() == 1");
+        }
     }
 }

@@ -21,7 +21,7 @@ pub(crate) fn register(r: &mut Registrar<'_, '_, '_>) {
 
 /// `<string>.find(<string>) -> <string>`
 fn find(This(this): This<Arc<String>>, pattern: Arc<String>) -> ResolveResult {
-    let re = cel_regex::compile("find", &pattern)?;
+    let re = cel_regex::compile("find", &pattern, &this)?;
     let result = re.find(&this).map(|m| m.as_str().to_string()).unwrap_or_default();
     Ok(Value::String(Arc::new(result)))
 }
@@ -39,7 +39,7 @@ fn find_all(This(this): This<Arc<String>>, Arguments(args): Arguments) -> Resolv
         }
     };
 
-    let re = cel_regex::compile("findAll", &pattern)?;
+    let re = cel_regex::compile("findAll", &pattern, &this)?;
 
     // Go's `FindAllString` takes a negative limit as "no limit". Narrowed with
     // `try_from`, not `as`: on a 32-bit target `n as usize` truncates

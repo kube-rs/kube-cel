@@ -11,7 +11,7 @@
 //! `\>` are literals, `&&`, `--`, `~~` and `[` inside a class are literals;
 //! the `regex` crate has them Unicode, as word boundaries and as class
 //! operations. What the translation cannot carry over is Unicode itself: Go's
-//! tables are Unicode 15.0.0, the crate's newer.
+//! tables are Unicode 15.0.0, the crate's newer (see `go_unicode`).
 //!
 //! It leaves out the parser's resource limits (`expression too large`,
 //! `expression nests too deeply`, a character-class rune budget), which the
@@ -320,6 +320,30 @@ struct Flags {
     non_greedy: bool,
 }
 
+/// What a translation reads of the Unicode tables, where Go's (Unicode
+/// 15.0.0) and the `regex` crate's differ (see `go_unicode`), from least to
+/// most.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub(crate) enum Tables {
+    /// Nothing.
+    #[default]
+    None,
+    /// Case folding of characters that have no case in either (`(?i)1`,
+    /// `(?i)[0-9]`): the same characters match in both, as long as the
+    /// crate's tables are the ones `go_unicode` was computed for.
+    UncasedFolding,
+    /// A Unicode class, or case folding of a character that has a case.
+    Read,
+}
+
+/// A pattern in the `regex` crate's syntax, and what it reads of the Unicode
+/// tables.
+#[derive(Debug)]
+pub(crate) struct Translation {
+    pub(crate) pattern: String,
+    pub(crate) tables: Tables,
+}
+
 /// A node of the parse: what `repeatIsValid` walks, and the parser's two
 /// pseudo-operators.
 #[derive(Debug)]
@@ -429,6 +453,23 @@ fn folded(atom: String, flags: Flags) -> String {
     if flags.fold { format!("(?i:{atom})") } else { atom }
 }
 
+/// Whether the class items of a Perl class hold a character that has a case:
+/// all but `\d` and `\s` do.
+fn perl_items_cased(items: &str) -> bool {
+    !matches!(items, "0-9" | r"\x{9}\x{A}\x{C}\x{D}\x{20}")
+}
+
+/// Whether a POSIX class item (`[:alpha:]`, `[:^digit:]`) holds a character
+/// that has a case: a negated one does, and those with ASCII letters.
+fn posix_cased(item: &str) -> bool {
+    let inner = &item[2..item.len() - 2];
+    inner.starts_with('^')
+        || matches!(
+            inner,
+            "alnum" | "alpha" | "ascii" | "graph" | "lower" | "print" | "upper" | "word" | "xdigit"
+        )
+}
+
 /// The class items of a Perl class `\d`, `\s`, `\w` (ASCII, as in Go, whose
 /// `\s` is `[\t\n\f\r ]`) or their negations.
 fn perl_items(c: u8) -> &'static str {
@@ -457,6 +498,7 @@ fn unicode_items(name: &str, negated: bool) -> String {
 struct Parser {
     stack: Vec<Node>,
     flags: Flags,
+    tables: Tables,
 }
 
 impl Parser {
@@ -464,11 +506,28 @@ impl Parser {
         self.stack.push(node);
     }
 
+    /// Notes what an atom reads of the Unicode tables.
+    fn reads(&mut self, tables: Tables) {
+        self.tables = self.tables.max(tables);
+    }
+
+    /// Notes an atom folded under `i`, whose characters have a case or not.
+    fn folds(&mut self, cased: bool) {
+        if self.flags.fold {
+            self.reads(if cased {
+                Tables::Read
+            } else {
+                Tables::UncasedFolding
+            });
+        }
+    }
+
     /// A literal rune under the current flags.
     fn literal(&mut self, r: u32) {
         let atom = if (0xD800..=0xDFFF).contains(&r) {
             NEVER.to_owned()
         } else {
+            self.folds(super::go_unicode::cased(r, r));
             folded(rune(r), self.flags)
         };
         self.push(Node::atom(atom));
@@ -606,7 +665,7 @@ pub(crate) fn check(pattern: &str) -> Result<(), Re2Error> {
 /// rune of a class escaped (Go's `&&`, `--`, `~~` and `[` in a class are
 /// literals); groups non-capturing (only whole matches count, and Go allows a
 /// group name twice).
-pub(crate) fn translate(pattern: &str) -> Result<String, Re2Error> {
+pub(crate) fn translate(pattern: &str) -> Result<Translation, Re2Error> {
     let mut p = Parser::default();
     let mut t = pattern;
     let mut last_repeat: &str = "";
@@ -690,7 +749,10 @@ pub(crate) fn translate(pattern: &str) -> Result<String, Re2Error> {
     if p.stack.len() != 1 {
         return Err(error(MISSING_PAREN, pattern));
     }
-    Ok(p.stack[0].out().to_owned())
+    Ok(Translation {
+        pattern: p.stack[0].out().to_owned(),
+        tables: p.tables,
+    })
 }
 
 /// A `\` outside a class: `\A`, `\b`, `\B`, `\z`, `\Q..\E`, a Unicode or Perl
@@ -721,10 +783,12 @@ fn parse_backslash<'a>(p: &mut Parser, t: &'a str) -> Result<&'a str, Re2Error> 
         _ => {}
     }
     if let Some((items, rest)) = parse_unicode_class(t)? {
+        p.reads(Tables::Read);
         p.push(Node::atom(class(&items, false, p.flags)));
         return Ok(rest);
     }
     if let Some((items, rest)) = parse_perl_class_escape(t) {
+        p.folds(perl_items_cased(items));
         p.push(Node::atom(class(items, false, p.flags)));
         return Ok(rest);
     }
@@ -995,6 +1059,9 @@ fn parse_class<'a>(p: &mut Parser, s: &'a str) -> Result<&'a str, Re2Error> {
         t = &t[1..];
     }
     let mut items = String::new();
+    // Whether an item is a Unicode class, and whether one holds a character
+    // that has a case.
+    let (mut unicode, mut cased) = (false, false);
     // `]` (and `-`) may come first.
     let mut first = true;
     while t.is_empty() || !t.starts_with(']') || first {
@@ -1002,16 +1069,19 @@ fn parse_class<'a>(p: &mut Parser, s: &'a str) -> Result<&'a str, Re2Error> {
         if t.len() > 2
             && let Some((item, rest)) = parse_named_class(t)?
         {
+            cased |= posix_cased(item);
             items.push_str(item);
             t = rest;
             continue;
         }
         if let Some((item, rest)) = parse_unicode_class(t)? {
+            unicode = true;
             items.push_str(&item);
             t = rest;
             continue;
         }
         if let Some((item, rest)) = parse_perl_class_escape(t) {
+            cased |= perl_items_cased(item);
             items.push_str(item);
             t = rest;
             continue;
@@ -1030,7 +1100,14 @@ fn parse_class<'a>(p: &mut Parser, s: &'a str) -> Result<&'a str, Re2Error> {
             }
             hi = h;
         }
+        cased |= super::go_unicode::cased(lo, hi);
         items.push_str(&range_items(lo, hi));
+    }
+    // A negated class folds its items, then negates: what it folds is theirs.
+    if unicode {
+        p.reads(Tables::Read);
+    } else {
+        p.folds(cased);
     }
     p.push(Node::atom(class(&items, negated, p.flags)));
     Ok(&t[1..])
@@ -1221,7 +1298,38 @@ mod tests {
             (r"\p{^Greek}\p{Letter}\p{Ascii}", r"[\P{Greek}][\p{L}][\p{ASCII}]"),
             (r"\x{D800}a{", r"[^\x{0}-\x{10FFFF}]a\x{7B}"),
         ] {
-            assert_eq!(super::translate(pattern).as_deref(), Ok(want), "{pattern}");
+            let pattern_of = super::translate(pattern).map(|t| t.pattern);
+            assert_eq!(pattern_of.as_deref(), Ok(want), "{pattern}");
+        }
+    }
+
+    /// A Unicode class and the folding of a character that has a case read
+    /// the Unicode tables; the folding of one that has none does not, as long
+    /// as the `regex` crate's tables are the ones kube-cel knows.
+    #[test]
+    fn translations_tell_what_they_read_of_the_unicode_tables() {
+        use super::Tables::{None, Read, UncasedFolding};
+        for (pattern, want) in [
+            ("a", None),
+            ("(?i)", None),
+            ("\\x{1C89}[à-ÿ]", None),
+            (r"\pL", Read),
+            (r"[a\p{Greek}]", Read),
+            ("(?i)a", Read),
+            (r"(?i)\x{1C89}", Read),
+            (r"(?i)[\D]", Read),
+            ("(?i)[[:alpha:]]", Read),
+            ("(?i)[[:ascii:]]", Read),
+            ("(?i)[[:^digit:]]", Read),
+            ("(?i)[0-9A]", Read),
+            ("(?i)1", UncasedFolding),
+            (r"(?i)\d", UncasedFolding),
+            ("(?i)[0-9]", UncasedFolding),
+            ("(?i)[^0-9]", UncasedFolding),
+            ("(?i)[[:digit:]]", UncasedFolding),
+            ("(?i:1)a", UncasedFolding),
+        ] {
+            assert_eq!(super::translate(pattern).map(|t| t.tables), Ok(want), "{pattern}");
         }
     }
 
