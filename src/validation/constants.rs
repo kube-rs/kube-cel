@@ -73,7 +73,13 @@ const CONVERSIONS: &[&str] = &[
 ];
 
 /// The helpers `new_env()`'s macros put inside a conversion: part of it.
-const HELPERS: &[&str] = &["@kube.durationInput", "@kube.timestampInput", "@kube.stringInput"];
+const HELPERS: &[&str] = &[
+    "@kube.durationInput",
+    "@kube.timestampInput",
+    "@kube.stringInput",
+    "@kube.doubleInput",
+    "@kube.uintInput",
+];
 
 /// Whether `call` is a conversion cel-go folds when its argument is a
 /// constant.
@@ -216,6 +222,8 @@ mod tests {
             "true || int(9.3e18) == 1",
             "true || .bool('maybe')",
             "true || 'a'.matches(string(b'\\xff'))",
+            "true || double('1e400') > 0.0",
+            "true || uint('+1') > 0u",
         ] {
             assert!(refused(expr), "{expr}");
         }

@@ -260,10 +260,10 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     `v` and refuse a fourth component (`1.2.3.4`).
   - Quantity comparison is exact for magnitudes beyond `i128` scaling
     (`compareTo` used to call quantities 3 apart equal there).
-- **The standard time conversions, `string()` of a time value, duration
-  arithmetic and optional `or` / `orValue` follow cel-go v0.26**: `new_env()`
-  puts cel-go's in front of `cel`'s, through macros, so general use and
-  validation both see them (each checked live on v1.36.1):
+- **The standard time and number conversions, `string()` of a time value,
+  duration arithmetic and optional `or` / `orValue` follow cel-go v0.26**:
+  `new_env()` puts cel-go's in front of `cel`'s, through macros, so general
+  use and validation both see them (each checked live on v1.36.1):
   - `duration(string)` is Go's `time.ParseDuration` and `timestamp(string)`
     Go's `time.Parse(time.RFC3339, ..)` with cel-go's range. A duration past
     int64 nanoseconds, an exponent, a sign between components, trailing text,
@@ -282,6 +282,14 @@ Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14)).
     `string(<double>)` prints Go's shortest `%g` form (`1e+06`, `1e-05`,
     `+Inf`; it printed `1000000`, `0.00001`, `inf`): a **fail-open**, now
     closed.
+  - `double(string)` is Go's `strconv.ParseFloat` and `uint(string)` Go's
+    `strconv.ParseUint(s, 10, 64)`. A value past the float64 range
+    (`'1e400'`), `+nan` and a `+` before an unsigned integer are errors; they
+    gave `±inf` or a value, a **fail-open**, now closed. `_` between digits
+    (`'1_000'`) and a hexadecimal float (`'0x1p-2'`) convert; they were
+    errors. A decimal of more than 800 significant digits that Go reads two
+    ways is an error where the readings differ (fail-closed). `int(string)`
+    already matched Go's `strconv.ParseInt`.
   - Duration `+` and `-`, the difference of two timestamps and a timestamp
     minus a duration stay within int64 nanoseconds, with cel-go's overflow
     checks; they went up to `cel`'s ±315,576,000,000 seconds. `-` negates a

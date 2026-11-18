@@ -140,7 +140,7 @@ fn literal_converts(conversion: &str, literal: &LiteralValue) -> bool {
     }
 }
 
-fn single<'b, 'v>(args: Vec<CowVal<'b, 'v>>) -> Result<CowVal<'b, 'v>, ExecutionError> {
+pub(super) fn single<'b, 'v>(args: Vec<CowVal<'b, 'v>>) -> Result<CowVal<'b, 'v>, ExecutionError> {
     let n = args.len();
     let [arg]: [CowVal<'b, 'v>; 1] = args
         .try_into()
@@ -155,7 +155,7 @@ fn pair<'b, 'v>(args: Vec<CowVal<'b, 'v>>) -> Result<[CowVal<'b, 'v>; 2], Execut
 }
 
 /// cel-go's error for a string the conversion to `type_name` refuses.
-fn conversion_error(function: &str, type_name: &str) -> ExecutionError {
+pub(super) fn conversion_error(function: &str, type_name: &str) -> ExecutionError {
     ExecutionError::function_error(
         function,
         format!("type conversion error from 'string' to '{type_name}'"),

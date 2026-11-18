@@ -1505,6 +1505,54 @@ pub fn cases() -> Vec<ParityCase> {
             note: "string(<double>) is Go's strconv 'g' form → ACCEPT",
         },
         ParityCase {
+            kind: "PnumberParse",
+            plural: "pnumberparses",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "double('1_000') == 1000.0 && double('0x1p-2') == 0.25 && double('-Infinity') < 0.0 && uint('18446744073709551615') == 18446744073709551615u && int('+7') == 7",
+                    "message": "pnumberparses"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::Accept,
+            note: "double(string) is Go's ParseFloat (separators, hex floats), uint(string) ParseUint → ACCEPT",
+        },
+        ParityCase {
+            kind: "PnumberFold",
+            plural: "pnumberfolds",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "x-kubernetes-validations": [{
+                    "rule": "true || double('1e400') > 0.0",
+                    "message": "pnumberfolds"
+                }]
+            }),
+            object: json!({}),
+            expect: Expect::RegistrationRejected,
+            note: "double('1e400') is past the range, folds and fails → rejected at registration",
+        },
+        ParityCase {
+            kind: "PnumberDynamic",
+            plural: "pnumberdynamics",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "d": { "type": "string", "maxLength": 64 },
+                    "u": { "type": "string", "maxLength": 64 }
+                },
+                "x-kubernetes-validations": [{
+                    "rule": "double(self.d) > 0.0 || uint(self.u) > 0u",
+                    "message": "pnumberdynamics"
+                }]
+            }),
+            object: json!({ "d": "1e400", "u": "+1" }),
+            expect: Expect::Reject,
+            note: "double() refuses a value past the range, uint() a '+' → REJECT",
+        },
+        ParityCase {
             kind: "PtimeDynamic",
             plural: "ptimedynamics",
             schema: json!({

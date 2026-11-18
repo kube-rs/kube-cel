@@ -1387,6 +1387,39 @@ fn timestamp_offset_of_a_day_fails_closed() {
     );
 }
 
+// ── A decimal Go reads one of two ways — fails CLOSED ──────────────────────
+// apiserver: cel-go converts `double(string)` with Go's `strconv.ParseFloat`
+//            (go1.26.2). Past 800 significant digits (trailing zeros
+//            included), where its Eisel-Lemire step gives up, it falls back
+//            to a decimal of 800 digits, which drops the magnitude of the
+//            digits before the point past the 800th: `'1' + 800 zeros +
+//            'e-800'` reads as 0.1, not 1.
+// kube-cel:  ports the syntax and both readings (src/functions/cel_number.rs),
+//            not when the step gives up: where the readings differ, the
+//            conversion is an EvaluationError, even where CEL absorbs the
+//            error. A constant one is left to the evaluation, as cel-go folds
+//            it into a value either way.
+
+#[test]
+fn double_of_a_decimal_go_reads_two_ways_fails_closed() {
+    let two_ways = format!("1{}e-800", "0".repeat(800));
+    for rule in [
+        format!("['{two_ways}'].all(x, double(x) > 0.0 || true)"),
+        format!("double('{two_ways}') > 0.5"),
+    ] {
+        let errors = run_rule(&rule).unwrap_err();
+        assert!(
+            errors.iter().all(|e| e.kind == ErrorKind::EvaluationError),
+            "{errors:?}"
+        );
+    }
+    assert_passes(&format!("true || double('{two_ways}') > 0.5"));
+    // Where the readings agree the value is Go's, and a constant past the
+    // range is refused as the apiserver refuses it.
+    assert_passes(&format!("double('0.{}') > 0.5", "5".repeat(900)));
+    assert_refused(&format!("true || double('{}') > 0.0", "9".repeat(801)));
+}
+
 // ── Timestamp getters without a time zone — fail OPEN until cel-rust#460 ──
 // apiserver: cel-go reads `getHours()` and the other getters without a zone
 //            argument in UTC, as the CEL spec says (k8s.io/apiserver v0.36.1
