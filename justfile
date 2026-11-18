@@ -162,6 +162,19 @@ release:
     # substitution in an assignment stops the script under `set -e`, while a
     # test of its (empty) output would carry on.
     set -euo pipefail
+    # The tools the release needs, checked before anything else: python3 for
+    # the date check and the release notes, gh (logged in) for the GitHub
+    # release that ends it.
+    for tool in python3 gh; do
+        if ! command -v "${tool}" >/dev/null; then
+            echo "⚠ ${tool} is not on PATH; the release needs it"
+            exit 1
+        fi
+    done
+    if ! gh auth status --hostname github.com >/dev/null 2>&1; then
+        echo "⚠ gh is not logged in to github.com (gh auth login); the release ends with a GitHub release"
+        exit 1
+    fi
     # Pin the release to the commit this fetch brought (FETCH_HEAD; origin/main
     # stays stale where the fetch refspec does not cover main). That commit is
     # checked, published and tagged from its own checkout below, so moving HEAD
@@ -242,7 +255,12 @@ release:
     # GitHub release: notes reflowed to one line per paragraph/bullet (GitHub
     # renders single newlines as <br>, so hard-wrapped CHANGELOG text breaks
     # mid-sentence otherwise).
-    gh release create "${tag}" --title "${tag}" --notes-file "${notes}" --verify-tag
+    if ! gh release create "${tag}" --title "${tag}" --notes-file "${notes}" --verify-tag; then
+        echo "⚠ published ${version} and pushed ${tag}, but creating the GitHub release failed."
+        echo "  Do not rerun \`just release\` (the tag exists now). From the release commit, retry with:"
+        echo "  just release-notes ${version} > notes.md && gh release create ${tag} --title ${tag} --notes-file notes.md --verify-tag"
+        exit 1
+    fi
     echo "Published + released kube-cel ${tag}"
 
 # Print GitHub-friendly (reflowed) release notes for VERSION from the CHANGELOG
@@ -267,22 +285,25 @@ release-notes version:
         return bool(m) and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1]
 
     # The section runs from its heading to the next `## [` heading, both
-    # recognised only outside fenced code blocks.
-    sec, inside, fence = [], False, None
-    for l in open('CHANGELOG.md', encoding='utf-8').read().splitlines():
+    # recognised only outside fenced code blocks. A fence left open anywhere
+    # would move where sections start and end, so it is an error; the whole
+    # file is scanned for one.
+    sec, inside, found, fence, fence_line = [], False, False, None, 0
+    for n, l in enumerate(open('CHANGELOG.md', encoding='utf-8').read().splitlines(), 1):
         if fence is None and l.startswith('## ['):
-            if inside:
-                break
-            inside = l.startswith(f'## [{version}]')
+            inside = not found and l.startswith(f'## [{version}]')
+            found = found or inside
             continue
         if fence is not None:
             if fence_closes(l, fence):
                 fence = None
         else:
-            fence = fence_open(l)
+            fence, fence_line = fence_open(l), n
         if inside:
             sec.append(l)
-    if not inside:
+    if fence is not None:
+        sys.exit(f'CHANGELOG.md:{fence_line}: a code fence that is never closed')
+    if not found:
         sys.exit(f'no CHANGELOG.md section for {version}')
 
     out, cur, fence = [], None, None

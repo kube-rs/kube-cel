@@ -22,7 +22,8 @@ no migration for rules the apiserver accepts.
 - **One environment: build it with `new_env()` and a context on it with
   `new_context()`.** General use now gets the environment the validation
   engine uses. `new_env()` adds kube-cel's port of cel-go's `ext.Lists` (with
-  the `lists` feature, and its `sortBy` macro), the two-variable comprehension macros (`all(i, v, …)`, `exists(i, v, …)`,
+  the `lists` feature, and its `sortBy` macro), the two-variable
+  comprehension macros (`all(i, v, …)`, `exists(i, v, …)`,
   `existsOne(i, v, …)`, `transformList`, `transformMap`, `transformMapEntry`)
   and the `string(<IP>)` / `string(<CIDR>)` overloads, and `new_context()`
   registers the same functions as validation. What moved to the `Env` is
@@ -42,10 +43,13 @@ no migration for rules the apiserver accepts.
     success and registers nothing; on a context whose `Env` already declares
     one of kube-cel's names, `cel` 0.16 refuses the name. Both used to pass
     silently. Neither happens on `Context::default()` or on `new_env()`.
-  - Migration: build the env and context with
-    `let env = Arc::new(kube_cel::new_env()); let ctx = kube_cel::new_context(Arc::clone(&env))?;`
-    and compile with `env.compile(..)`. `KubeCelExt` is deprecated (see
-    Deprecated).
+  - Migration: build the env and context, and compile with
+    `env.compile(..)`:
+    ```rust
+    let env = Arc::new(kube_cel::new_env());
+    let ctx = kube_cel::new_context(Arc::clone(&env))?;
+    ```
+    `KubeCelExt` is deprecated (see Deprecated).
 - **kube-cel ships only functions the apiserver declares.** The `math.*`
   functions (18) and `base64.encode` / `base64.decode`, kube-cel's copies of
   cel-go's `ext.Math` and `ext.Encoders`, and `isIPv4`, `isIPv6`, `isCIDRv4`,
@@ -185,9 +189,10 @@ no migration for rules the apiserver accepts.
     rule's node and starts with `.`: `spec.x` on the root becomes `.spec.x`.
 - **A VAP's declarations come from the policy, its values from the
   request**, as in the apiserver. `VapEvaluator` declares `params` only for
-  a policy with a `paramKind`: the new `VapEvaluatorBuilder::has_param_kind(bool)`
-  says whether it has one; unset, it follows `params(..)` (a parameter
-  object set means a `paramKind`). `has_param_kind(false)` with `params(..)`,
+  a policy with a `paramKind`: the new
+  `VapEvaluatorBuilder::has_param_kind(bool)` says whether it has one;
+  unset, it follows `params(..)` (a parameter object set means a
+  `paramKind`). `has_param_kind(false)` with `params(..)`,
   in either order, is a policy without one: `params` is not declared and the
   object is not bound. Each `CompiledVapExpression` keeps whether `params`
   was declared, and `evaluate_compiled` binds `params` to `null` when it was
@@ -688,8 +693,9 @@ Each group below follows kube-apiserver v1.36.1, checked live.
     capped at the largest int64 (`10Ei`). `isInteger()` / `asInteger()` are
     `AsInt64()`: only a quantity kept as an int64 times a non-negative power
     of ten converts, so `1000m`, `1.0`, `1e40`, `1.5Gi` and `1Pi` are not
-    integers (`asInteger()` returned a value where the apiserver errors). `asApproximateFloat()` multiplies by Go's `math.Pow10` table
-    (`0e1000` is NaN). `add` / `sub` keep Go's representation, and `==` with
+    integers (`asInteger()` returned a value where the apiserver errors).
+    `asApproximateFloat()` multiplies by Go's `math.Pow10` table (`0e1000` is
+    NaN). `add` / `sub` keep Go's representation, and `==` with
     an `add` / `sub` result on the right is an error in the apiserver; here
     it is false, and a rule reaching it is refused.
   - Comparison is exact for magnitudes beyond `i128` scaling (`compareTo`

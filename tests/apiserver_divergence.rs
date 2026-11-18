@@ -1415,7 +1415,8 @@ fn timestamp_offset_of_a_day_fails_closed() {
 //            rule reads it (kube-openapi v0.0.0-20260317180543-43fb72c5454a).
 //            IsDateTime lowercases, reads only the first two `t`-separated
 //            pieces and leaves the offset unchecked, so `t` / `z` in
-//            lowercase, an offset past `+24:60` or a trailing `tXYZ` pass it;
+//            lowercase, an offset hour past 24 or minute past 60 (`+99:99`,
+//            `+05:61`) or a trailing `tXYZ` pass it;
 //            ParseDateTime then fails, which only a rule reading the field
 //            sees (the object passes otherwise). Both take an offset of 24
 //            hours up to `+24:60` and bind it.
@@ -1438,6 +1439,7 @@ fn date_time_the_binding_refuses_fails_closed() {
     for (value, rule) in [
         ("2024-01-15t10:30:00z", "true"),
         ("2024-01-15T10:30:00+99:99", "true"),
+        ("2024-01-15T10:30:00+05:61", "true"),
         ("2024-01-15T10:30:00ZtXYZ", "true"),
         ("2024-01-15T10:30:00x5Z", "true"),
         ("2024-01-15T10:30:00+24:00", "true"),

@@ -15,8 +15,9 @@
 //! expression); a batch the apiserver refuses to register is bisected so a single
 //! uncompilable rule cannot hide the rest.
 //!
-//! Like `tests/sweep_kind.rs` this is a MEASUREMENT, not an assertion suite: it
-//! never fails on a divergence, it reports them. The human promotes findings to
+//! Like the repository's sweep runner (`just sweep`, not in the published
+//! package), this is a MEASUREMENT, not an assertion suite: it never fails on
+//! a divergence, it reports them. The human promotes findings to
 //! `tests/common/mod.rs` parity rows.
 //!
 //! It lives inside the crate, as a unit test, so it evaluates with the

@@ -204,9 +204,9 @@ pub(crate) fn parse_date(s: &str) -> Option<chrono::DateTime<chrono::FixedOffset
 /// accepts. For `date-time` the check is `strfmt.IsDateTime` and the binding
 /// `strfmt.ParseDateTime`, which differ: a value the check refuses is refused
 /// here as there, and one the check takes and the binding refuses (`t` / `z` in
-/// lowercase, an offset past `+24:60`, `2024-01-15T10:30:00ZtXYZ`) is refused
-/// too, where the apiserver binds an error that only fails a rule reading the
-/// field. kube-cel cannot bind such an error (`==` on it would answer), so
+/// lowercase, an offset hour past 24 or minute past 60,
+/// `2024-01-15T10:30:00ZtXYZ`) is refused too, where the apiserver binds an
+/// error that only fails a rule reading the field. kube-cel cannot bind such an error (`==` on it would answer), so
 /// that, and an offset of 24 hours or more that `chrono` cannot hold, is
 /// fail-closed (README "apiserver divergence").
 pub(crate) fn binding_error(value: &serde_json::Value, format: &SchemaFormat) -> Option<String> {
@@ -680,6 +680,7 @@ mod tests {
             // IsDateTime takes, ParseDateTime refuses: fail-closed here.
             ("2024-01-15t10:30:00z", true),
             ("2024-01-15T10:30:00+99:99", true),
+            ("2024-01-15T10:30:00+05:61", true),
             ("2024-01-15T10:30:00ZtXYZ", true),
             // Both take it; chrono cannot hold the offset: fail-closed.
             ("2024-01-15T10:30:00+24:00", true),
