@@ -419,7 +419,8 @@ fn compilation_error(err: &CompilationError, path: &str) -> ValidationError {
             kind: ErrorKind::InvalidRule,
             source: None,
         },
-        CompilationError::RuleInCombinator { rule, .. } => ValidationError {
+        CompilationError::RuleInCombinator { rule, .. }
+        | CompilationError::NoTypeInformation { rule, .. } => ValidationError {
             rule: rule.clone(),
             message: err.to_string(),
             field_path: path.to_string(),
@@ -452,8 +453,9 @@ fn registration_errors(schema: &serde_json::Value) -> Vec<ValidationError> {
     registration_errors_from(schema, String::new(), None, &mut errors);
     // Reported at the root, where `compile_schema` keeps them too.
     errors.extend(
-        crate::validation::compilation::combinator_rule_errors(schema)
+        crate::validation::compilation::untyped_rule_errors(schema)
             .iter()
+            .chain(&crate::validation::compilation::combinator_rule_errors(schema))
             .map(|e| compilation_error(e, "")),
     );
     errors
@@ -2346,6 +2348,100 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The apiserver refuses rules on a node it cannot build a CEL type for
+    /// ("failed to construct type information", every version 1.33 to 1.38),
+    /// so every entry point rejects the object with one root error per node,
+    /// however the object fares against the rules. Parity rows `Ptypeless*`.
+    #[test]
+    fn rules_without_type_information_are_refused() {
+        let rule = |r: &str| json!([{"rule": r}]);
+        let preserve = json!({"x-kubernetes-preserve-unknown-fields": true});
+        for (schema, location) in [
+            (
+                json!({"type": "object", "properties": {"u": {"x-kubernetes-preserve-unknown-fields": true, "x-kubernetes-validations": rule("true")}}}),
+                "properties[u]",
+            ),
+            (
+                json!({"type": "object", "properties": {"l": {"type": "array", "items": preserve, "x-kubernetes-validations": rule("self.size() <= 3")}}}),
+                "properties[l]",
+            ),
+            (
+                json!({"type": "object", "properties": {"m": {"type": "object", "additionalProperties": preserve, "x-kubernetes-validations": rule("self.size() <= 3")}}}),
+                "properties[m]",
+            ),
+            (
+                json!({"type": "object", "properties": {"l": {"type": "array", "items": {"type": "object", "additionalProperties": preserve}, "x-kubernetes-validations": rule("self.size() <= 3")}}}),
+                "properties[l]",
+            ),
+            (
+                json!({"type": "object", "properties": {"s": {"type": "object", "properties": {"u": {"x-kubernetes-preserve-unknown-fields": true, "x-kubernetes-validations": rule("false")}}}}}),
+                "properties[s].properties[u]",
+            ),
+        ] {
+            let object = json!({"u": {"a": 1}, "l": [{"a": 1}], "m": {"a": 1}, "s": {"u": 1}});
+            let compiled = compile_schema(&schema);
+            for errors in [
+                validate(&schema, &object, None).unwrap_err(),
+                validate_compiled(&compiled, &object, None).unwrap_err(),
+            ] {
+                assert_eq!(errors.len(), 1, "{location}: {errors:?}");
+                assert_eq!(errors[0].kind, ErrorKind::CompilationFailure, "{location}");
+                assert_eq!(errors[0].field_path, "", "{location}");
+                assert!(
+                    errors[0].message.starts_with(&format!(
+                        "{location}.x-kubernetes-validations: failed to construct type information"
+                    )),
+                    "{location}: {}",
+                    errors[0].message
+                );
+            }
+            assert!(
+                compiled
+                    .compilation_errors()
+                    .iter()
+                    .any(|e| matches!(e, CompilationError::NoTypeInformation { .. }))
+            );
+        }
+    }
+
+    /// Rules beside or above a typeless node, an empty rule list on one, and
+    /// rules on nodes the apiserver types (`type: object` with
+    /// preserve-unknown-fields or embedded-resource, int-or-string, a map
+    /// with `additionalProperties: true`) are fine.
+    #[test]
+    fn rules_with_type_information_are_accepted() {
+        let rule = |r: &str| json!([{"rule": r}]);
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "u": {"x-kubernetes-preserve-unknown-fields": true, "x-kubernetes-validations": []},
+                "n": {"type": "integer", "x-kubernetes-validations": rule("self == 1")},
+                "o": {"type": "object", "x-kubernetes-preserve-unknown-fields": true, "x-kubernetes-validations": rule("self == self")},
+                "i": {"x-kubernetes-int-or-string": true, "x-kubernetes-validations": rule("type(self) == int")},
+                "e": {
+                    "type": "object",
+                    "x-kubernetes-embedded-resource": true,
+                    "x-kubernetes-preserve-unknown-fields": true,
+                    "x-kubernetes-validations": rule("self.kind == 'X'")
+                },
+                "f": {"type": "object", "additionalProperties": true, "x-kubernetes-validations": rule("self == self")}
+            },
+            "x-kubernetes-validations": rule("self.n == 1")
+        });
+        let object = json!({
+            "u": {"a": 1},
+            "n": 1,
+            "o": {"a": 1},
+            "i": 1,
+            "e": {"apiVersion": "v1", "kind": "X", "metadata": {"name": "a"}},
+            "f": {"a": 1}
+        });
+        let compiled = compile_schema(&schema);
+        assert!(compiled.compilation_errors().is_empty());
+        validate(&schema, &object, None).unwrap();
+        validate_compiled(&compiled, &object, None).unwrap();
     }
 
     /// Combinators without rules, or with an empty rule list, are fine.

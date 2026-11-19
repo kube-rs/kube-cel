@@ -175,6 +175,21 @@ no migration for rules the apiserver accepts.
   per node holding rules (`CompilationError::RuleInCombinator`, also listed
   by `CompiledSchema::compilation_errors()`); an empty rule list is fine.
   - Migration: move the rules onto the node the combinator sits on.
+- **CEL rules on a node without a type fail to compile.** The apiserver
+  refuses rules on a schema node it cannot build a CEL type for ("failed to
+  construct type information for x-kubernetes-validations rules", on every
+  version from 1.33 to 1.38): a node with no `type`, such as one with
+  `x-kubernetes-preserve-unknown-fields` alone, or an array whose `items`,
+  or a map whose `additionalProperties`, has none. kube-cel compiled and
+  evaluated them, so an object satisfying them passed: a **fail-open**
+  divergence, now closed. Every entry point rejects the object with one root
+  `CompilationFailure` per such node (`CompilationError::NoTypeInformation`);
+  an empty rule list is fine, and so are rules above or beside a typeless
+  node.
+  - Migration: give the node a type (`type: object` with
+    `x-kubernetes-preserve-unknown-fields`, `x-kubernetes-int-or-string`),
+    or move the rule to the nearest typed parent and read the value through
+    `dyn(..)`.
 - **Rule fields the apiserver refuses at registration are refused.**
   Beside the expressions, the apiserver checks a rule's other fields when it
   registers the CRD or policy (checked on the reference apiserver): a static

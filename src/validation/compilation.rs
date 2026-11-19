@@ -116,6 +116,19 @@ pub enum CompilationError {
         /// Why, in the apiserver's words: "must be non-empty if specified".
         detail: String,
     },
+    /// Rules on a schema node the apiserver cannot build a CEL type for: no
+    /// `type` (`x-kubernetes-preserve-unknown-fields` alone), or an array
+    /// whose `items`, or a map whose `additionalProperties`, has none. The
+    /// apiserver refuses the CRD ("failed to construct type information for
+    /// x-kubernetes-validations rules"); kube-cel reports it once per node,
+    /// at the schema root.
+    NoTypeInformation {
+        /// Where the rules sit, as a schema path from the root:
+        /// `properties[spec].properties[config]`.
+        location: String,
+        /// The node's first rule, as written.
+        rule: String,
+    },
 }
 
 impl std::fmt::Display for CompilationError {
@@ -151,6 +164,12 @@ impl std::fmt::Display for CompilationError {
                 "{location}.x-kubernetes-validations must be empty to be structural: the apiserver \
                  refuses CEL rules inside allOf, anyOf, oneOf and not (rule \"{rule}\")"
             ),
+            CompilationError::NoTypeInformation { location, rule } => write!(
+                f,
+                "{location}.x-kubernetes-validations: failed to construct type information for \
+                 x-kubernetes-validations rules: the apiserver refuses rules on a node without a \
+                 type, or on an array or map whose items or values have none (rule \"{rule}\")"
+            ),
         }
     }
 }
@@ -163,7 +182,8 @@ impl std::error::Error for CompilationError {
             CompilationError::InvalidRule(err) => Some(err),
             CompilationError::SchemaTooDeep { .. }
             | CompilationError::RuleInCombinator { .. }
-            | CompilationError::InvalidRuleField { .. } => None,
+            | CompilationError::InvalidRuleField { .. }
+            | CompilationError::NoTypeInformation { .. } => None,
         }
     }
 }
@@ -232,6 +252,34 @@ pub(crate) fn compile_schema_validations(
             }
         })
         .collect()
+}
+
+/// Whether the apiserver can build the CEL type of `self` for rules on
+/// `schema` (apiserver `common.SchemaDeclType`): an `x-kubernetes-int-or-string`
+/// node, a scalar `type`, an object whose `additionalProperties` (a schema, not
+/// a boolean) has one, or an array whose `items` has one. A node without `type`
+/// has none, `x-kubernetes-preserve-unknown-fields` or not; an object's
+/// properties without one are left out of its type, not refused. Iterative, as
+/// the apiserver has no nesting limit.
+fn has_decl_type(schema: &serde_json::Value) -> bool {
+    let mut node = schema;
+    loop {
+        if node.get("x-kubernetes-int-or-string").and_then(|v| v.as_bool()) == Some(true) {
+            return true;
+        }
+        match node.get("type").and_then(|t| t.as_str()) {
+            Some("array") => match node.get("items") {
+                Some(items) if items.is_object() => node = items,
+                _ => return false,
+            },
+            Some("object") => match node.get("additionalProperties") {
+                Some(values) if values.is_object() => node = values,
+                _ => return true,
+            },
+            Some("string" | "boolean" | "number" | "integer") => return true,
+            _ => return false,
+        }
+    }
 }
 
 /// The `reason`s a rule may give (apiextensions `supportedValidationReason`).
@@ -541,10 +589,65 @@ pub(crate) fn child_schemas(schema: &serde_json::Value) -> Vec<(ChildSchema<'_>,
 #[must_use]
 pub fn compile_schema(schema: &serde_json::Value) -> CompiledSchema {
     let mut compiled = compile_schema_inner(schema, 0);
+    compiled.validations.extend(
+        untyped_rule_errors(schema)
+            .into_iter()
+            .chain(combinator_rule_errors(schema))
+            .map(Err),
+    );
     compiled
-        .validations
-        .extend(combinator_rule_errors(schema).into_iter().map(Err));
-    compiled
+}
+
+/// The nodes holding `x-kubernetes-validations` the apiserver cannot build a
+/// CEL type for ([`has_decl_type`]), which it refuses at registration
+/// (apiextensions `CELSchemaContext.TypeInfo`: "failed to construct type
+/// information for x-kubernetes-validations rules"). An empty list is fine.
+/// The apiserver skips the check where a node or one below it has a schema
+/// error, so nodes under a combinator are left to [`combinator_rule_errors`].
+/// One error per node, in schema order. Iterative, as the apiserver has no
+/// nesting limit.
+pub(crate) fn untyped_rule_errors(schema: &serde_json::Value) -> Vec<CompilationError> {
+    let mut errors = Vec::new();
+    let mut stack = vec![(schema, String::new())];
+    while let Some((node, location)) = stack.pop() {
+        if let Some(rules) = node
+            .get("x-kubernetes-validations")
+            .and_then(|r| r.as_array())
+            .filter(|r| !r.is_empty())
+            && !has_decl_type(node)
+        {
+            errors.push(CompilationError::NoTypeInformation {
+                location: location.clone(),
+                rule: rules[0]
+                    .get("rule")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or_default()
+                    .to_owned(),
+            });
+        }
+        let at = |step: String| {
+            if location.is_empty() {
+                step
+            } else {
+                format!("{location}.{step}")
+            }
+        };
+        let mut children = Vec::new();
+        if let Some(properties) = node.get("properties").and_then(|p| p.as_object()) {
+            for (name, sub) in properties {
+                children.push((sub, at(format!("properties[{name}]"))));
+            }
+        }
+        if let Some(sub) = node.get("items").filter(|i| i.is_object()) {
+            children.push((sub, at("items".to_owned())));
+        }
+        if let Some(sub) = node.get("additionalProperties").filter(|a| a.is_object()) {
+            children.push((sub, at("additionalProperties".to_owned())));
+        }
+        // Reversed, so the stack pops them in schema order.
+        stack.extend(children.into_iter().rev());
+    }
+    errors
 }
 
 /// The `x-kubernetes-validations` under `allOf`, `anyOf`, `oneOf` and `not`
@@ -1078,6 +1181,7 @@ mod tests {
     #[test]
     fn compilation_errors_method() {
         let schema = json!({
+            "type": "object",
             "x-kubernetes-validations": [
                 {"rule": "self.x > 0"},
                 {"rule": "self.y >="},
@@ -1094,6 +1198,7 @@ mod tests {
     #[test]
     fn compilation_errors_empty_when_all_valid() {
         let schema = json!({
+            "type": "object",
             "x-kubernetes-validations": [
                 {"rule": "self.x > 0"},
                 {"rule": "self.z == true"}
@@ -1226,6 +1331,7 @@ mod end_to_end_tests {
     #[test]
     fn multiple_rules_mixed_results() {
         let schema = json!({
+            "type": "object",
             "x-kubernetes-validations": [
                 {"rule": "self.a > 0"},
                 {"rule": "invalid >="},

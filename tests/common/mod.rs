@@ -2822,6 +2822,115 @@ pub fn cases() -> Vec<ParityCase> {
             expect: Expect::Accept,
             note: "combinators without rules (or with an empty list) beside a root rule → accepted",
         },
+        // ── Rules on nodes without a CEL type ─────────────────────────────
+        // The apiserver refuses rules on a node it cannot build a CEL type for
+        // ("failed to construct type information for x-kubernetes-validations
+        // rules"): no `type`, or array items / map values without one. kube-cel
+        // used to compile and evaluate them.
+        ParityCase {
+            kind: "PtypelessRule",
+            plural: "ptypelessrules",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "u": {
+                        "x-kubernetes-preserve-unknown-fields": true,
+                        "x-kubernetes-validations": [{ "rule": "true", "message": "u" }]
+                    }
+                }
+            }),
+            object: json!({ "u": { "a": 1 } }),
+            expect: Expect::RegistrationRejected,
+            note: "a rule on a typeless preserve-unknown-fields node (the object satisfies it) → rejected at registration",
+        },
+        ParityCase {
+            kind: "PtypelessItems",
+            plural: "ptypelessitemses",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "l": {
+                        "type": "array",
+                        "maxItems": 3,
+                        "items": { "x-kubernetes-preserve-unknown-fields": true },
+                        "x-kubernetes-validations": [{ "rule": "self.size() <= 3", "message": "l" }]
+                    }
+                }
+            }),
+            object: json!({ "l": [1] }),
+            expect: Expect::RegistrationRejected,
+            note: "a rule on a list whose items have no type → rejected at registration",
+        },
+        ParityCase {
+            kind: "PtypelessValues",
+            plural: "ptypelessvalueses",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "m": {
+                        "type": "object",
+                        "maxProperties": 3,
+                        "additionalProperties": { "x-kubernetes-preserve-unknown-fields": true },
+                        "x-kubernetes-validations": [{ "rule": "self.size() <= 3", "message": "m" }]
+                    }
+                }
+            }),
+            object: json!({ "m": { "a": 1 } }),
+            expect: Expect::RegistrationRejected,
+            note: "a rule on a map whose values have no type → rejected at registration",
+        },
+        ParityCase {
+            kind: "PtypelessNeighbours",
+            plural: "ptypelessneighbourses",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "u": { "x-kubernetes-preserve-unknown-fields": true, "x-kubernetes-validations": [] },
+                    "n": { "type": "integer", "x-kubernetes-validations": [{ "rule": "self == 1", "message": "n" }] },
+                    "o": {
+                        "type": "object",
+                        "x-kubernetes-preserve-unknown-fields": true,
+                        "x-kubernetes-validations": [{ "rule": "self == self", "message": "o" }]
+                    },
+                    "i": {
+                        "x-kubernetes-int-or-string": true,
+                        "x-kubernetes-validations": [{ "rule": "type(self) == int || type(self) == string", "message": "i" }]
+                    },
+                    "e": {
+                        "type": "object",
+                        "x-kubernetes-embedded-resource": true,
+                        "x-kubernetes-preserve-unknown-fields": true,
+                        "x-kubernetes-validations": [{ "rule": "self.kind == 'X'", "message": "e" }]
+                    },
+                    "m": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "type": "array",
+                            "maxItems": 3,
+                            "items": { "type": "integer", "x-kubernetes-validations": [{ "rule": "self >= 0", "message": "m" }] }
+                        }
+                    },
+                    "f": {
+                        "type": "object",
+                        "additionalProperties": true,
+                        "x-kubernetes-validations": [{ "rule": "self == self", "message": "f" }]
+                    }
+                },
+                "x-kubernetes-validations": [{ "rule": "self.n == 1", "message": "root" }]
+            }),
+            object: json!({
+                "u": { "a": 1 },
+                "n": 1,
+                "o": { "a": 1 },
+                "i": 1,
+                "e": { "apiVersion": "v1", "kind": "X", "metadata": { "name": "a" } },
+                "m": { "a": [1] },
+                "f": { "a": 1 }
+            }),
+            expect: Expect::Accept,
+            note: "rules beside or above typeless nodes, on preserve-unknown or embedded objects, on int-or-string \
+                   and on map/list nodes whose values are typed → accepted",
+        },
         // ── Schema and value fidelity ─────────────────────────────────────
         // `x-kubernetes-preserve-unknown-fields` does not stop the apiserver
         // from defaulting into, and evaluating the rules under,

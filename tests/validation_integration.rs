@@ -949,6 +949,7 @@ fn kube_core_reason_values() {
 
     // All Reason variants from kube-core
     let schema = json!({
+        "type": "object",
         "x-kubernetes-validations": [
             {"rule": "true", "reason": "FieldValueInvalid"},
             {"rule": "true", "reason": "FieldValueForbidden"},
