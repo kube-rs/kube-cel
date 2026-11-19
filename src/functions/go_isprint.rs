@@ -1,7 +1,7 @@
 //! Go's `strconv.IsPrint`, which decides what `%q` (`strconv.Quote`) prints as
 //! is and what it escapes, and `strconv.Quote` itself. The tables are those of go1.26.2's
-//! `src/strconv/isprint.go` (Unicode 15.0.0), the toolchain kube-apiserver
-//! v1.36.1 is built with; newer Go releases print code points assigned in later
+//! `src/strconv/isprint.go` (Unicode 15.0.0), the reference apiserver's
+//! toolchain; newer Go releases print code points assigned in later
 //! Unicode versions. Copied from the Go source (Copyright The Go Authors,
 //! BSD-style license); regenerate them from that file, not by hand.
 

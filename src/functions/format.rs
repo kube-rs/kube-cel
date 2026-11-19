@@ -631,7 +631,7 @@ mod tests {
 
     #[test]
     fn test_format_f_is_the_xtext_en_us_decimal() {
-        // Expected strings are k8s.io/apiserver v0.36.1 `MustBaseEnvSet(1.36)`
+        // Expected strings are the reference apiserver's base environment
         // output (cel-go v0.26, golang.org/x/text v0.33.0, go1.26.2).
         let cases: &[(&str, &str)] = &[
             ("'%.2f'.format([1500.0])", "1,500.00"),
@@ -860,8 +860,8 @@ mod tests {
 
     #[test]
     fn test_format_s_matches_cel_go_v026() {
-        // Expected strings are cel-go v0.26 output, through
-        // k8s.io/apiserver v0.36.1 `MustBaseEnvSet(1.36)`.
+        // Expected strings are cel-go v0.26 output, through the reference
+        // apiserver's base environment.
         let cases: &[(&str, &str)] = &[
             ("'%s'.format([1000000.0])", "1e+06"),
             ("'%s'.format([123456.0])", "123456"),

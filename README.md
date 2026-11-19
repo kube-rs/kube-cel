@@ -380,12 +380,12 @@ Two stability tiers, by surface:
 
 ## apiserver divergence
 
-The validation pipeline aims to return the verdict kube-apiserver v1.36.1
-would give for the CEL rules, client-side; OpenAPI value validation is out of
-scope. Where it cannot match today, it diverges **fail-closed**: it reports an
-error rather than accepting, so a passing result is as strict as the API
-server, with two exception classes that stay until `cel` ships the missing
-piece:
+The validation pipeline aims to return the verdict the reference apiserver,
+kube-apiserver v1.36.1, would give for the CEL rules, client-side; OpenAPI
+value validation is out of scope. Where it cannot match today, it diverges
+**fail-closed**: it reports an error rather than accepting, so a passing
+result is as strict as the API server, with two exception classes that stay
+until `cel` ships the missing piece:
 
 - **No type checker** ([cel-rust#350](https://github.com/cel-rust/cel-rust/issues/350)):
   a rule the apiserver rejects at registration for a type, arity or call-shape
@@ -393,6 +393,10 @@ piece:
 - **No cost model** ([cel-rust#230](https://github.com/cel-rust/cel-rust/discussions/230)):
   a rule the apiserver rejects for its estimated cost, or an object it rejects
   for a rule's runtime cost, can still pass client-side.
+
+It aims to hold the older apiservers in kube's supported window, from 1.33 up
+to the reference, to the same rule, except that a rule may call a function the
+reference declares and 1.33 or 1.34 do not.
 
 A reference kube-cel cannot evaluate (a function the apiserver declares but
 kube-cel does not implement, such as the authz library) surfaces as

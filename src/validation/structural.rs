@@ -1,6 +1,7 @@
 //! Schema-aware CEL values for a CRD rule's `self` and `oldSelf`, as the
-//! apiserver builds them (`k8s.io/apiserver/pkg/cel/common`,
-//! `UnstructuredToVal`, v0.36.1).
+//! reference apiserver builds them (`k8s.io/apiserver/pkg/cel/common`,
+//! `UnstructuredToVal`). "Go oracle" below is a Go program that links the
+//! reference apiserver's libraries; "kind" is a live cluster running it.
 //!
 //! Three kinds of node behave unlike a plain CEL list or map there:
 //!
@@ -1844,8 +1845,8 @@ mod tests {
         })
     }
 
-    /// Each expectation was measured on kube-apiserver v1.36.1 (kind) or with
-    /// its `UnstructuredToVal` (Go, v0.36.1).
+    /// Each expectation was measured on the reference apiserver (kind) or with
+    /// its `UnstructuredToVal` (Go).
     #[test]
     fn set_lists_compare_as_sets_and_add_as_unions() {
         let props = json!({ "s": set(), "t": set() });
@@ -2110,7 +2111,7 @@ mod tests {
     }
 
     /// The apiserver iterates an object's raw keys, a nil for each undeclared
-    /// one, which a comprehension binds as `null` (Go oracle, kind v1.36.1).
+    /// one, which a comprehension binds as `null` (Go oracle and kind).
     #[test]
     fn undeclared_keys_iterate_as_null() {
         let unknown = json!({ "o": {
@@ -2135,8 +2136,7 @@ mod tests {
     /// A value under `additionalProperties` binds by that schema, a set as a
     /// set and an object with its null properties absent; an object with
     /// neither `properties` nor `additionalProperties` (free-form) hides
-    /// every key, which still counts and iterates as `null` (Go oracle,
-    /// v0.36.1).
+    /// every key, which still counts and iterates as `null` (Go oracle).
     #[test]
     fn values_bind_by_their_schema_below_any_node() {
         let addl = |s: Json| json!({ "type": "object", "additionalProperties": s });
@@ -2216,7 +2216,7 @@ mod tests {
 
     /// Set `==` and `+` look up the `Value()` of each right-hand item among
     /// the elements as Go holds them, and an added element binds under the
-    /// list's items (Go oracle, v0.36.1).
+    /// list's items (Go oracle).
     #[test]
     fn set_equality_and_union_read_go_values() {
         let set_of =
@@ -2305,7 +2305,7 @@ mod tests {
     /// The apiserver keys a map list by reading the key fields from each
     /// item's decoded map under their escaped names, so a key name escaping
     /// changes reads as nil everywhere, and four keys or more as Go's `%v` of
-    /// the tuple (Go oracle, v0.36.1).
+    /// the tuple (Go oracle).
     #[test]
     fn map_list_keys_read_the_decoded_map() {
         let map_of = |keys: Json, props: Json| {
@@ -2346,7 +2346,7 @@ mod tests {
     /// through the apiserver's `Unescape`, a key iterates through `Escape`,
     /// and equality passes each raw name to `Find` on both sides, so a field
     /// whose name does not unescape to itself (`__foo__`, `a__dot__b`) is
-    /// absent to it there (Go oracle, v0.36.1).
+    /// absent to it there (Go oracle).
     #[test]
     fn object_fields_go_through_unescape() {
         let int = json!({ "type": "integer" });
@@ -2376,8 +2376,7 @@ mod tests {
     }
 
     /// cel-go's `sort()` and `distinct()` return an empty list itself, so an
-    /// empty set stays a set; `sortBy` comes out a plain list (Go oracle,
-    /// v0.36.1).
+    /// empty set stays a set; `sortBy` comes out a plain list (Go oracle).
     #[test]
     #[cfg(feature = "lists")]
     fn empty_set_stays_a_set_through_sort_and_distinct() {
@@ -2466,8 +2465,8 @@ mod tests {
     }
 
     /// An element `+` added, and a field of one, binds when first read: one
-    /// its schema refuses is an error where read, not before (Go oracle,
-    /// v0.36.1). Iteration can only take a value, so it notes one.
+    /// its schema refuses is an error where read, not before (Go oracle).
+    /// Iteration can only take a value, so it notes one.
     #[test]
     fn added_elements_bind_when_read() {
         let int_set =
@@ -2506,7 +2505,7 @@ mod tests {
     }
 
     /// A value under a node with no `type` but preserve-unknown-fields is the
-    /// apiserver's `unknownPreserved` (Go oracle, v0.36.1).
+    /// apiserver's `unknownPreserved` (Go oracle).
     #[test]
     fn typeless_preserved_values_compare_and_nothing_else() {
         let props = json!({ "u": { "x-kubernetes-preserve-unknown-fields": true } });
@@ -2587,8 +2586,7 @@ mod tests {
 
     /// A set held in an `additionalProperties` map or a list is bound afresh
     /// on each `Find` or `Get`: no `+` state carries from one read, or rule,
-    /// to the next, while a variable holding one keeps it (Go oracle,
-    /// v0.36.1).
+    /// to the next, while a variable holding one keeps it (Go oracle).
     #[test]
     fn sets_read_through_maps_and_lists_are_new_wrappers() {
         let int_set =
@@ -2629,7 +2627,7 @@ mod tests {
     /// `Value()` bound again by cel-go's `NativeToValue`: plain JSON for a
     /// list or map (a set a plain list, `null` and undeclared fields
     /// present), and its `messageExpression` sees the node's plain `oldSelf`
-    /// (Go oracle, v0.36.1).
+    /// (Go oracle).
     #[test]
     fn optional_old_self_holds_the_old_value_as_plain_json() {
         let int_set =

@@ -137,7 +137,7 @@ mod tests {
         assert_eq!(eval(expr), Ok(Value::Bool(true)), "{expr}");
     }
 
-    // Expected values are cel-go's (k8s.io/apiserver v0.36.1).
+    // Expected values are cel-go's, through the reference apiserver.
 
     #[test]
     fn or_and_or_value_short_circuit() {

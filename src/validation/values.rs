@@ -613,7 +613,7 @@ mod tests {
         // Go's fixed-width layout rejects a one-digit month, and Go's calendar
         // a day out of range; so must we.
         // Nor does it take a sign, a space or a short field that chrono's
-        // `%Y-%m-%d` reads (all refused by v1.36.1).
+        // `%Y-%m-%d` reads (all refused by the reference apiserver).
         for s in [
             "2024-3-05",
             "2024-02-30",
@@ -672,7 +672,8 @@ mod tests {
         for (s, refused) in [
             ("2024-01-15T10:30:00Z", false),
             ("2024-01-15T10:30:00,5Z", false),
-            // strfmt.IsDateTime refuses: the object is invalid (v1.36.1).
+            // strfmt.IsDateTime refuses: the object is invalid (checked on the
+            // reference apiserver).
             ("2024-01-15T10:30:00", true),
             ("", true),
             ("2024-01-15T1:30:00Z", true),
@@ -905,7 +906,8 @@ mod tests {
 
     /// `additionalProperties: true` declares no schema for the keys: the
     /// apiserver binds such a map as a free-form object, every key absent to
-    /// CEL but counted (Go oracle, v0.36.1), whether or not it is escaped.
+    /// CEL but counted (Go oracle on the reference apiserver), whether or not
+    /// it is escaped.
     #[test]
     fn additional_properties_true_keys_are_absent() {
         let schema = json!({

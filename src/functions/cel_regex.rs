@@ -288,8 +288,8 @@ mod tests {
         crate::new_env().compile(expr).is_ok()
     }
 
-    // Expected verdicts are Go's `regexp` (go1.26.2) through the apiserver's
-    // environment (k8s.io/apiserver v0.36.1).
+    // Expected verdicts are Go's `regexp` (go1.26.2) through the reference
+    // apiserver's environment.
 
     #[test]
     fn matches_works_in_both_forms() {

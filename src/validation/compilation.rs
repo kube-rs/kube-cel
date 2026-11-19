@@ -748,7 +748,8 @@ mod tests {
     use super::*;
 
     /// The rule fields the apiserver refuses at registration beside the
-    /// expressions (checked on v1.36.1; parity rows `PruleField*`).
+    /// expressions (checked on the reference apiserver; parity rows
+    /// `PruleField*`).
     #[test]
     fn rule_field_errors_follow_the_apiserver() {
         let schema = serde_json::json!({

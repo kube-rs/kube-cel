@@ -2,9 +2,11 @@
 
 ## [0.9.0] - Unreleased
 
+Reference apiserver: kube-apiserver v1.36.1 (cel-go v0.26); window: 1.33 up to the reference.
+
 Migrates to `cel` 0.16 ([#14](https://github.com/kube-rs/kube-cel/issues/14))
-and brings the validation engine's verdicts in line with kube-apiserver
-v1.36.1 (cel-go v0.26), failing closed where it cannot match them
+and brings the validation engine's verdicts in line with the reference
+apiserver, failing closed where it cannot match them
 ([`docs/apiserver-divergence.md`](docs/apiserver-divergence.md)): each verdict change below was checked against a live
 apiserver (`just parity`). "Breaking" lists what code and rules may need to
 change, with migrations. Most entries under "Fixed" close a
@@ -155,9 +157,9 @@ no migration for rules the apiserver accepts.
 - **`apiVersion`, `apiGroup` and `kind` are no longer variables of root
   rules.** kube-cel bound them from a `RootContext`; the apiserver declares
   no such variables and rejects a CRD whose rule names one ("undeclared
-  reference to 'kind'", checked on v1.36.1). Such a rule now fails to
-  compile (`ErrorKind::CompilationFailure`) on every entry point, with or
-  without a `RootContext`.
+  reference to 'kind'", checked on the reference apiserver). Such a rule now
+  fails to compile (`ErrorKind::CompilationFailure`) on every entry point,
+  with or without a `RootContext`.
   - Migration: read the object's own fields in a root rule:
     `self.apiVersion`, `self.kind`, `self.metadata.name` (the API group is
     the part of `self.apiVersion` before the `/`). `RootContext` and the
@@ -166,18 +168,18 @@ no migration for rules the apiserver accepts.
   The apiserver refuses `x-kubernetes-validations` anywhere under a schema
   combinator, at any depth (in its `properties`, `items`, nested
   combinators), as not structural ("must be empty to be structural",
-  checked on v1.36.1). kube-cel evaluated the rules under `allOf` / `anyOf`
-  / `oneOf` as if they were on the node and ignored those under `not`, so an
-  object satisfying them passed: a **fail-open** divergence, now closed.
+  checked on the reference apiserver). kube-cel evaluated the rules under
+  `allOf` / `anyOf` / `oneOf` as if they were on the node and ignored those
+  under `not`, so an object satisfying them passed: a **fail-open** divergence, now closed.
   Every entry point rejects the object with one root `CompilationFailure`
   per node holding rules (`CompilationError::RuleInCombinator`, also listed
   by `CompiledSchema::compilation_errors()`); an empty rule list is fine.
   - Migration: move the rules onto the node the combinator sits on.
 - **Rule fields the apiserver refuses at registration are refused.**
   Beside the expressions, the apiserver checks a rule's other fields when it
-  registers the CRD or policy (checked on v1.36.1): a static `message` that
-  is blank but not empty, or holds a line break once trimmed (CRD rules and
-  VAP validations); a CRD rule holding a line break without a `message`; a
+  registers the CRD or policy (checked on the reference apiserver): a static
+  `message` that is blank but not empty, or holds a line break once trimmed
+  (CRD rules and VAP validations); a CRD rule holding a line break without a `message`; a
   `reason` other than `FieldValueRequired`, `FieldValueForbidden`,
   `FieldValueInvalid` or `FieldValueDuplicate`; a `fieldPath` that is blank,
   holds a line break or names no field of the rule's node (it starts with
@@ -297,7 +299,7 @@ no migration for rules the apiserver accepts.
 
 ### Fixed
 
-Each group below follows kube-apiserver v1.36.1, checked live.
+Each group below follows the reference apiserver, checked live.
 
 - **Rules the apiserver refuses at registration fail to compile, reached or
   not** (`ErrorKind::CompilationFailure`, `CompilationError::Parse` /
@@ -314,9 +316,9 @@ Each group below follows kube-apiserver v1.36.1, checked live.
     reaches (`self.s == '' || isIPv4(self.s)`, the body of a comprehension
     over an empty list, the `messageExpression` of a rule that holds) is
     refused too. All but `cel.bind` used to pass client-side. The names
-    accepted are the functions the `k8s.io/apiserver` v0.36.1 base
-    environment declares (`src/validation/apiserver_functions.txt`, checked
-    against a live apiserver by `just parity`). One that kube-cel does not
+    accepted are the functions the reference apiserver's base environment
+    declares (`src/validation/apiserver_functions.txt`, checked against a
+    live apiserver by `just parity`). One that kube-cel does not
     implement (`optional.unwrap`, `<list>.unwrapOpt()`, the authorizer library
     in a VAP) compiles as before, and fails closed only when evaluation
     reaches it.
@@ -352,8 +354,8 @@ Each group below follows kube-apiserver v1.36.1, checked live.
     with those compilation errors alone; their `field_path` names the schema
     node (`spec.items[*]`, a map value as `*`). A valid rule past the depth
     cap still passes under a shallow object: the apiserver has no nesting
-    limit (v1.36.1 registers a 400-level CRD), so the divergence table no
-    longer claims it rejects deep schemas.
+    limit (the reference apiserver registers a 400-level CRD), so the
+    divergence table no longer claims it rejects deep schemas.
   - A rule reading `oldSelf` in the items of a list that is not
     `x-kubernetes-list-type: map` (at any depth below it), and
     `optionalOldSelf` set on a rule that does not read `oldSelf`, are
@@ -600,8 +602,8 @@ Each group below follows kube-apiserver v1.36.1, checked live.
     handful of others) is an error noted as unsupported (fail-closed); so is
     any match of such a pattern where `regex` resolves to tables other than
     16.0.0's, which kube-cel checks once.
-- **Strings and `format()` follow cel-go v0.26**, the version kube-apiserver
-  v1.36.1 uses:
+- **Strings and `format()` follow cel-go v0.26**, the version the reference
+  apiserver uses:
   - `indexOf` / `lastIndexOf`: a negative offset is an error; with an offset an
     empty needle returns the offset unchanged (`'hello'.indexOf('', -5)` is
     `-5`), and `lastIndexOf` with an offset at or past the length is `-1`.
@@ -641,7 +643,7 @@ Each group below follows kube-apiserver v1.36.1, checked live.
 - **Lists.**
   - `sort()` and `sortBy()` order elements with equal keys as the apiserver
     does: both reorder the indices with a port of go1.26.2's `sort.Slice` (the
-    toolchain of kube-apiserver v1.36.1), as cel-go v0.26 does, so
+    reference apiserver's toolchain), as cel-go v0.26 does, so
     `lists.range(20).sortBy(x, x % 2)[0] == 0` is false, as there. kube-cel's
     own `sort()` sorted stably, so from 13 elements on the order differed: a
     rule reading where `sort()` put a `-0.0` among equal zeros passed, a

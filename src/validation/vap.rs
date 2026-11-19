@@ -181,7 +181,7 @@ impl std::error::Error for VapError {
 
 /// Why the apiserver refuses a validation's static `message` at registration,
 /// if it does: blank but not empty, or holding a line break once trimmed
-/// (checked on v1.36.1).
+/// (checked on the reference apiserver).
 fn message_error(message: &str) -> Option<&'static str> {
     let trimmed = message.trim();
     if !message.is_empty() && trimmed.is_empty() {
@@ -897,7 +897,7 @@ mod tests {
 
     /// The apiserver refuses a blank static message, or one with a line
     /// break once trimmed, at registration; padding and a trailing line
-    /// break are fine (checked on v1.36.1).
+    /// break are fine (checked on the reference apiserver).
     #[test]
     fn static_message_shape_is_checked() {
         let with_message = |message: &str| VapExpression {

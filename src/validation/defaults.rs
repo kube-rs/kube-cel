@@ -309,9 +309,9 @@ mod tests {
     use serde_json::json;
 
     /// The apiserver prunes a `null` field or map value under a node neither
-    /// `nullable` nor defaulted before it defaults (checked on v1.36.1; parity
-    /// rows `PnullPrune*`); a `nullable` one, a defaulted one and a list item
-    /// keep it.
+    /// `nullable` nor defaulted before it defaults (checked on the reference
+    /// apiserver; parity rows `PnullPrune*`); a `nullable` one, a defaulted one
+    /// and a list item keep it.
     #[test]
     fn non_nullable_nulls_without_default_are_pruned() {
         let schema = json!({
@@ -454,8 +454,8 @@ mod tests {
     }
 
     /// The apiserver defaults into map values under
-    /// `x-kubernetes-preserve-unknown-fields` too (checked on v1.36.1; parity
-    /// row `PpresApDefault`).
+    /// `x-kubernetes-preserve-unknown-fields` too (checked on the reference
+    /// apiserver; parity row `PpresApDefault`).
     #[test]
     fn apply_defaults_fills_additional_properties_under_preserve_unknown() {
         let schema = json!({

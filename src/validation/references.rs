@@ -33,8 +33,8 @@
 //! selections on its leading part, which must then be declared. A function
 //! namespace is no identifier: `format.dns1123Label()` calls the function
 //! `format.dns1123Label`. A message construction `T{..}` must name a message
-//! type the context declares. Every list here was measured with
-//! `k8s.io/apiserver` v0.36.1.
+//! type the context declares. Every list here was measured on the reference
+//! apiserver.
 //!
 //! It checks names only. Type, arity and call-shape errors (`[1, 2.0].isSorted()`,
 //! `'a'.lowerAscii(42)`, `family(ip(..))`), and a field a type does not have
@@ -656,7 +656,7 @@ mod tests {
 
     /// Calls to functions the apiserver declares but kube-cel does not
     /// implement compile. Each was compiled and evaluated with the Go oracle
-    /// (`k8s.io/apiserver` v0.36.1); the `authorizer` rows in the policy
+    /// on the reference apiserver; the `authorizer` rows in the policy
     /// compiler, the others in the CRD rule compiler.
     #[test]
     fn accepts_declared_functions_kube_cel_does_not_implement() {
@@ -684,14 +684,15 @@ mod tests {
 
     /// The check must refuse none of `exprs`, all of which the apiserver's base
     /// environment accepts: each was evaluated to `true` with the Go oracle
-    /// (`k8s.io/apiserver` v0.36.1, `MustBaseEnvSet(1.36).NewExpressionsEnv()`).
+    /// on the reference apiserver (`NewExpressionsEnv()` of its base
+    /// environment).
     fn assert_accepted(exprs: &[&str]) {
         assert_accepted_in(Scope::Crd, exprs);
     }
 
     /// The check must refuse none of `exprs`, all of which the apiserver
-    /// accepts in `scope`: each was compiled with the Go oracle (`k8s.io/apiserver`
-    /// v0.36.1), a CRD rule through `ValidateCustomResourceDefinition`, a
+    /// accepts in `scope`: each was compiled with the Go oracle on the reference
+    /// apiserver, a CRD rule through `ValidateCustomResourceDefinition`, a
     /// policy expression through the admission compiler with params, the
     /// authorizer and a variable `foo`.
     fn assert_accepted_in(scope: Scope, exprs: &[&str]) {
@@ -888,8 +889,8 @@ mod tests {
                 "true || slef.x == 1",
                 "true || [kubernetes.Quantity{}].size() == 1",
                 "true || [kubernetes.authorization.Authorizer{}].size() == 1",
-                // No `spec.variables` (checked on v1.36.1: "undeclared
-                // reference to 'variables'").
+                // No `spec.variables` (checked on the reference apiserver:
+                // "undeclared reference to 'variables'").
                 "true || variables.foo == 1",
                 "true || variables == null",
                 "true || [kubernetes.variables{}].size() == 1",
@@ -957,8 +958,8 @@ mod tests {
 
     /// `.x` naming a macro's variable `x` is refused: the apiserver reads the
     /// macro's `x` (`[dyn(1)].all(namespaceObject, .namespaceObject == null)`
-    /// is false on v1.36.1), `cel` a name outside the macros, such as a
-    /// policy's null `namespaceObject`.
+    /// is false on the reference apiserver), `cel` a name outside the macros,
+    /// such as a policy's null `namespaceObject`.
     #[test]
     fn dotted_reference_to_a_macro_variable_is_refused() {
         assert_refused_in(Scope::Crd, &[
@@ -1012,8 +1013,8 @@ mod tests {
     }
 
     /// `params` exists only in a policy with a `paramKind`: the apiserver
-    /// refuses `true || params.x == 1` in one without (checked on v1.36.1),
-    /// and a macro may still bind the name.
+    /// refuses `true || params.x == 1` in one without (checked on the
+    /// reference apiserver), and a macro may still bind the name.
     #[test]
     fn params_needs_a_param_kind() {
         let expr = "true || params.x == 1";

@@ -482,7 +482,7 @@ mod tests {
     use crate::functions::eval;
 
     // Expected values are cel-go v0.26 (go1.26.2 strconv) through the
-    // apiserver's environment (k8s.io/apiserver v0.36.1).
+    // reference apiserver's environment.
 
     #[test]
     fn strings_convert_as_go_s_strconv() {

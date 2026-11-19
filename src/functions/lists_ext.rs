@@ -382,7 +382,7 @@ mod tests {
 
     #[test]
     fn sort_by_orders_ties_as_go() {
-        // go1.26.2 sort.Slice, through cel-go v0.26 on k8s.io/apiserver v0.36.1.
+        // go1.26.2 sort.Slice, through cel-go v0.26 on the reference apiserver.
         holds("lists.range(13).sortBy(x, x % 2) == [8, 12, 2, 0, 4, 10, 6, 3, 7, 9, 5, 11, 1]");
         holds("lists.range(12).sortBy(x, x % 2) == [0, 2, 4, 6, 8, 10, 1, 3, 5, 7, 9, 11]");
         holds("lists.range(20).sortBy(x, 0) == lists.range(20)");

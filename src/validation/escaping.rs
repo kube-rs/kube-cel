@@ -153,7 +153,7 @@ pub(crate) fn go_unescape(escaped: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// `cel.Unescape` (apiserver v0.36.1, `pkg/cel/escaping.go`).
+    /// `cel.Unescape` (the reference apiserver's `pkg/cel/escaping.go`).
     #[test]
     fn go_unescape_follows_the_apiserver() {
         for (name, want) in [
@@ -172,7 +172,7 @@ mod tests {
         }
     }
 
-    /// `cel.Escape` (apiserver v0.36.1, `pkg/cel/escaping.go`).
+    /// `cel.Escape` (the reference apiserver's `pkg/cel/escaping.go`).
     #[test]
     fn go_escape_follows_the_apiserver() {
         for (name, want) in [

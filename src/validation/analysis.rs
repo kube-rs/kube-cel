@@ -48,7 +48,7 @@ pub enum WarningKind {
 
 fn valid_variables(scope: ScopeContext) -> &'static [&'static str] {
     match scope {
-        // As the apiserver declares them (v1.36.1). A policy's `params` and
+        // As the reference apiserver declares them. A policy's `params` and
         // `variables` depend on its spec, which this check does not see, so
         // both are taken.
         ScopeContext::CrdValidation => &["self", "oldSelf"],

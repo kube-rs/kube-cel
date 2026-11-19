@@ -708,7 +708,7 @@ mod tests {
         }
     }
 
-    // Expected values below are cel-go's, from k8s.io/apiserver v0.36.1's base
+    // Expected values below are cel-go's, from the reference apiserver's base
     // environment (go1.26.2, `TZ=UTC`).
 
     #[test]

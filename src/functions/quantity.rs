@@ -1,7 +1,7 @@
 //! Kubernetes CEL quantity extension functions.
 //!
-//! A port of what k8s.io/apimachinery v0.36.1's `resource.Quantity` does for
-//! the apiserver's quantity library (`k8s.io/apiserver/pkg/cel/library/quantity.go`):
+//! A port of what `resource.Quantity` (k8s.io/apimachinery, as the reference
+//! apiserver has it) does for the apiserver's quantity library (`k8s.io/apiserver/pkg/cel/library/quantity.go`):
 //! `ParseQuantity`, which keeps a quantity either as an `int64Amount` (an int64
 //! times a power of ten, as written) or as an `inf.Dec` rounded up to nano
 //! units, and the methods the library calls (`AsInt64`, `AsApproximateFloat64`,

@@ -6,7 +6,7 @@
 //! quicksort, from 13 elements on (below that it is an insertion sort, which
 //! keeps them in order). This is a port of go1.26.2's `pdqsort_func`
 //! (`src/sort/zsortfunc.go`, with `Slice` from `slice.go` and `xorshift` from
-//! `sort.go`), the toolchain kube-apiserver v1.36.1 is built with, so the
+//! `sort.go`), the reference apiserver's toolchain, so the
 //! order is the apiserver's, ties included. Any other pdqsort, or breaking ties
 //! by index, orders equal keys differently. Keep it line for line with the Go
 //! source when porting a newer release.

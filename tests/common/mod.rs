@@ -1133,7 +1133,7 @@ pub fn cases() -> Vec<ParityCase> {
             expect: Expect::Accept,
             note: "format:byte binds as bytes → size()==5 → ACCEPT (F3)",
         },
-        // ── Kubernetes functions vs apiserver v1.36.1 ─────────────────────────
+        // ── Kubernetes functions vs the reference apiserver ───────────────────
         //
         // Quantity comparison: i128::MAX against i128::MAX + 3 written with an
         // exponent. The scales differ, aligning them overflowed i128, and
@@ -1155,7 +1155,7 @@ pub fn cases() -> Vec<ParityCase> {
             note: "quantities 3 apart beyond i128 scaling compare exactly (-1) → ACCEPT",
         },
         // URI validity: `isURL`, `url()` and `format.uri()` are Go's
-        // `url.ParseRequestURI` (go1.26.2 in kube-apiserver v1.36.1): a bad
+        // `url.ParseRequestURI` (go1.26.2 in the reference apiserver): a bad
         // `%` escape, a control byte, a leading space, and (http/https only) a
         // second colon in the host are refused. The WHATWG parse kube-cel used
         // repaired or accepted each of them.
@@ -3820,8 +3820,8 @@ pub fn cases() -> Vec<ParityCase> {
             expect: Expect::RegistrationRejected,
             note: "messageExpression syntax error on an omitted property → rejected at registration",
         },
-        // The apiserver has no nesting limit (v1.36.1 registered a 400-level
-        // CRD), so a valid rule past 64 levels below a shallow object passes on
+        // The apiserver has no nesting limit (the reference apiserver registered
+        // a 400-level CRD), so a valid rule past 64 levels below a shallow object passes on
         // both sides; kube-cel still compiles it, and refuses one that does not
         // compile. (An object that reaches past 64 levels is kube-cel's
         // fail-closed `SchemaTooDeep`, in tests/apiserver_divergence.rs.)

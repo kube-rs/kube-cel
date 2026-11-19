@@ -2,8 +2,8 @@
 //! it: `IsDate` / `IsDateTime` check a `format: date` / `format: date-time`
 //! value (OpenAPI validation, and the `format.date()` / `format.datetime()`
 //! library), and `ParseDateTime` binds a `format: date-time` value for CEL.
-//! kube-openapi v0.0.0-20260317180543-43fb72c5454a, the version
-//! k8s.io/apiserver v0.36.1 requires.
+//! kube-openapi v0.0.0-20260317180543-43fb72c5454a, the version the reference
+//! apiserver requires.
 
 /// A non-empty run of ASCII digits. Go's `time.Parse` (and strfmt's RFC3339
 /// regex `[0-9]{2}`) accept only digits in numeric fields, but Rust's

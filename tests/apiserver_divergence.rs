@@ -25,10 +25,12 @@
 //! change silently. The human-readable summary lives in
 //! `docs/apiserver-divergence.md`; keep the two in sync.
 //!
-//! Measured against `cel` 0.16, with ground truth from the apiserver's base
-//! CEL environment (`k8s.io/apiserver` v0.36.1,
-//! `environment.MustBaseEnvSet(1.36).NewExpressionsEnv()`). `cel` has no type
-//! checker, so kube-cel walks each rule's AST at compile time and refuses a
+//! Measured against `cel` 0.16, with ground truth from the reference
+//! apiserver (the `kind_node_image` the justfile pins) and its base CEL
+//! environment (`environment.MustBaseEnvSet(..).NewExpressionsEnv()`): "the
+//! apiserver" below is that one unless a version is named. "Go oracle" is a Go
+//! program that links its libraries; "kind" is a live cluster running it.
+//! `cel` has no type checker, so kube-cel walks each rule's AST at compile time and refuses a
 //! call to a function the apiserver does not declare (`cel.bind`, `math.*`,
 //! `isIPv4`, `base64.*`, a global `min(..)`, ...), and an identifier not
 //! declared where it appears, as [`ErrorKind::CompilationFailure`], even in a
@@ -241,7 +243,7 @@ fn undeclared_identifiers_fail_closed() {
 /// `.x` naming a macro's variable `x`: cel-go resolves it to the macro's
 /// variable, `cel` looks it up outside the macros, where it may be another
 /// value altogether: `[dyn(1)].all(namespaceObject, .namespaceObject == null)`
-/// is false on v1.36.1 (the macro's `1`), while kube-cel's policy
+/// is false on the apiserver (the macro's `1`), while kube-cel's policy
 /// `namespaceObject` is null. kube-cel refuses such a reference at compile
 /// time, so a rule the apiserver registers and evaluates is rejected.
 #[test]
@@ -265,7 +267,7 @@ fn dotted_macro_variable_fails_closed() {
 
 /// `.self` and `.oldSelf` in a CRD rule: the leading dot names the rule's
 /// `self` / `oldSelf`, and the apiserver evaluates `.self.kind == self.kind`
-/// to true (Go oracle, v0.36.1). kube-cel binds them per schema node, in an
+/// to true (Go oracle). kube-cel binds them per schema node, in an
 /// inner scope of its shared root context, and `cel` looks a leading-dot name
 /// up at the root only, so evaluation reaching one fails with
 /// `UnsupportedReference`. (A policy's variables are bound at the root, so
@@ -304,7 +306,7 @@ fn dotted_self_fails_closed() {
 /// (`dyn` gets it past the type checker), or between an object holding fields
 /// its schema does not declare and a map that is not of its kind, is the
 /// apiserver's no-such-overload error, and cel-go's `!=` is
-/// `Equal(..) != true`, so there `!=` holds (Go oracle, kind v1.36.1). `cel`'s
+/// `Equal(..) != true`, so there `!=` holds (Go oracle and kind). `cel`'s
 /// equality can only answer true or false, so kube-cel refuses both.
 #[test]
 fn equality_with_another_kind_fails_closed() {
@@ -331,7 +333,7 @@ fn equality_with_another_kind_fails_closed() {
 /// A two-variable comprehension over an object holding fields its schema
 /// does not declare: the apiserver iterates an undeclared key as `null` and
 /// binds its value as an error, which a body that ignores it never reads
-/// (`all(k, v, true)` holds; Go oracle, kind v1.36.1). `cel` looks the value
+/// (`all(k, v, true)` holds; Go oracle and kind). `cel` looks the value
 /// up as it binds it, and the lookup of `null` fails the comprehension.
 #[test]
 fn two_variable_comprehension_over_undeclared_fields_fails_closed() {
@@ -356,7 +358,7 @@ fn two_variable_comprehension_over_undeclared_fields_fails_closed() {
 /// The apiserver's set `+` keeps state on its receiver: it adds the new keys
 /// to the receiver's cached set, which a later `+` or `==` on that receiver
 /// reads, and appends into the receiver's slice, whose spare capacity
-/// another `+` on the same elements may share (Go oracle, kind v1.36.1).
+/// another `+` on the same elements may share (Go oracle and kind).
 /// kube-cel computes each `+` afresh and refuses the rule where that state
 /// could change the outcome, though here the apiserver accepts.
 #[test]
@@ -408,7 +410,7 @@ fn set_add_state_fails_closed() {
 /// by it. kube-cel holds an `additionalProperties` map as a plain map, whose
 /// Go value (its decoded map) it cannot tell from a CEL-built map's, so the
 /// rule is refused; the apiserver binds or keys the decoded map
-/// (`!has(..x)` and `self.m == dyn(self.r)` hold; Go oracle, kind v1.36.1).
+/// (`!has(..x)` and `self.m == dyn(self.r)` hold; Go oracle and kind).
 #[test]
 fn plain_map_against_a_map_list_fails_closed() {
     let schema = json!({
@@ -496,7 +498,7 @@ fn map_list_four_keys_with_a_float_fail_closed() {
 /// `baseMap.Equal`); and `cel`'s `in` asks the list's element, where cel-go's
 /// `baseList.Contains` asks the searched value. cel-rust#462 fixes both (the
 /// `in` direction included). These assertions pin today's verdicts, each the
-/// apiserver's opposite (Go oracle, kind v1.36.1), so they fail once `cel`
+/// apiserver's opposite (Go oracle and kind), so they fail once `cel`
 /// carries the fix: then drop this test and its row in `docs/apiserver-divergence.md`, before
 /// 0.9.0. kube-cel builds no workaround.
 ///
@@ -566,7 +568,7 @@ fn cel_built_operand_until_cel_rust_462() {
 /// `+` stores what it adds, and the apiserver binds an element under the
 /// list's items when it reads it: one they refuse is an error value then,
 /// which a comprehension's body may not read (`all(x, true)` holds; Go
-/// oracle, kind v1.36.1). kube-cel binds it lazily too, so `size()` and
+/// oracle and kind). kube-cel binds it lazily too, so `size()` and
 /// `|| true` agree, but `cel` iterates values, not errors, so iterating it is
 /// refused.
 #[test]
@@ -603,8 +605,8 @@ fn iterating_a_refused_added_element_fails_closed() {
 /// An element `+` added binds lazily, and so does each field of it, but a
 /// list or map field binds its values at once: one value its schema refuses
 /// makes the whole field an error where read, while the apiserver binds the
-/// field's values only as they are read (`x.size() == 2` holds; Go oracle,
-/// kind v1.36.1).
+/// field's values only as they are read (`x.size() == 2` holds; Go oracle
+/// and kind).
 #[test]
 fn nested_field_of_an_added_element_fails_closed() {
     let map_of = |x: serde_json::Value| {
@@ -637,7 +639,7 @@ fn nested_field_of_an_added_element_fails_closed() {
 }
 
 /// The apiserver's `unknownPreserved` fails every operation but `==` and a
-/// field test, and `|| true` absorbs the error (Go oracle, kind v1.36.1).
+/// field test, and `|| true` absorbs the error (Go oracle and kind).
 /// `cel` reads the value's type for `type()`, which cannot fail, and for
 /// overload lookup and error messages too; kube-cel refuses every such read,
 /// so the absorbed forms are refused, but for indexing, which errors
@@ -673,7 +675,7 @@ fn absorbed_operation_on_a_preserved_value_fails_closed() {
 
 /// A set held in a list or map is bound afresh on each `Get` / `Find`, so a
 /// variable holding the whole container carries no `+` state between two
-/// reads of the set (Go oracle, kind v1.36.1). `cel` copies the set when it
+/// reads of the set (Go oracle and kind). `cel` copies the set when it
 /// copies its container, through the same `clone_as_boxed` as when a
 /// variable holds the set itself (`[self.l[0]]`, where the state does
 /// carry), so kube-cel keeps one wrapper and refuses the second `+`.
@@ -706,7 +708,7 @@ fn set_in_a_held_container_fails_closed() {
 }
 
 /// A presence test on a scalar: the apiserver's cel-go answers `has()` with
-/// false and `.?` with none (Go oracle, kind v1.36.1), while `cel` refuses
+/// false and `.?` with none (Go oracle and kind), while `cel` refuses
 /// it, as cel-spec has it. An `optionalOldSelf` rule's `oldSelf.value()`
 /// holds a typeless preserve-unknown value as a plain scalar, so it reaches
 /// this too.
@@ -741,7 +743,7 @@ fn presence_test_on_a_scalar_fails_closed() {
 }
 
 /// `variables` is declared for a policy with `spec.variables` only
-/// (`undeclared reference to 'variables'` without, checked on v1.36.1).
+/// (`undeclared reference to 'variables'` without, checked on the apiserver).
 /// kube-cel does not model `spec.variables`, so it refuses every expression
 /// naming `variables`, also in a policy that defines it, which the apiserver
 /// registers and evaluates.
@@ -754,7 +756,7 @@ fn policy_variables_fail_closed() {
 /// Names the apiserver declares and evaluates but `cel` cannot: type names
 /// with no `cel` value (`net.IP`, `google.protobuf.Empty`), the protobuf
 /// `NullValue` constant and a message construction. Each evaluates to true on
-/// the apiserver (Go oracle, v0.36.1). They compile in kube-cel, as the
+/// the apiserver (Go oracle). They compile in kube-cel, as the
 /// apiserver registers them, and fail closed when evaluation reaches them.
 #[test]
 #[cfg(feature = "ip")]
@@ -1062,7 +1064,7 @@ fn no_type_checker_fails_open() {
 //            past the budget ("estimated rule cost exceeds budget": a list
 //            with no `maxItems` iterated twice), and stops an evaluation past
 //            the per-expression cost limit, rejecting the object ("actual cost
-//            limit exceeded"). Both checked on v1.36.1.
+//            limit exceeded"). Both checked on the apiserver.
 // kube-cel:  `cel` has no cost model yet (on its roadmap, cel-rust discussion
 //            #230), so these rules evaluate, and pass. Pinned so the gap is
 //            visible, and so this test fails (and gets updated) once one
@@ -1218,7 +1220,7 @@ fn runtime_error_chains_its_cause() {
 // ── Quantity arithmetic past i128 — fails CLOSED ───────────────────────────
 // apiserver: quantities are exact `inf.Dec`, so
 //            `quantity('2e38').add(quantity('1')).isGreaterThan(quantity('2e38'))`
-//            holds (k8s.io/apiserver v0.36.1 `MustBaseEnvSet(1.36)`).
+//            holds.
 // kube-cel:  a quantity is an i128 mantissa and a scale; `add` / `sub` whose
 //            result does not fit is an EvaluationError instead of a panic or
 //            a wrapped value, even where CEL absorbs the error (`|| true`):
@@ -1247,8 +1249,7 @@ fn quantity_arithmetic_past_i128_fails_closed() {
 //            (`quantity('1e4294967296') == quantity('1')` holds), parses
 //            `1e1001` and quantities whose mantissa is past `i128`, and
 //            near the int32 bounds computes a power of ten of hundreds of MiB
-//            (`0.1e-2147483647`) or panics (k8s.io/apiserver v0.36.1
-//            `MustBaseEnvSet(1.36)`).
+//            (`0.1e-2147483647`) or panics.
 // kube-cel:  supports exponents and scales within ±1000 and a mantissa
 //            within `i128`. A rule or VAP expression that reaches a quantity past
 //            them fails with an EvaluationError, even where CEL absorbs the
@@ -1307,8 +1308,7 @@ fn quantity_past_supported_range_fails_closed() {
 
 // ── A regular expression past the regex crate's limits — fails CLOSED ─────
 // apiserver: compiles regular expressions with Go's `regexp`, whose size and
-//            nesting limits are higher (k8s.io/apiserver v0.36.1
-//            `MustBaseEnvSet(1.36)`).
+//            nesting limits are higher.
 // kube-cel:  parses a pattern with a port of Go's parser and translates it for
 //            the `regex` crate, which refuses a nesting past about 250 levels
 //            and a compiled size past 128 MiB: a pattern the apiserver compiles
@@ -1377,8 +1377,7 @@ fn regex_unicode_tables_fail_closed() {
 // ── A timestamp offset of a day or more — fails CLOSED ─────────────────────
 // apiserver: cel-go parses `timestamp(string)` with Go's
 //            `time.Parse(time.RFC3339, ..)`, which takes a zone offset up to
-//            hour 24 and minute 60 (`+24:60`; `+23:60` is `+24:00`)
-//            (k8s.io/apiserver v0.36.1 `MustBaseEnvSet(1.36)`).
+//            hour 24 and minute 60 (`+24:60`; `+23:60` is `+24:00`).
 // kube-cel:  ports that parser (src/functions/cel_time.rs), but `chrono`
 //            holds an offset under 24 hours, so such a timestamp is an
 //            EvaluationError, even where CEL absorbs the error: noted as
@@ -1435,7 +1434,7 @@ fn date_time_the_binding_refuses_fails_closed() {
         })
     };
     // The apiserver accepts each of these with `rule: true`, and the last two
-    // also with the rule reading the value (checked on v1.36.1).
+    // also with the rule reading the value.
     for (value, rule) in [
         ("2024-01-15t10:30:00z", "true"),
         ("2024-01-15T10:30:00+99:99", "true"),
@@ -1500,8 +1499,7 @@ fn double_of_a_decimal_go_reads_two_ways_fails_closed() {
 
 // ── Timestamp getters without a time zone — fail OPEN until cel-rust#460 ──
 // apiserver: cel-go reads `getHours()` and the other getters without a zone
-//            argument in UTC, as the CEL spec says (k8s.io/apiserver v0.36.1
-//            `MustBaseEnvSet(1.36)`).
+//            argument in UTC, as the CEL spec says.
 // kube-cel:  `cel` 0.16 reads them in the timestamp's own offset.
 
 /// The getters without a time zone on a timestamp with a non-zero offset:
@@ -1546,7 +1544,7 @@ fn timestamp_getters_without_a_zone_until_cel_rust_460() {
 // ── URL components that are not UTF-8 — fail CLOSED ────────────────────────
 // apiserver: `getHost()`, `getHostname()` and `getQuery()` return Go's unescaped
 //            bytes as a string, valid UTF-8 or not (`url('http://h%80x/')`
-//            has the host bytes `h\x80x`; k8s.io/apiserver v0.36.1).
+//            has the host bytes `h\x80x`).
 // kube-cel:  a CEL string must be UTF-8, so such a component is an
 //            EvaluationError rather than a different string, even where CEL
 //            absorbs the error (noted as unsupported, as an absorbed error
@@ -1586,8 +1584,8 @@ fn url_component_not_utf8_fails_closed() {
 //            accept every rule below.
 // kube-cel:  concatenates afresh, and refuses any bytes `+` evaluation reaches
 //            (noted as unsupported), even where the apiserver's outcome holds
-//            or CEL absorbs it. The refusal stays when the reference moves to
-//            v1.38: older versions in kube's window alias.
+//            or CEL absorbs it. A window refusal: it stays while the window
+//            holds v1.37 or older, which alias.
 
 #[test]
 fn bytes_concatenation_fails_closed() {
@@ -1639,8 +1637,8 @@ fn bytes_concatenation_fails_closed() {
 //            evaluation that ordered a NaN (noted as unsupported), so where CEL
 //            absorbs the comparison the rule is refused. `==` / `!=` with a
 //            NaN, and the list functions that order one, agree with every
-//            version and are left alone. The refusal stays when the reference
-//            moves to v1.38.
+//            version and are left alone. A window refusal: it stays while the
+//            window holds v1.37 or older.
 
 #[test]
 fn nan_ordering_fails_closed() {
@@ -1668,8 +1666,7 @@ fn nan_ordering_fails_closed() {
 //            operands of a two-operand call even when the first fails, and its
 //            quantities share state: `add` / `sub` write into the receiver's
 //            inf.Dec, `compareTo` / `isGreaterThan` / `isLessThan` turn an
-//            int64Amount receiver into an inf.Dec (k8s.io/apiserver v0.36.1
-//            `MustBaseEnvSet(1.36)`).
+//            int64Amount receiver into an inf.Dec.
 // kube-cel:  keeps the state, but `cel` 0.16 evaluates the arguments first and
 //            skips the second operand after a failure, so an update of a
 //            quantity held by a variable (a comprehension's, or reached through
@@ -1722,7 +1719,7 @@ fn quantity_update_in_an_order_dependent_position_fails_closed() {
 // ── Quantity `!=` with an add/sub result on the right — fails CLOSED ────────
 // apiserver: `add` / `sub` return a pointer, which the right side of `Equal`
 //            refuses: `quantity('2') == quantity('1').add(1)` is an error, while
-//            `!=` is true (k8s.io/apiserver v0.36.1 `MustBaseEnvSet(1.36)`).
+//            `!=` is true.
 // kube-cel:  `cel`'s `==` and `!=` share one comparison that cannot fail or
 //            tell them apart, so the comparison is noted and the rule refused
 //            either way.
@@ -1778,7 +1775,7 @@ fn old_self_registration_rules_fail_closed() {
 }
 
 // ── Schema depth cap — fails CLOSED since S4 (P1-A); used to fail OPEN ───────
-// apiserver: has no nesting limit: v1.36.1 registers a 400-level CRD and
+// apiserver: has no nesting limit: it registers a 400-level CRD and
 //            evaluates a rule 70 levels down (accepts `self >= 0` on 1, rejects
 //            it on -1).
 // kube-cel:  an object that reaches past MAX_SCHEMA_DEPTH (64) gets a
@@ -1839,8 +1836,8 @@ fn invalid_message_expression_fails_closed() {
 
 // ── A messageExpression reaching a refused value — the message differs ────
 // apiserver: evaluates the `messageExpression` of a failing rule, and falls
-//            back to the static `message` only where it fails (v1.36.1 Go
-//            oracle): `static` for an ordering of a NaN and a quantity `==`
+//            back to the static `message` only where it fails (Go oracle):
+//            `static` for an ordering of a NaN and a quantity `==`
 //            with an `add` result on the right, but `v=ab` for
 //            `'v=' + string(b'a' + b'b')` and `y` for a timestamp with a
 //            24-hour offset.
@@ -1889,7 +1886,7 @@ fn message_expression_reaching_a_refused_value_falls_back() {
 //            `a.b/c` became `a__dot__b__slash__c`, `'a.b/c' in self.m` was always
 //            false, and the object was ACCEPTED — a fail-OPEN divergence.
 //
-// Ground truth measured against a live kind cluster (k8s v1.36.1): applying a CR
+// Ground truth measured against a live kind cluster (the reference apiserver): applying a CR
 // with `spec.m = {"a.b/c": "x"}` against this exact schema is rejected by the
 // apiserver with the rule's message; a CR with a harmless key is accepted.
 

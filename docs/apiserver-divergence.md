@@ -1,7 +1,21 @@
 # apiserver divergence
 
-The validation pipeline aims to return the same verdict the Kubernetes API
-server would, client-side, for the CEL rules; OpenAPI value validation is out
+**Reference:** kube-apiserver v1.36.1 (cel-go v0.26), the `kind_node_image`
+pin in the `justfile` that `just parity` runs; the code, the tests and the
+rest of this file call it "the reference apiserver". **Window:** from 1.33,
+kube's minimum supported Kubernetes version, up to the reference. kube-cel
+aims to fail closed across the window: where the reference accepts what an
+older version in it rejects, a window refusal below covers it. Function
+availability is not covered yet: kube-cel declares the reference's base
+environment, so a rule calling a semver function (in the base environment
+from 1.34) or an `ext.Lists` function (`slice`, `flatten`, `lists.range`,
+`distinct`, `reverse`, `sort`, `sortBy`; from 1.35) passes client-side and
+fails to register on an older apiserver. For functions the window starts at
+1.35 until kube-cel can target a version
+([#16](https://github.com/kube-rs/kube-cel/issues/16)).
+
+The validation pipeline aims to return the same verdict the reference
+apiserver would, client-side, for the CEL rules; OpenAPI value validation is out
 of scope (a value of the wrong type, a `null` list item, a missing `required`
 field, an `enum`, `pattern` or length bound pass client-side unless a rule
 catches them). Where it cannot today, it diverges **fail-closed** —
@@ -54,8 +68,8 @@ divergences are pinned by
 | A `format: date-time` value `strfmt.IsDateTime` takes and `strfmt.ParseDateTime` refuses (`t` / `z` in lowercase, an offset hour past 24 or minute past 60 such as `+99:99` or `+05:61`, a trailing `tXYZ`, `10:30:00x5Z`), or one with a zone offset of 24 hours or more (`+24:00`) | passes the object; binds an error (refused only by a rule reading the field), or the 24-hour offset | `EvaluationError` at the field, whatever the rules read: kube-cel cannot bind an error value (`==` on it would answer), nor hold a 24-hour offset | fail-closed |
 | `double(string)` of a decimal with more than 800 significant digits, trailing zeros included, read two ways by Go (`'1' + 800 zeros + 'e-800'`) | Go's `strconv.ParseFloat` gives the Eisel-Lemire value (`1.0`) or, where that step gives up, a decimal of 800 digits that drops the magnitude of the rest (`0.1`) | `EvaluationError` where the two readings differ, even where CEL absorbs the error (`… \|\| true`); a literal one compiles | fail-closed |
 | A URL component that is not UTF-8 once unescaped (`url('http://h%80x/').getHost()`) | returns the bytes as a string | `EvaluationError` (a CEL string here must be UTF-8), even where CEL absorbs the error (`… \|\| true`) | fail-closed |
-| A bytes `+` evaluation reaches, where its outcome holds (`b'abc' + b'1' == b'abc1'`, `[b'abc'].all(x, [x + b'1', x + b'2'][0] == b'abc1') \|\| true`, a `format: byte` field whose decoded buffer has no spare capacity) | evaluates; but v1.33 to v1.37 (cel-go before v0.30) append into the left value's spare capacity, so a later `+` on the same value writes over an earlier result: `[b'abc'].all(x, [x + b'1', x + b'2'][0] == b'abc1')` is false there, as is `[b'1', b'2'].map(y, b'abc' + y)[0] == b'abc1'` (a literal keeps one array across a loop); v1.38 copies ([cel-go#1381](https://github.com/cel-expr/cel-go/pull/1381)) | `EvaluationError` for any bytes `+` evaluation reaches, even where CEL absorbs it: the capacity hangs on Go's allocator (a literal or `bytes(s)` rounds up to a size class, a `format: byte` field keeps the base64 decoder's buffer), which kube-cel does not model. A window refusal: it stays when the reference moves to v1.38 | fail-closed |
-| An ordering comparison (`<`, `<=`, `>`, `>=`) with a NaN operand whose error CEL absorbs (`!(double('NaN') < 1.0) \|\| true`, `[double('NaN'), 0.5].exists(x, x < 1.0)`) | evaluates: v1.33 to v1.37 (cel-go before v0.30) fail the comparison ("NaN values cannot be ordered") and absorb the error; v1.38 answers false ([cel-go#1370](https://github.com/cel-expr/cel-go/pull/1370)), so `!(double('NaN') < 1.0)` passes there and fails before | `EvaluationError` for an evaluation that ordered a NaN, even where CEL absorbs it: kube-cel evaluates the comparison to false, as v1.38 does, and refuses the rule. A window refusal: it stays when the reference moves to v1.38. `==` / `!=` with a NaN and the list functions that order one (`sort()`, `sortBy`, `min()`, `max()`, `isSorted()`) agree with every version, and are left alone | fail-closed |
+| A bytes `+` evaluation reaches, where its outcome holds (`b'abc' + b'1' == b'abc1'`, `[b'abc'].all(x, [x + b'1', x + b'2'][0] == b'abc1') \|\| true`, a `format: byte` field whose decoded buffer has no spare capacity) | evaluates; but v1.33 to v1.37 (cel-go before v0.30) append into the left value's spare capacity, so a later `+` on the same value writes over an earlier result: `[b'abc'].all(x, [x + b'1', x + b'2'][0] == b'abc1')` is false there, as is `[b'1', b'2'].map(y, b'abc' + y)[0] == b'abc1'` (a literal keeps one array across a loop); v1.38 copies ([cel-go#1381](https://github.com/cel-expr/cel-go/pull/1381)) | `EvaluationError` for any bytes `+` evaluation reaches, even where CEL absorbs it: the capacity hangs on Go's allocator (a literal or `bytes(s)` rounds up to a size class, a `format: byte` field keeps the base64 decoder's buffer), which kube-cel does not model. A window refusal: it stays while the window holds v1.37 or older | fail-closed |
+| An ordering comparison (`<`, `<=`, `>`, `>=`) with a NaN operand whose error CEL absorbs (`!(double('NaN') < 1.0) \|\| true`, `[double('NaN'), 0.5].exists(x, x < 1.0)`) | evaluates: v1.33 to v1.37 (cel-go before v0.30) fail the comparison ("NaN values cannot be ordered") and absorb the error; v1.38 answers false ([cel-go#1370](https://github.com/cel-expr/cel-go/pull/1370)), so `!(double('NaN') < 1.0)` passes there and fails before | `EvaluationError` for an evaluation that ordered a NaN, even where CEL absorbs it: kube-cel evaluates the comparison to false, as v1.38 does, and refuses the rule. A window refusal: it stays while the window holds v1.37 or older. `==` / `!=` with a NaN and the list functions that order one (`sort()`, `sortBy`, `min()`, `max()`, `isSorted()`) agree with every version, and are left alone | fail-closed |
 | An object reaching more than 64 levels of schema nesting | no nesting limit; evaluates rules at any depth | `SchemaTooDeep` error | fail-closed |
 | Rule whose `messageExpression` does not compile (a syntax error, or a call refused above) | rejects the CRD at registration | `CompilationFailure` (the rule is rejected, not just its message) | fail-closed |
 | The `messageExpression` of a failing rule that reaches a value kube-cel refuses in a rule even where CEL absorbs it (the rows above that say so, a bytes `+`, an ordering of a NaN) | uses the message it computes, falling back to the static `message` only where it fails: `static` for `double('NaN') < 1.0 ? 'lt' : 'ge'` and `quantity('2') == quantity('1').add(1) ? 'eq' : 'ne'`, but `v=ab` for `'v=' + string(b'a' + b'b')`, `v=abc2` for an aliased bytes `+`, `y` for `timestamp('2024-01-15T10:30:00+24:00').getFullYear() == 2024 ? 'y' : 'n'` | the static `message` (or the default one), as for a `messageExpression` that fails: kube-cel cannot tell what the apiserver computes there | message only: the rule fails on both |
@@ -91,7 +105,7 @@ set; `variables` comes with `spec.variables`, which kube-cel does not model, so
 it does not compile; a macro's variables are declared inside the macro, and
 type names (`int`, `net.IP`, `google.protobuf.Timestamp`) everywhere.
 The declared function names
-(`src/validation/apiserver_functions.txt`, from the `k8s.io/apiserver` v0.36.1
+(`src/validation/apiserver_functions.txt`, from the reference apiserver's
 base environment) are checked against a live apiserver by `just parity`. CRD
 rules, their `messageExpression`s and VAP expressions share them, since the
 apiserver declares the same functions for all three. A function the apiserver declares but

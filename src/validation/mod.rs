@@ -1948,7 +1948,7 @@ mod tests {
     }
 
     /// A `messageExpression` that reaches a value kube-cel notes as
-    /// unsupported falls back as one that fails: the apiserver (v1.36.1) fails
+    /// unsupported falls back as one that fails: the reference apiserver fails
     /// the first two and gives `static`, and computes the bytes one, which
     /// kube-cel cannot be sure of. A plain one keeps its value.
     #[test]
@@ -2276,7 +2276,8 @@ mod tests {
     // ── allOf/oneOf/anyOf/not tests ──────────────────────────────────
 
     /// The apiserver refuses `x-kubernetes-validations` anywhere under a
-    /// combinator ("must be empty to be structural", checked on v1.36.1), so
+    /// combinator ("must be empty to be structural", checked on the reference
+    /// apiserver), so
     /// every entry point rejects the object with one root error per node,
     /// however the object fares against the rules.
     #[test]
@@ -2366,8 +2367,8 @@ mod tests {
     // ── x-kubernetes-preserve-unknown-fields tests ──────────────────
 
     /// The apiserver evaluates the rules under `additionalProperties` with
-    /// `x-kubernetes-preserve-unknown-fields` too (checked on v1.36.1; parity
-    /// row `PpresApRule`).
+    /// `x-kubernetes-preserve-unknown-fields` too (checked on the reference
+    /// apiserver; parity row `PpresApRule`).
     #[test]
     fn preserve_unknown_fields_still_walks_additional_properties() {
         let schema = json!({
@@ -2462,7 +2463,8 @@ mod tests {
 
     /// The apiserver declares no `apiVersion`, `apiGroup` or `kind` variable,
     /// so a rule naming one does not compile, with or without a
-    /// `RootContext` (checked on v1.36.1: "undeclared reference to 'kind'").
+    /// `RootContext` (checked on the reference apiserver: "undeclared
+    /// reference to 'kind'").
     #[test]
     #[allow(deprecated)]
     fn root_context_names_do_not_compile() {

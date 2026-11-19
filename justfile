@@ -2,11 +2,13 @@
 default:
     @just --list
 
-# Node image for the live-apiserver recipes (parity, probe): the Kubernetes
-# version the `tests/common` expectations were measured against (v1.36.1, cel-go
-# v0.26.0). Pinned by digest (the multi-arch index from the kind v0.32.0 release
-# notes) so a re-pushed tag cannot change the ground truth. Override with
-# KIND_NODE_IMAGE.
+# The reference apiserver: the one Kubernetes version kube-cel's verdicts follow
+# and the `tests/common` expectations were measured against, run by the
+# live-apiserver recipes (parity, probe). Code and tests say "the reference
+# apiserver"; only docs/apiserver-divergence.md, the README divergence summary
+# and the CHANGELOG section of the release name the version too. Pinned by
+# digest (the multi-arch index from the kind v0.32.0 release notes) so a
+# re-pushed tag cannot change the ground truth. Override with KIND_NODE_IMAGE.
 kind_node_image := env("KIND_NODE_IMAGE", "kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5")
 
 # The GitHub repository `release` reads CI results from and releases to.

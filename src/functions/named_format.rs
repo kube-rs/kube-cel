@@ -210,8 +210,8 @@ fn validate_format(kind: &FormatKind, s: &str) -> Vec<String> {
 
 // -- Kubernetes names --
 //
-// k8s.io/apimachinery v0.36.1, messages verbatim: `pkg/util/validation`'s
-// `IsDNS1123Label`, `IsDNS1123Subdomain` and `IsDNS1035Label` (behind
+// The reference apiserver's k8s.io/apimachinery, messages verbatim:
+// `pkg/util/validation`'s `IsDNS1123Label`, `IsDNS1123Subdomain` and `IsDNS1035Label` (behind
 // `pkg/api/validation`'s `NameIs*`, which the apiserver's formats call), and
 // `pkg/api/validate/content`'s `IsLabelKey` (`IsQualifiedName`) and
 // `IsLabelValue`. The two packages word a length error differently

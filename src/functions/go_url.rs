@@ -7,7 +7,7 @@
 //! splits off a `#fragment` first, and the accessors return that `url.URL`'s
 //! fields and methods: `Scheme`, `Host`, `Hostname()`, `Port()`,
 //! `EscapedPath()`, `Query()`, and `String()` for `==`. This is a port of those from go1.26.2,
-//! the toolchain kube-apiserver v1.36.1 is built with (`src/net/url/url.go`
+//! the reference apiserver's toolchain (`src/net/url/url.go`
 //! and the escaping rules of `gen_encoding_table.go`). Go strings are bytes:
 //! the unescaped host, path and user info are kept as bytes, which need not be
 //! UTF-8 (`%FF`).
@@ -753,7 +753,7 @@ mod tests {
     use super::parse_request_uri;
 
     // Every row was run through go1.26.2 `url.ParseRequestURI`, and the live
-    // apiserver (kind v1.36.1) agreed on each via `isURL`.
+    // reference apiserver (kind) agreed on each via `isURL`.
     const ACCEPTED: &[&str] = &[
         "foo://a:1:2/",
         "http://[fe80::1%25en0]:8080/",

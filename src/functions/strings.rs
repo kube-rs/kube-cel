@@ -502,7 +502,7 @@ mod tests {
 
     #[test]
     fn index_of_offsets_follow_cel_go_v026() {
-        // Each checked on kube-apiserver v1.36.1 (cel-go v0.26).
+        // Each checked on the reference apiserver (cel-go v0.26).
         // An offset at or past the length finds nothing for lastIndexOf.
         assert_eq!(eval("'hello'.lastIndexOf('o', 5)"), Value::Int(-1));
         assert_eq!(eval("'hello'.lastIndexOf('o', 4)"), Value::Int(4));

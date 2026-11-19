@@ -225,7 +225,7 @@ mod tests {
 
     #[test]
     fn test_accessors_follow_go_url() {
-        // Expected values from k8s.io/apiserver v0.36.1 (go1.26.2 net/url).
+        // Expected values from the reference apiserver (go1.26.2 net/url).
         let s = |expr: &str| match eval(expr) {
             Value::String(s) => (*s).clone(),
             other => panic!("{expr}: {other:?}"),

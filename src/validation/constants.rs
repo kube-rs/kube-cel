@@ -208,8 +208,8 @@ mod tests {
         super::check(program.expression()).is_err()
     }
 
-    // Expected verdicts are the apiserver's at registration (k8s.io/apiserver
-    // v0.36.1, `env.Program` with `OptOptimize`).
+    // Expected verdicts are the reference apiserver's at registration
+    // (`env.Program` with `OptOptimize`).
 
     #[test]
     fn refuses_a_conversion_of_a_constant_that_fails() {
